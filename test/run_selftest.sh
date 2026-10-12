@@ -2,7 +2,7 @@
 # llm-request-tollgate 自测: 对本地假上游跑代理, 按用例断言 (设计 §4.7)。
 #
 # 用法: test/run_selftest.sh <case|all>
-#   case: alias | keyenv | fallback | breaker | ratelimit | usage | stream | logging | overhead
+#   case: alias | keyenv | fallback | breaker | budget | rotate | ratelimit | usage | stream | logging | overhead
 # 每个用例独立起一个假上游 + 一个代理 (各自端口, 互不干扰)。
 set -u
 
@@ -239,6 +239,96 @@ EOF
     && pass "恢复后日志 upstream=flaky" || fail "恢复后日志上游不对"
 }
 
+case_budget() {
+  say "=== budget (定时扫日志重建窗口累计, 满额拒服务 D12) ==="
+  local LOG="$TMP/log-budget.jsonl"
+  rm -f "$LOG" "$TMP/hdr-budget.txt"
+  local TS
+  TS=$(python3 -c "import datetime;print(datetime.datetime.now(datetime.timezone.utc).isoformat())")
+  # 预写 2 条近 1h 的成功记录: 每笔 total=50, 3h 窗口 (max 30) 已超, 12h/24h 未满。
+  local i
+  for i in 1 2; do
+    printf '{"ts":"%s","logical":"test-model","upstream":"fu","model":"deepseek-v4.1-flash","usage":{"prompt":7,"completion":43,"total":50},"missing_usage":false}\n' "$TS" >>"$LOG"
+  done
+  cat >"$TMP/cfg-budget.json" <<EOF
+{
+  "listen": "127.0.0.1:18820",
+  "log_path": "$LOG",
+  "timeouts": { "connect_ms": 1000, "response_header_ms": 5000, "stream_idle_ms": 3000, "queue_wait_ms": 10000 },
+  "upstreams": [
+    { "id": "fu", "base_url": "http://127.0.0.1:19020/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true, "budget": { "windows": { "3h": 30, "12h": 70, "24h": 100 }, "refresh_sec": 1 }, "limits": { "rate_per_sec": 100, "burst": 10, "concurrency": 10 } }
+  ],
+  "aliases": { "test-model": [["fu", "deepseek-v4.1-flash"]] }
+}
+EOF
+  start_fake 19020 20
+  start_proxy 18820 "$TMP/cfg-budget.json"
+
+  local BODY='{"model":"test-model","messages":[{"role":"user","content":"hi"}]}'
+  local code retry
+  code=$(curl -s -D "$TMP/hdr-budget.txt" -o "$TMP/resp.txt" -w '%{http_code}' \
+    -X POST "http://127.0.0.1:18820/v1/chat/completions" \
+    -H 'Content-Type: application/json' -H 'Authorization: Bearer dummy' -d "$BODY")
+  [ "$code" = "429" ] && pass "预算满额 -> 429" || fail "budget -> $code (want 429)"
+  jq -e '.error.code == "budget_exceeded"' "$TMP/resp.txt" >/dev/null 2>&1 \
+    && pass "error.code=budget_exceeded" || fail "429 error 体不对"
+  retry=$(grep -i '^retry-after:' "$TMP/hdr-budget.txt" | tr -d '\r' | awk '{print $2}')
+  if [ -n "$retry" ] && python3 -c "import sys; sys.exit(0 if int('$retry') >= 1 else 1)" 2>/dev/null; then
+    pass "Retry-After: $retry"
+  else
+    fail "Retry-After 缺失/非法 ($retry)"
+  fi
+  grep '"err":"budget_exceeded"' "$LOG" | grep -q '"budget_allow":false' \
+    && pass "日志记 err=budget_exceeded, budget_allow=false" || fail "预算拒绝日志不对"
+
+  # 清空日志, 等一次刷新 (1s ticker) -> 累计归零 -> 恢复放行
+  : >"$LOG"
+  sleep 1.6
+  code=$(post 18820 "$BODY")
+  [ "$code" = "200" ] && pass "日志清空刷新后恢复 200" || fail "恢复 -> $code"
+}
+
+case_rotate() {
+  say "=== rotate (按本地日历天轮转 + 归档参与聚合) ==="
+  local LOG="$TMP/log-rotate.jsonl"
+  local DAY DECOY OLD
+  DAY=$(date -d 'yesterday' +%F)
+  DECOY="$TMP/log-rotate-$DAY.jsonl"
+  OLD="$TMP/log-rotate-$DAY-1.jsonl"
+  rm -f "$LOG" "$TMP/log-rotate-"*.jsonl
+  # 既有归档 (同名) 不能被覆盖; 上一段日志应落到 -1 序号。
+  echo '{"marker":"decoy"}' >"$DECOY"
+  printf '{"ts":"%s","logical":"test-model","upstream":"fu","model":"deepseek-v4.1-flash","usage":{"prompt":7,"completion":43,"total":50},"missing_usage":false}\n' \
+    "$(python3 -c "import datetime;print(datetime.datetime.now(datetime.timezone.utc).isoformat())")" >"$LOG"
+  # mtime 拨到昨天 23:50: 模拟"昨天写的日志, 今天启动代理"。
+  touch -d 'yesterday 23:50' "$LOG"
+  cat >"$TMP/cfg-rotate.json" <<EOF
+{
+  "listen": "127.0.0.1:18840",
+  "log_path": "$LOG",
+  "timeouts": { "connect_ms": 1000, "response_header_ms": 5000, "stream_idle_ms": 3000, "queue_wait_ms": 10000 },
+  "upstreams": [
+    { "id": "fu", "base_url": "http://127.0.0.1:19040/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true, "budget": { "windows": { "3h": 30 }, "refresh_sec": 1 }, "limits": { "rate_per_sec": 100, "burst": 10, "concurrency": 10 } }
+  ],
+  "aliases": { "test-model": [["fu", "deepseek-v4.1-flash"]] }
+}
+EOF
+  start_fake 19040 20
+  start_proxy 18840 "$TMP/cfg-rotate.json"
+
+  grep -q '"marker":"decoy"' "$DECOY" && pass "既有归档不被覆盖" || fail "既有归档被覆盖"
+  if [ -f "$OLD" ] && grep -q '"usage"' "$OLD"; then
+    pass "隔天启动: 上一段日志归档为 $(basename "$OLD")"
+  else
+    fail "未生成归档 $OLD"
+  fi
+  [ ! -s "$LOG" ] && pass "当前日志新开且为空" || fail "当前日志未新开"
+
+  local code
+  code=$(post 18840 '{"model":"test-model","messages":[{"role":"user","content":"hi"}]}')
+  [ "$code" = "429" ] && pass "归档记录计入窗口累计 -> 429" || fail "跨天归档未计入 ($code)"
+}
+
 case_stream() {
   say "=== stream (SSE 逐块透传 + 工具调用/思考块 + F6) ==="
   local LOG="$TMP/log-stream.jsonl"
@@ -468,6 +558,8 @@ case_all() {
   case_keyenv
   case_fallback
   case_breaker
+  case_budget
+  case_rotate
   case_stream
   case_usage
   case_ratelimit_min
@@ -483,6 +575,8 @@ main() {
     keyenv)        case_keyenv ;;
     fallback)      case_fallback ;;
     breaker)       case_breaker ;;
+    budget)        case_budget ;;
+    rotate)        case_rotate ;;
     stream)        case_stream ;;
     usage)         case_usage ;;
     ratelimit)     case_ratelimit_min; case_ratelimit_429 ;;

@@ -10,7 +10,8 @@
 //     透明解压 (设计 §4.9.1), 不加 X-Forwarded-For (F9)。
 //  4. 用量提取: 强写 stream_options.include_usage, 流末 usage chunk / 非流式
 //     响应体 usage; 缺 usage 按 F7 字符口径兜底并计数。
-//  5. 预算判定点: 第一版恒放行只留位置 (D5)。
+//  5. 预算判定点 (D12): 每上游配滚动窗口限额, 定时扫日志重建窗口 token 累计,
+//     任一窗口满额返 429 budget_exceeded (放置恒放行, 见设计 §1.4 / D5 演进)。
 //  6. 响应整形: 非流 / 流式 chunk 里的 model 字段改回请求的逻辑名 (O9)。
 //  7. 对外面: GET /v1/models 返回逻辑名清单 (O5); 日志记 source 标识 (O3);
 //     -summary 汇总命令 (O2); -check 配置自检 + deploy/ 常驻与自检脚本 (O1)。
@@ -19,7 +20,8 @@
 //
 // 配置: config.local.json (gitignored, 软链到 ~/fff/config), SIGHUP 热加载别名与上游 (F1);
 // key: 支持 key_env 字段只存环境变量名, 真 key 启动/热加载时从环境变量取, 不落盘。
-// 日志: JSONL 追加写, 逐笔明细 (F5, F8)。
+// 日志: JSONL 追加写, 逐笔明细 (F5, F8); 按本地日历天轮转, 跨天归档为
+// <base>-<YYYY-MM-DD>.jsonl, 预算聚合与 -summary 都能跨归档读。
 package main
 
 import (
@@ -37,6 +39,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -78,6 +81,7 @@ type UpstreamCfg struct {
 	BreakerFail    int               `json:"breaker_fail,omitempty"`
 	BreakerCooldMs int               `json:"breaker_cooldown_ms,omitempty"`
 	Limits         Limits            `json:"limits"`
+	Budget         *BudgetCfg        `json:"budget,omitempty"`
 }
 
 type Config struct {
@@ -335,8 +339,15 @@ type logRec struct {
 	BudgetAllow bool   `json:"budget_allow"`
 }
 
-// ---------- 代理主体 ----------
+// ---------- 预算闸门 (D12): 定时从日志重建窗口累计 ----------
 
+type BudgetCfg struct {
+	Windows    map[string]float64 `json:"windows"`
+	Unit       float64            `json:"unit,omitempty"`
+	RefreshSec int                `json:"refresh_sec,omitempty"`
+}
+
+// budgetState 持有上次扫描重建的窗口累计: upstreamID -> 窗口key -> 已用(×unit)。
 type App struct {
 	mu        sync.RWMutex
 	cfg       *Config
@@ -347,9 +358,154 @@ type App struct {
 	transport *http.Transport
 	streamIdl time.Duration
 
+	budgetMu  sync.Mutex
+	budgetUse map[string]map[string]float64
+
 	logMu  sync.Mutex
 	logW   *os.File
 	logger *log.Logger
+	logDay string // 当前日志文件所属的本地日期 (按天轮转用)
+}
+
+// parseBudgetDur 解析 "3h"/"12h"/"90m"/"7d" 这类窗口时长。
+func parseBudgetDur(s string) (time.Duration, bool) {
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s[:i])
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	switch s[i:] {
+	case "s":
+		return time.Duration(n) * time.Second, true
+	case "m", "min":
+		return time.Duration(n) * time.Minute, true
+	case "h":
+		return time.Duration(n) * time.Hour, true
+	case "d":
+		return time.Duration(n) * 24 * time.Hour, true
+	}
+	return 0, false
+}
+
+// refreshBudget 扫一遍请求日志, 为每个配了预算的上游重建各窗口累计 (D12)。
+// 只处理最近 24h 内的成功记录 (usage 非空); 被拒行 usage 为空, 不重复累计。
+func (a *App) refreshBudget() {
+	a.mu.RLock()
+	targets := map[string]*BudgetCfg{}
+	for _, u := range a.upstreams {
+		if u.Budget != nil && len(u.Budget.Windows) > 0 {
+			targets[u.ID] = u.Budget
+		}
+	}
+	logPath := a.cfg.LogPath
+	a.mu.RUnlock()
+	if len(targets) == 0 {
+		return
+	}
+
+	now := time.Now()
+	use := make(map[string]map[string]float64, len(targets))
+	maxWindow := time.Duration(0)
+	for id, b := range targets {
+		m := make(map[string]float64, len(b.Windows))
+		for w := range b.Windows {
+			m[w] = 0
+			if d, ok := parseBudgetDur(w); ok && d > maxWindow {
+				maxWindow = d
+			}
+		}
+		use[id] = m
+	}
+
+	// 跨天时窗口会跨越归档边界, 因此当前日志与最近归档一起读。
+	for _, fp := range logFilesForScan(logPath, maxWindow) {
+		f, err := os.Open(fp)
+		if err != nil {
+			continue
+		}
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			var rec logRec
+			if err := json.Unmarshal(sc.Bytes(), &rec); err != nil || rec.Usage == nil {
+				continue
+			}
+			b, ok := targets[rec.Upstream]
+			if !ok {
+				continue
+			}
+			t, err := time.Parse(time.RFC3339Nano, rec.Ts)
+			if err != nil || t.After(now) {
+				continue
+			}
+			unit := b.Unit
+			if unit <= 0 {
+				unit = 1
+			}
+			for w := range use[rec.Upstream] {
+				d, ok := parseBudgetDur(w)
+				if !ok || now.Sub(t) > d {
+					continue
+				}
+				use[rec.Upstream][w] += float64(rec.Usage.Total) * unit
+			}
+		}
+		f.Close()
+	}
+
+	a.budgetMu.Lock()
+	a.budgetUse = use
+	a.budgetMu.Unlock()
+}
+
+// startBudgetLoop 按最短刷新间隔启动定时扫描; 没有任何上游配预算则不开。
+func (a *App) startBudgetLoop() {
+	refresh := 60
+	hasBudget := false
+	a.mu.RLock()
+	for _, u := range a.upstreams {
+		if u.Budget != nil && len(u.Budget.Windows) > 0 {
+			hasBudget = true
+			if u.Budget.RefreshSec > 0 && u.Budget.RefreshSec < refresh {
+				refresh = u.Budget.RefreshSec
+			}
+		}
+	}
+	a.mu.RUnlock()
+	if !hasBudget {
+		return
+	}
+	a.refreshBudget()
+	t := time.NewTicker(time.Duration(refresh) * time.Second)
+	go func() {
+		for range t.C {
+			a.refreshBudget()
+		}
+	}()
+}
+
+// budgetOver 判断某上游任一配置窗口的累计已达上限。
+func (a *App) budgetOver(id string) bool {
+	a.mu.RLock()
+	b := a.upstreams[id].Budget
+	a.mu.RUnlock()
+	if b == nil || len(b.Windows) == 0 {
+		return false
+	}
+	a.budgetMu.Lock()
+	m := a.budgetUse[id]
+	a.budgetMu.Unlock()
+	for w, max := range b.Windows {
+		if v, ok := m[w]; ok && v >= max && max > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 type aliasTarget struct {
@@ -363,11 +519,13 @@ func newApp(c *Config) (*App, error) {
 		aliases:   map[string][]aliasTarget{},
 		limiters:  map[string]*Limiter{},
 		breakers:  map[string]*breaker{},
+		budgetUse: map[string]map[string]float64{},
 	}
 	a.applyConfig(c)
 	if err := a.openLog(); err != nil {
 		return nil, err
 	}
+	a.startBudgetLoop()
 	return a, nil
 }
 
@@ -430,6 +588,70 @@ func (c *idleConn) Write(b []byte) (int, error) {
 	return c.Conn.Write(b)
 }
 
+// logDayOf 返回时间所在本地日历天 (轮转边界按本地日期算)。
+func logDayOf(t time.Time) string { return t.Format("2006-01-02") }
+
+// archivePath 给出归档文件名: var/requests.jsonl -> var/requests-2026-10-12.jsonl。
+// 目标已存在时追加 -1/-2 序号, 不覆盖既有归档。
+func archivePath(path, day string) string {
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(path, ext)
+	if _, err := os.Stat(base + "-" + day + ext); err != nil {
+		return base + "-" + day + ext
+	}
+	for i := 1; ; i++ {
+		p := fmt.Sprintf("%s-%s-%d%s", base, day, i, ext)
+		if _, err := os.Stat(p); err != nil {
+			return p
+		}
+	}
+}
+
+// rotateLog 把当前日志归档为带日期的文件, 再新开一份当前日志。
+// 调用方须持有 logMu。prevDay 是这段日志所属的日期。
+func (a *App) rotateLog(prevDay string) {
+	path := a.cfg.LogPath
+	if a.logW != nil {
+		a.logW.Close()
+	}
+	a.logW, a.logger = nil, nil
+	if st, err := os.Stat(path); err == nil {
+		if st.Size() > 0 {
+			if err := os.Rename(path, archivePath(path, prevDay)); err != nil {
+				log.Printf("log rotate failed: %v", err)
+			}
+		} else {
+			os.Remove(path) // 空文件不留归档
+		}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		log.Printf("log reopen failed: %v", err)
+		return
+	}
+	a.logW = f
+	a.logger = log.New(f, "", 0)
+}
+
+// logFilesForScan 返回参与聚合的日志文件: 当前日志 + 最近归档 (覆盖 maxWindow 跨度)。
+// 归档的 mtime 就是它最后被写入的时间, 据此判断是否还在窗口内 (多留一天余量)。
+func logFilesForScan(path string, maxWindow time.Duration) []string {
+	var files []string
+	if st, err := os.Stat(path); err == nil && st.Size() > 0 {
+		files = append(files, path)
+	}
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(path, ext)
+	ms, _ := filepath.Glob(base + "-*" + ext)
+	cutoff := time.Now().Add(-maxWindow - 24*time.Hour)
+	for _, m := range ms {
+		if st, err := os.Stat(m); err == nil && st.ModTime().After(cutoff) {
+			files = append(files, m)
+		}
+	}
+	return files
+}
+
 func (a *App) openLog() error {
 	path := a.cfg.LogPath
 	if path == "" {
@@ -440,12 +662,21 @@ func (a *App) openLog() error {
 			return err
 		}
 	}
+	// 隔天重启: 上一段日志先归档, 当前日志从空开始。
+	if st, err := os.Stat(path); err == nil && st.Size() > 0 {
+		if old := logDayOf(st.ModTime()); old != logDayOf(time.Now()) {
+			if err := os.Rename(path, archivePath(path, old)); err != nil {
+				log.Printf("log rotate on start failed: %v", err)
+			}
+		}
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
 	a.logW = f
 	a.logger = log.New(f, "", 0)
+	a.logDay = logDayOf(time.Now())
 	return nil
 }
 
@@ -456,6 +687,14 @@ func (a *App) logReq(rec logRec) {
 	b, _ := json.Marshal(rec)
 	a.logMu.Lock()
 	defer a.logMu.Unlock()
+	// 跨过本地日期边界就轮转 (长期常驻时按天归档)。
+	if day := logDayOf(time.Now()); day != a.logDay {
+		a.rotateLog(a.logDay)
+		a.logDay = day
+		if a.logger == nil {
+			return
+		}
+	}
 	a.logger.Println(string(b))
 }
 
@@ -572,8 +811,27 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 预算判定点: 第一版恒放行 (D5), 只留位置与日志字段。
+	// 预算判定点 (D12): 定时从请求日志重建的窗口累计已达上限 -> 拒服务。
+	// 放在限速闸之前 (F4): 不占并发额度、不排队就返 429 (agent 自行重试)。
 	budgetAllow := true
+	if chosen.Budget != nil && a.budgetOver(chosen.ID) {
+		budgetAllow = false
+		refresh := chosen.Budget.RefreshSec
+		if refresh < 1 {
+			refresh = 60
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(max(1, refresh)))
+		writeError(w, http.StatusTooManyRequests, "budget_exceeded",
+			"upstream "+chosen.ID+" budget exhausted, retry later")
+		a.logReq(logRec{
+			Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
+			Upstream: chosen.ID, Model: realModel, Path: r.URL.Path, Stream: stream,
+			Status: http.StatusTooManyRequests, Missing: true, Client: r.RemoteAddr,
+			UA: r.Header.Get("User-Agent"), Source: r.Header.Get("X-Tollgate-Source"),
+			Err: "budget_exceeded", BudgetAllow: budgetAllow,
+		})
+		return
+	}
 
 	// 限速闸: 信号量 + 令牌桶, 共用 queue_wait 排队预算 (F3/F4)。
 	// 注意: 信号量一旦拿到就必须释放, 否则后面请求永远排队 (429 泄漏)。
@@ -934,52 +1192,65 @@ type sumRow struct {
 }
 
 // runSummary 汇总 JSONL 请求日志 (O2): 按 逻辑名+来源 分组, 来源取 source, 缺省用 ua。
+// path 可以是单个日志文件, 也可以是一个目录 (汇总其中全部 *.jsonl, 用于跨天归档)。
 func runSummary(path string) {
-	f, err := os.Open(path)
-	if err != nil {
-		log.Fatalf("summary: %v", err)
+	files := []string{path}
+	if st, err := os.Stat(path); err == nil && st.IsDir() {
+		ms, err := filepath.Glob(filepath.Join(path, "*.jsonl"))
+		if err != nil || len(ms) == 0 {
+			log.Fatalf("summary: no *.jsonl under %s", path)
+		}
+		sort.Strings(ms)
+		files = ms
 	}
-	defer f.Close()
 	rows := map[string]*sumRow{}
 	var order []string
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		var rec logRec
-		if err := json.Unmarshal(sc.Bytes(), &rec); err != nil || rec.Logical == "" {
-			continue
+	for _, fp := range files {
+		f, err := os.Open(fp)
+		if err != nil {
+			log.Fatalf("summary: %v", err)
 		}
-		src := rec.Source
-		if src == "" {
-			src = rec.UA
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			var rec logRec
+			if err := json.Unmarshal(sc.Bytes(), &rec); err != nil || rec.Logical == "" {
+				continue
+			}
+			src := rec.Source
+			if src == "" {
+				src = rec.UA
+			}
+			key := rec.Logical + "\x00" + src
+			r, ok := rows[key]
+			if !ok {
+				r = &sumRow{Key: rec.Logical + " / " + src}
+				rows[key] = r
+				order = append(order, key)
+			}
+			if r.Up == "" {
+				r.Up = rec.Upstream
+			}
+			r.Reqs++
+			if rec.Status >= 400 {
+				r.Errs++
+			}
+			if rec.Queued {
+				r.Queued++
+			}
+			if rec.Missing {
+				r.Missing++
+			}
+			if rec.Usage != nil {
+				r.P += rec.Usage.Prompt
+				r.C += rec.Usage.Completion
+				r.T += rec.Usage.Total
+			}
 		}
-		key := rec.Logical + "\x00" + src
-		r, ok := rows[key]
-		if !ok {
-			r = &sumRow{Key: rec.Logical + " / " + src}
-			rows[key] = r
-			order = append(order, key)
+		if err := sc.Err(); err != nil {
+			f.Close()
+			log.Fatalf("summary: %v", err)
 		}
-		if r.Up == "" {
-			r.Up = rec.Upstream
-		}
-		r.Reqs++
-		if rec.Status >= 400 {
-			r.Errs++
-		}
-		if rec.Queued {
-			r.Queued++
-		}
-		if rec.Missing {
-			r.Missing++
-		}
-		if rec.Usage != nil {
-			r.P += rec.Usage.Prompt
-			r.C += rec.Usage.Completion
-			r.T += rec.Usage.Total
-		}
-	}
-	if err := sc.Err(); err != nil {
-		log.Fatalf("summary: %v", err)
+		f.Close()
 	}
 	sort.Slice(order, func(i, j int) bool {
 		return rows[order[i]].T > rows[order[j]].T
