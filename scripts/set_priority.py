@@ -98,18 +98,20 @@ def alias_of(model: dict) -> str:
     return group.strip() if isinstance(group, str) and group.strip() else model["id"]
 
 
-def load_droplist(config: Path) -> set:
-    """Dropped model ids live next to the store; the generator skips them too."""
-    path = config.parent / "llm-models-droplist.json"
-    try:
-        return {i for i in json.loads(path.read_text(encoding="utf-8")) if isinstance(i, str)}
-    except (OSError, ValueError):
-        return set()
+def load_droplist(store_path: Path, config: Path) -> set:
+    """Dropped ids live next to the store (config may be a symlink elsewhere)."""
+    for base in (store_path.parent, config.resolve().parent):
+        path = base / "llm-models-droplist.json"
+        try:
+            return {i for i in json.loads(path.read_text(encoding="utf-8")) if isinstance(i, str)}
+        except (OSError, ValueError):
+            continue
+    return set()
 
 
-def build_aliases(store: dict, config: Path, dropped: set | None = None) -> dict:
+def build_aliases(store: dict, config: Path, store_path: Path, dropped: set | None = None) -> dict:
     """Replicate the generator's grouping + ordering, so the preview matches it."""
-    dropped = load_droplist(config) if dropped is None else dropped
+    dropped = load_droplist(store_path, config) if dropped is None else dropped
     order = provider_order(store, config)
     ranked = {}
     for rank, name in enumerate(order):
@@ -126,11 +128,11 @@ def build_aliases(store: dict, config: Path, dropped: set | None = None) -> dict
     }
 
 
-def all_models(store: dict, config: Path) -> list:
+def all_models(store: dict, config: Path, store_path: Path) -> list:
     """(alias, provider, model, provider entry) in display order."""
     return [
         (alias, name, model, store["providers"][name])
-        for alias, cands in build_aliases(store, config).items()
+        for alias, cands in build_aliases(store, config, store_path).items()
         for name, model in cands
     ]
 
@@ -174,7 +176,7 @@ class Tui:
         return list(provider_order(self.store, self.config))
 
     def rows(self) -> list:
-        rows = all_models(self.store, self.config)
+        rows = all_models(self.store, self.config, self.store_path)
         if self.filter:
             rows = [r for r in rows
                     if self.filter in r[0] or self.filter in r[1] or self.filter in r[2]["id"]]
@@ -257,7 +259,7 @@ class Tui:
                 self.top = self.model_sel
             if self.model_sel >= self.top + visible:
                 self.top = self.model_sel - visible + 1
-        hidden = len(load_droplist(self.config))
+        hidden = len(load_droplist(self.store_path, self.config))
         head = (f" 模型 (过滤: {self.filter or '-'}, {len(rows)} 个, 黑名单剔除 {hidden}) "
                 + ("(焦点)" if self.focus == "model" else ""))
         self.safe_add(stdscr, prov_h, 0, head.ljust(left_w - 1), curses.A_BOLD)
@@ -277,7 +279,7 @@ class Tui:
         if not row:
             return
         alias = row[0]
-        cands = build_aliases(self.store, self.config).get(alias, [])
+        cands = build_aliases(self.store, self.config, self.store_path).get(alias, [])
         self.safe_add(stdscr, 1, x, f" {alias} ({len(cands)} 候选)", curses.A_BOLD)
         for i, (name, model) in enumerate(cands):
             if i + 2 >= height - 1:
@@ -379,8 +381,8 @@ def run_tui(stdscr, tui: Tui) -> None:
 
 # ---------- headless ----------
 
-def print_order(store: dict, config: Path, alias) -> None:
-    for key, cands in build_aliases(store, config).items():
+def print_order(store: dict, config: Path, store_path: Path, alias) -> None:
+    for key, cands in build_aliases(store, config, store_path).items():
         if alias and alias not in key:
             continue
         if not alias and len(cands) < 2:
@@ -420,7 +422,7 @@ def main() -> int:
     store_path = Path(os.path.expanduser(args.store))
     config = Path(os.path.expanduser(args.config))
     if args.order is not None:
-        print_order(load_store(store_path), config, args.order or None)
+        print_order(load_store(store_path), config, store_path, args.order or None)
         return 0
     if args.set:
         return headless_set(store_path, args.set[0], int(args.set[1]))
