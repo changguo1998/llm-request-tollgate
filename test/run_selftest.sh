@@ -2,7 +2,7 @@
 # llm-request-tollgate 自测: 对本地假上游跑代理, 按用例断言 (设计 §4.7)。
 #
 # 用法: test/run_selftest.sh <case|all>
-#   case: alias | keyenv | fallback | ratelimit | usage | stream | logging | overhead
+#   case: alias | keyenv | fallback | breaker | ratelimit | usage | stream | logging | overhead
 # 每个用例独立起一个假上游 + 一个代理 (各自端口, 互不干扰)。
 set -u
 
@@ -160,6 +160,83 @@ EOF
   # 全部候选失败 -> 502 透传
   code=$(post 18813 '{"model":"onlydead-model","messages":[{"role":"user","content":"hi"}]}')
   [ "$code" = "502" ] && pass "全部失败 -> 502" || fail "allfail -> $code"
+}
+
+case_breaker() {
+  say "=== breaker (连续失败熔断 + 冷却恢复) ==="
+  local LOG="$TMP/log-br.jsonl"
+  rm -f "$LOG" "$TMP/br-count.txt"
+  cat >"$TMP/srvflaky.py" <<'PY'
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+count = 0
+fail_until = int(sys.argv[2])
+class H(BaseHTTPRequestHandler):
+    def do_POST(self):
+        global count
+        count += 1
+        open(sys.argv[3], 'w').write(str(count))
+        if count <= fail_until:
+            b = b'{"error":{"message":"flaky 503","type":"server_error","code":"server_error"}}'
+            self.send_response(503)
+        else:
+            b = b'{"id":"chatcmpl-fake","object":"chat.completion","model":"deepseek-v4.1-flash","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok now"}}],"usage":{"prompt_tokens":7,"completion_tokens":42,"total_tokens":49}}'
+            self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+    def log_message(self, *a): pass
+HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
+PY
+  python3 "$TMP/srvflaky.py" 19991 2 "$TMP/br-count.txt" >/dev/null 2>&1 & FL=$!
+  PROCS+=("$FL")
+  # 等 python 假上游就绪 (TCP 探测, 不发 HTTP, 不消耗失败计数)
+  for _ in $(seq 1 100); do
+    if (exec 3<>/dev/tcp/127.0.0.1/19991) 2>/dev/null; then
+      exec 3>&- 3<&- 2>/dev/null || true
+      break
+    fi
+    sleep 0.05
+  done
+  cat >"$TMP/cfg-br.json" <<EOF
+{
+  "listen": "127.0.0.1:18818",
+  "log_path": "$LOG",
+  "timeouts": { "connect_ms": 1000, "response_header_ms": 5000, "stream_idle_ms": 3000, "queue_wait_ms": 10000 },
+  "upstreams": [
+    { "id": "flaky", "base_url": "http://127.0.0.1:19991/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true, "breaker_fail": 2, "breaker_cooldown_ms": 1000, "limits": { "rate_per_sec": 100, "burst": 10, "concurrency": 10 } },
+    { "id": "fu", "base_url": "http://127.0.0.1:19018/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true, "limits": { "rate_per_sec": 100, "burst": 10, "concurrency": 10 } }
+  ],
+  "aliases": {
+    "tb": [["flaky", "deepseek-v4.1-flash"], ["fu", "deepseek-v4.1-flash"]],
+    "tb-only": [["flaky", "deepseek-v4.1-flash"]]
+  }
+}
+EOF
+  start_fake 19018 20
+  start_proxy 18818 "$TMP/cfg-br.json"
+  local BODY='{"model":"tb","messages":[{"role":"user","content":"hi"}]}'
+  local code n
+
+  post 18818 "$BODY" >/dev/null   # A: flaky 503(#1) -> fu 200
+  post 18818 "$BODY" >/dev/null   # B: flaky 503(#2) -> 熔断打开 -> fu 200
+  code=$(post 18818 "$BODY")      # C: 窗口内, 跳过 flaky -> fu 200
+  [ "$code" = "200" ] && pass "熔断窗口内跳过首选, 备用 200" || fail "窗口内请求 -> $code"
+  n=$(cat "$TMP/br-count.txt" 2>/dev/null)
+  [ "$n" = "2" ] && pass "熔断打开后 flaky 不再被请求 (计数=$n)" || fail "flaky 计数=$n (want 2)"
+
+  code=$(post 18818 '{"model":"tb-only","messages":[{"role":"user","content":"hi"}]}')
+  [ "$code" = "502" ] && pass "唯一候选熔断 -> 快速 502" || fail "tb-only -> $code"
+
+  # 冷却 1000ms 后自动恢复, 重新命中 flaky (此刻已恢复正常)
+  sleep 1.4
+  code=$(post 18818 "$BODY")
+  [ "$code" = "200" ] && pass "冷却后恢复 200" || fail "恢复 -> $code"
+  n=$(cat "$TMP/br-count.txt" 2>/dev/null)
+  [ "$n" = "3" ] && pass "恢复后重新命中 flaky (计数=$n)" || fail "恢复后 flaky 计数=$n (want 3)"
+  grep '"upstream":"flaky"' "$LOG" | tail -1 | grep -q '"logical":"tb"' \
+    && pass "恢复后日志 upstream=flaky" || fail "恢复后日志上游不对"
 }
 
 case_stream() {
@@ -390,6 +467,7 @@ case_all() {
   case_alias
   case_keyenv
   case_fallback
+  case_breaker
   case_stream
   case_usage
   case_ratelimit_min
@@ -404,6 +482,7 @@ main() {
     alias)         case_alias ;;
     keyenv)        case_keyenv ;;
     fallback)      case_fallback ;;
+    breaker)       case_breaker ;;
     stream)        case_stream ;;
     usage)         case_usage ;;
     ratelimit)     case_ratelimit_min; case_ratelimit_429 ;;

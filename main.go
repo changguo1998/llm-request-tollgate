@@ -1,6 +1,6 @@
 // llm-request-tollgate: 自研单文件 OpenAI 兼容代理 (设计文档 docs/design.md)。
 //
-// 单进程内含八件事 (设计 §4.1):
+// 单进程内含九件事 (设计 §4.1):
 //  1. 别名表 (白名单 + 路由): 逻辑模型名 -> [(上游, 真实模型 id), ...],
 //     未命中的模型名直接返 404, 不猜上游 (D2)。
 //  2. 按上游分组 (v1 一个上游一把 key, "上游+凭据" 等价于上游记录) 的
@@ -15,6 +15,7 @@
 //  7. 对外面: GET /v1/models 返回逻辑名清单 (O5); 日志记 source 标识 (O3);
 //     -summary 汇总命令 (O2); -check 配置自检 + deploy/ 常驻与自检脚本 (O1)。
 //  8. 集中 fallback: 候选按序尝试, 首字节前 429/5xx/传输失败换下一个, 全败透传最后错误。
+//  9. 熔断: 连续失败达阈值短暂跳过该上游 (冷却期内不真发), 冷却后自动恢复。
 //
 // 配置: config.local.json (gitignored, 软链到 ~/fff/config), SIGHUP 热加载别名与上游 (F1);
 // key: 支持 key_env 字段只存环境变量名, 真 key 启动/热加载时从环境变量取, 不落盘。
@@ -67,14 +68,16 @@ type Limits struct {
 }
 
 type UpstreamCfg struct {
-	ID           string            `json:"id"`
-	BaseURL      string            `json:"base_url"`
-	AuthHeader   string            `json:"auth_header"`
-	Key          string            `json:"key"`
-	KeyEnv       string            `json:"key_env,omitempty"`
-	Headers      map[string]string `json:"headers"`
-	IncludeUsage bool              `json:"include_usage"`
-	Limits       Limits            `json:"limits"`
+	ID             string            `json:"id"`
+	BaseURL        string            `json:"base_url"`
+	AuthHeader     string            `json:"auth_header"`
+	Key            string            `json:"key"`
+	KeyEnv         string            `json:"key_env,omitempty"`
+	Headers        map[string]string `json:"headers"`
+	IncludeUsage   bool              `json:"include_usage"`
+	BreakerFail    int               `json:"breaker_fail,omitempty"`
+	BreakerCooldMs int               `json:"breaker_cooldown_ms,omitempty"`
+	Limits         Limits            `json:"limits"`
 }
 
 type Config struct {
@@ -148,6 +151,62 @@ func (l *Limiter) acquireSem(ctx context.Context) bool {
 }
 
 func (l *Limiter) releaseSem() { <-l.sem }
+
+// ---------- 熔断 ----------
+
+// breaker 是按上游的熔断器: 连续失败达阈值打开, 冷却期内不再请求该上游
+// (fallback 直接跳过), 冷却期满自动恢复; 成功后复位。
+type breaker struct {
+	mu       sync.Mutex
+	fails    int
+	openAt   time.Time // 零值 = 关闭
+	failTh   int
+	cooldown time.Duration
+}
+
+func newBreaker(failTh int, cooldown time.Duration) *breaker {
+	if failTh < 1 {
+		failTh = 5
+	}
+	if cooldown <= 0 {
+		cooldown = 30 * time.Second
+	}
+	return &breaker{failTh: failTh, cooldown: cooldown}
+}
+
+// allow 返回此刻是否允许尝试该上游。打开且未过冷却期 -> 拒绝; 其余放行
+// (冷却期满即关闭, 下一次尝试当作探测)。
+func (b *breaker) allow() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.openAt.IsZero() {
+		if time.Since(b.openAt) < b.cooldown {
+			return false
+		}
+		b.openAt = time.Time{}
+		b.fails = 0
+	}
+	return true
+}
+
+// recordFail 记一次失败; 连续失败达阈值即打开熔断。
+func (b *breaker) recordFail() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.fails++
+	if b.fails >= b.failTh {
+		b.openAt = time.Now()
+		b.fails = 0
+	}
+}
+
+// recordSuccess 成功选型: 复位失败计数并关闭熔断。
+func (b *breaker) recordSuccess() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.fails = 0
+	b.openAt = time.Time{}
+}
 
 // ---------- 用量 ----------
 
@@ -284,6 +343,7 @@ type App struct {
 	upstreams map[string]*UpstreamCfg
 	aliases   map[string][]aliasTarget
 	limiters  map[string]*Limiter
+	breakers  map[string]*breaker
 	transport *http.Transport
 	streamIdl time.Duration
 
@@ -302,6 +362,7 @@ func newApp(c *Config) (*App, error) {
 		upstreams: map[string]*UpstreamCfg{},
 		aliases:   map[string][]aliasTarget{},
 		limiters:  map[string]*Limiter{},
+		breakers:  map[string]*breaker{},
 	}
 	a.applyConfig(c)
 	if err := a.openLog(); err != nil {
@@ -322,6 +383,10 @@ func (a *App) applyConfig(c *Config) {
 		upstreams[u.ID] = u
 		if _, ok := a.limiters[u.ID]; !ok {
 			a.limiters[u.ID] = newLimiter(u.Limits)
+		}
+		if _, ok := a.breakers[u.ID]; !ok {
+			a.breakers[u.ID] = newBreaker(u.BreakerFail,
+				time.Duration(u.BreakerCooldMs)*time.Millisecond)
 		}
 	}
 	a.upstreams = upstreams
@@ -569,6 +634,14 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		servedMod       string
 	)
 	for _, at := range attempts {
+		br := a.breakers[at.up.ID]
+		if !br.allow() {
+			// 熔断打开: 不真发, 直接视作该候选失败换下一个。
+			lastErr = fmt.Errorf("upstream %s circuit open", at.up.ID)
+			lastUpID, lastM = at.up.ID, at.mod
+			failed++
+			continue
+		}
 		body, err := buildAttemptPayload(payload, at.mod, at.up.IncludeUsage, stream)
 		if err != nil {
 			lastErr = err
@@ -589,12 +662,14 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		resp, err = a.transport.RoundTrip(outReq)
 		if err != nil {
+			br.recordFail()
 			lastErr = err
 			lastUpID, lastM = at.up.ID, at.mod
 			failed++
 			continue
 		}
 		if shouldFallback(resp.StatusCode) {
+			br.recordFail()
 			b, rerr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			lastErr = fmt.Errorf("upstream %s returned %d", at.up.ID, resp.StatusCode)
@@ -606,6 +681,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
+		br.recordSuccess()
 		servedUp, servedMod = at.up, at.mod
 		break
 	}
