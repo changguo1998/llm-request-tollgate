@@ -80,6 +80,8 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 - `timeouts`: 建连 / 等响应头 / 流空闲 / 排队上限。
 - `upstreams`: 每个上游一条记录 (id / base_url / auth_header / key 或 key_env / headers /
   include_usage / limits / budget), 限速参数挂在记录上, 即「上游 + 凭据」分组。
+  生成器给每个上游都写 `budget.cooldown_ms` (429 冷却, 默认 5 分钟); `windows` / `units`
+  按平台额度人工补 (ustc 已填 key 记录里的 3h 30 / 12h 70 / 24h 100)。
   `key_env` 只存环境变量名, 真 key 启动时从环境取 (密钥不落盘, 见「常驻与升级」)。
   `key_prefix` 是认证头里的 scheme: 缺省对 `Authorization` 用 `Bearer `, 其他头不带
   (ustc 与火山 ARK 实测都要 `Bearer `; 给 `""` 可强制裸 key)。
@@ -104,7 +106,7 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
   API 不提供的字段)。跨上游同族不同名的模型 (如 ustc 的 `deepseek-flash` 与 ark 的
   `deepseek-v4-1-flash*`) 就靠它并成一个别名。
 - `key_env` 取 store 里 `apiKey` 的占位符名; `limits` / `budget` / `auth_header` 等设置从
-  现有配置继承, 不会被覆盖。
+  现有配置继承, 不会被覆盖 (缺失的 `budget.cooldown_ms` 会补默认值, `--cooldown-ms` 可改)。
 - 写入 `config.local.json` (即 `~/fff/config/tollgate.json`); `--dry-run` 只打印,
   `--providers` 改上游与优先级。
 

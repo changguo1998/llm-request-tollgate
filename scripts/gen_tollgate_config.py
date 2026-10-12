@@ -19,6 +19,7 @@ Rewritten: the ``upstreams`` list (ids + base_url) and ``aliases``.
 Preserved from the existing config: service-level fields (listen, log_path,
 timeouts) and per-upstream settings (auth_header, key_env, headers,
 include_usage, limits, budget, breaker_*). New upstreams get
+Every upstream carries ``budget.cooldown_ms`` (429 cooldown, default 5 min).
 ``key_env`` taken from the store's ``apiKey`` placeholder (``$USTC_API_KEY`` ->
 ``USTC_API_KEY``), else ``TOLLGATE_<ID>_KEY``, and the limits of an existing
 upstream, falling
@@ -58,6 +59,9 @@ PRESERVED_UPSTREAM_KEYS = (
 # Fallback limits for a provider the config does not know yet (config.example.json).
 DEFAULT_LIMITS = {"rate_per_sec": 0.34, "burst": 1, "concurrency": 1}
 
+# 429 冷却对每个上游都开 (F11); windows/units 仍由人工按平台额度补。
+DEFAULT_COOLDOWN_MS = 300000
+
 
 def load_json(path: Path):
     with path.open(encoding="utf-8") as handle:
@@ -96,7 +100,7 @@ def build_aliases(store: dict, providers: list[str], dropped: set[str]):
     return aliases, kept, removed, warnings
 
 
-def build_upstreams(store: dict, providers: list[str], existing: dict):
+def build_upstreams(store: dict, providers: list[str], existing: dict, cooldown_ms: int):
     """Merge store connection data into existing upstream entries, keeping settings."""
     by_id = {u["id"]: u for u in existing.get("upstreams", [])}
     sample = next((u for u in existing.get("upstreams", []) if u.get("limits")), None)
@@ -118,6 +122,9 @@ def build_upstreams(store: dict, providers: list[str], existing: dict):
         entry.setdefault("include_usage", True)
         if "limits" not in entry:
             entry["limits"] = dict(sample["limits"]) if sample else dict(DEFAULT_LIMITS)
+        budget = dict(entry.get("budget") or {})
+        budget.setdefault("cooldown_ms", cooldown_ms)
+        entry["budget"] = budget
         entry["base_url"] = store[provider]["baseUrl"]
         upstreams.append(entry)
     return upstreams
@@ -158,7 +165,7 @@ def build_config(args) -> tuple[dict, list[str]]:
                 "queue_wait_ms": 60000,
             },
         ),
-        "upstreams": build_upstreams(store, providers, existing),
+        "upstreams": build_upstreams(store, providers, existing, args.cooldown_ms),
         "aliases": {name: aliases[name] for name in sorted(aliases)},
     }
 
@@ -185,6 +192,10 @@ def main() -> int:
     parser.add_argument("--fff-dir", default=str(DEFAULT_FFF_CONFIG), help="fff config directory")
     parser.add_argument("--out", default=str(DEFAULT_OUT), help="config to write")
     parser.add_argument("--providers", default=DEFAULT_PROVIDERS, help="provider order = priority")
+    parser.add_argument(
+        "--cooldown-ms", type=int, default=DEFAULT_COOLDOWN_MS,
+        help=f"429 cooldown per upstream in ms (default {DEFAULT_COOLDOWN_MS})",
+    )
     parser.add_argument("--dry-run", action="store_true", help="print the config instead of writing")
     args = parser.parse_args()
 

@@ -572,10 +572,11 @@ func (a *App) markLimitHit(u *UpstreamCfg, model string, body []byte) {
 	if cooldown <= 0 {
 		cooldown = defaultBudgetCooldown
 	}
+	quotaShaped := looksLikeQuotaError(body)
 	a.budgetMu.Lock()
 	a.coolUntil[u.ID] = time.Now().Add(cooldown)
 	coef := 0.0
-	if looksLikeQuotaError(body) {
+	if quotaShaped {
 		for w, max := range u.Budget.Windows {
 			used := a.budgetRaw[u.ID][w]
 			if used > 0 && max > 0 {
@@ -594,10 +595,14 @@ func (a *App) markLimitHit(u *UpstreamCfg, model string, body []byte) {
 	}
 	a.budgetMu.Unlock()
 
-	if coef > 0 {
+	switch {
+	case coef > 0:
 		log.Printf("budget limit hit on %s (model %s): cooldown %s, calibrated unit %.9g (raw tokens %v)",
 			u.ID, model, cooldown, coef, rawCopy)
-	} else {
+	case quotaShaped:
+		log.Printf("budget limit hit on %s (model %s): cooldown %s (no window data, unit kept)",
+			u.ID, model, cooldown)
+	default:
 		log.Printf("limit hit on %s (model %s): cooldown %s (not quota-shaped, unit kept)",
 			u.ID, model, cooldown)
 	}
