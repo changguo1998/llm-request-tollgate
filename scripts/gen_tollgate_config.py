@@ -12,8 +12,8 @@ Grouping: a model's alias name is its ``tollgate_group`` field when the store
 entry carries one, otherwise the model id itself. Models sharing an alias name
 (same id served by several providers, or an explicit ``tollgate_group``) collapse
 into one alias; candidate order (= failover priority) is the model's
-``tollgate_priority`` descending (missing counts as 0, the lowest), ties broken
-by ``--providers`` order. Both fields survive the store updaters because
+``tollgate_priority`` descending (missing counts as 0, the lowest), then the
+provider entry's ``tollgate_priority`` descending, then ``--providers`` order. Both fields survive the store updaters because
 ``merge_models_by_id`` inherits fields the provider API does not report.
 
 Rewritten: the ``upstreams`` list (ids + base_url) and ``aliases``.
@@ -61,6 +61,7 @@ PROXY_PROVIDER = "tollgate"  # store 里代表本代理自己的 provider 名
 PROXY_KIND = "proxy"  # store 条目的 kind 标记: 生成列表/上游时一律跳过, 防自转发递归
 PRIORITY_FIELD = "tollgate_priority"  # 模型级优先级: 越大越先用, 缺省 0 (最小)
 GROUP_FIELD = "tollgate_group"  # 模型级分组: 同值并成一个别名, 缺省用模型 id
+PROVIDER_PRIORITY_FIELD = "tollgate_priority"  # provider 级优先级 (与模型同名, 同级不同处)
 
 # Upstream fields carried over from an existing config entry.
 PRESERVED_UPSTREAM_KEYS = (
@@ -92,9 +93,9 @@ def alias_name(model: dict) -> str:
     return group.strip() if isinstance(group, str) and group.strip() else model["id"]
 
 
-def priority_of(model: dict) -> int:
-    """Candidate order inside an alias: higher wins, missing/0 is the lowest."""
-    value = model.get(PRIORITY_FIELD)
+def priority_of(entry: dict) -> int:
+    """Read a tollgate_priority off a model or provider entry; missing/0 is lowest."""
+    value = entry.get(PRIORITY_FIELD)
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
@@ -107,6 +108,7 @@ def build_aliases(store: dict, providers: list[str], dropped: set[str]):
     warnings: list[str] = []
     for rank, provider in enumerate(providers):
         models = store[provider].get("models", [])
+        prov_priority = priority_of(store[provider])
         kept[provider] = 0
         removed[provider] = 0
         for model in sorted(models, key=lambda m: m["id"]):
@@ -115,15 +117,18 @@ def build_aliases(store: dict, providers: list[str], dropped: set[str]):
                 removed[provider] += 1
                 continue
             name = alias_name(model)
-            # 候选顺序: tollgate_priority 降序 (越大越先用), 同优先级按 providers 顺序。
-            ranked.setdefault(name, []).append((-priority_of(model), rank, model_id))
+            # 候选顺序: 模型 tollgate_priority 降序 -> provider tollgate_priority 降序
+            # -> --providers 顺序 (同 provider 内再按 id 稳定排列)。
+            ranked.setdefault(name, []).append(
+                (-priority_of(model), -prov_priority, rank, model_id)
+            )
             kept[provider] += 1
         if not kept[provider]:
             warnings.append(f"provider {provider}: no model left after the droplist")
     for name, items in ranked.items():
         seen = set()
         candidates = []
-        for _, rank, model_id in sorted(items):
+        for _, _, rank, model_id in sorted(items):
             pair = [providers[rank], model_id]
             if tuple(pair) in seen:
                 continue
