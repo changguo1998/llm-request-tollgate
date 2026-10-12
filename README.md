@@ -11,7 +11,8 @@
    桶空排队, 超 `queue_wait_ms` 返 429 带 `Retry-After`。
 3. 请求转发: 密钥集中在代理 (客户端凭据一律替换), SSE 逐块原样透传不缓冲。
 4. 用量记账: 强写 `stream_options.include_usage`, 从流末 usage / 非流式响应体
-   提取 token 用量; 缺 usage 按字符粗估 (F7) 并记 `missing_usage`。
+   提取 token 用量 (含缓存命中 token, 三种上游字段名都认); 缺 usage 按字符粗估 (F7)
+   并记 `missing_usage`。`-usage` 按 上游/模型 × 窗口 列出 token 分解, 用于标定预算系数。
 5. 预算判定点: 每上游配滚动窗口限额, 定时从日志重建累计, 满额拒服务 (D12)。
 6. 响应整形: 非流 / 流式 chunk 里的 `model` 字段改回请求的逻辑名,
    对外隐藏真实上游 id。
@@ -24,7 +25,8 @@
    冷却后自动恢复; 参数可配 (`breaker_fail` / `breaker_cooldown_ms`)。
 10. 预算闸门 (D12): 每上游可配滚动窗口限额 (`budget.windows`, 如 3h/12h/24h),
     代理定时从请求日志重建各窗口 token 累计, 任一窗口满额即返 429 `budget_exceeded`;
-    重启后从日志重建不丢消耗 (账本永不落盘, 日志即账本)。
+    重启后从日志重建不丢消耗 (账本永不落盘, 日志即账本)。每个模型可用 `budget.units`
+    配各自的折算系数 (平台各模型扣额倍率不同)。
 11. 日志按天轮转: 跨本地日期 (或隔天启动) 时把上一段日志归档为
     `<base>-YYYY-MM-DD.jsonl` (同名不覆盖, 依次加 -1/-2); 预算聚合与 `-summary`
     都跨归档读, 归档不自动删除 (留存交给外部)。
@@ -44,6 +46,8 @@ go build ./...
 # 汇总请求日志 (按 逻辑名+来源, 含 token 用量; 传目录则跨天归档一起汇总):
 ./llm-request-tollgate -summary var/requests.jsonl
 ./llm-request-tollgate -summary var/
+# 按 上游/模型 × 窗口 (3h/12h/24h/全部) 看 token 分解, 用来标定预算系数:
+./llm-request-tollgate -usage var/
 ```
 
 agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
@@ -81,6 +85,19 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 别名与上游支持 `SIGHUP` 热加载, 限速器状态按上游 id 保留不被重置。
 预算累计每次定时扫描从日志重建, 不设独立状态 (日志即账本)。
 
+### 预算系数怎么定
+
+`budget` 的限额与 `unit` 取决于平台额度口径, 标定一次即可:
+
+1. `./llm-request-tollgate -usage var/` 看某模型在窗口内的 `total` (同时看 `miss`: 不为 0
+   说明有估的用量, 系数会偏)。
+2. 打开平台网页面板读同一窗口的"已用额度"。
+3. 系数 = 已用额度 / `total`, 填进该上游的 `budget.units` (键是真实模型 id)。
+
+参考: 平台公开发布每模型价格 (`GET /api/models/public`, 无需登录), 例
+`deepseek-flash` 输入 2.0 / 缓存命中 0.2 / 输出 2.0 (每百万 token), qwen 系 1.0/0.1/1.0,
+`glm-5.3-flash` 4.0/0.4/4.0。若平台额度就是这些价格单位, 系数即 价格/1e6。
+
 ## v1 边界
 
 - 转发只做 `POST /v1/chat/completions` (D4); `GET /v1/models` 返回逻辑名清单 (O5);
@@ -95,7 +112,7 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 - `main.go` 单文件代理 (含假上游自测所需的全部实现)。
 - `test/fakeupstream/` 假上游: 回放思考块 / 文本 / 工具调用 / usage 的 SSE,
   支持中途断流 (验证 F6)。
-- `test/run_selftest.sh` 自测: 12 组用例 77 项断言, 对本地假上游跑代理。
+- `test/run_selftest.sh` 自测: 13 组用例 82 项断言, 对本地假上游跑代理。
 - `test/healthcheck.sh` 自检: 二进制 / 配置 (-check) / 端口三项, 退出码 0 = 全通过。
 - `deploy/` 常驻: `tollgate.service` 模板 + `install_service.sh` (systemd 用户服务)。
 - `tmp/` 一键验收脚本 (临时, 输出进 `tmp/*.log`, 不提交)。

@@ -218,6 +218,9 @@ type Usage struct {
 	Prompt     int `json:"prompt"`
 	Completion int `json:"completion"`
 	Total      int `json:"total"`
+	// Cached 是命中缓存的输入 token (各家字段名不同, 见 openaiUsage);
+	// 平台按缓存价计费 (约为输入价 1/10), 系数标定要用到。
+	Cached int `json:"cached,omitempty"`
 }
 
 // openaiUsage 是上游响应里的原始字段名 (OpenAI 兼容口径)。
@@ -225,13 +228,30 @@ type openaiUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// 三种缓存口径: OpenAI/vLLM 的 prompt_tokens_details.cached_tokens,
+	// DeepSeek 的 prompt_cache_hit_tokens, Anthropic 风格的 cache_read_input_tokens。
+	PromptTokensDetails *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
+	PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"`
+	CacheReadInputTokens int `json:"cache_read_input_tokens"`
 }
 
 func toUsage(u *openaiUsage) *Usage {
 	if u == nil {
 		return nil
 	}
-	return &Usage{Prompt: u.PromptTokens, Completion: u.CompletionTokens, Total: u.TotalTokens}
+	cached := u.PromptCacheHitTokens
+	if cached == 0 {
+		cached = u.CacheReadInputTokens
+	}
+	if u.PromptTokensDetails != nil && u.PromptTokensDetails.CachedTokens > 0 {
+		cached = u.PromptTokensDetails.CachedTokens
+	}
+	return &Usage{
+		Prompt: u.PromptTokens, Completion: u.CompletionTokens,
+		Total: u.TotalTokens, Cached: cached,
+	}
 }
 
 // estimateTokens 按 F7 口径粗估: 非 ASCII 1 token/字符, 其余 4 字符 1 token。
@@ -341,10 +361,26 @@ type logRec struct {
 
 // ---------- 预算闸门 (D12): 定时从日志重建窗口累计 ----------
 
+// BudgetCfg 预算闸门 (D12): 定时从请求日志重建各窗口累计, 满额拒新请求。
+// Windows: "3h" -> 限额, ...; Unit 是 token 折算平台额度的系数 (默认 1);
+// Units 按真实模型 id 覆盖 Unit (平台各模型扣额倍率不同, 系数用 -usage 标定);
+// RefreshSec 是定时扫日志的间隔秒数 (默认 60)。
 type BudgetCfg struct {
 	Windows    map[string]float64 `json:"windows"`
 	Unit       float64            `json:"unit,omitempty"`
+	Units      map[string]float64 `json:"units,omitempty"`
 	RefreshSec int                `json:"refresh_sec,omitempty"`
+}
+
+// unitOf 取某真实模型的折算系数: Units 优先, 回落 Unit, 再回落 1。
+func unitOf(b *BudgetCfg, model string) float64 {
+	if v, ok := b.Units[model]; ok && v > 0 {
+		return v
+	}
+	if b.Unit > 0 {
+		return b.Unit
+	}
+	return 1
 }
 
 // budgetState 持有上次扫描重建的窗口累计: upstreamID -> 窗口key -> 已用(×unit)。
@@ -443,10 +479,7 @@ func (a *App) refreshBudget() {
 			if err != nil || t.After(now) {
 				continue
 			}
-			unit := b.Unit
-			if unit <= 0 {
-				unit = 1
-			}
+			unit := unitOf(b, rec.Model)
 			for w := range use[rec.Upstream] {
 				d, ok := parseBudgetDur(w)
 				if !ok || now.Sub(t) > d {
@@ -1274,14 +1307,124 @@ func runSummary(path string) {
 		tot.Key, "", tot.Reqs, tot.Errs, tot.Queued, tot.Missing, tot.P, tot.C, tot.T)
 }
 
+// logFilesFor 列出要读的日志文件: 传目录则目录下全部 *.jsonl (按名排序),
+// 传文件则它本身加最近归档 (覆盖 maxWindow 跨度)。
+func logFilesFor(path string, maxWindow time.Duration) []string {
+	if st, err := os.Stat(path); err == nil && st.IsDir() {
+		ms, _ := filepath.Glob(filepath.Join(path, "*.jsonl"))
+		sort.Strings(ms)
+		return ms
+	}
+	return logFilesForScan(path, maxWindow)
+}
+
+// usageRow 是 -usage 的每行: 上游 + 真实模型 的 token 分口径累计。
+type usageRow struct {
+	Key                               string
+	Reqs, Miss                        int
+	Prompt, Completion, Cached, Total int
+}
+
+// runUsage 按 上游+真实模型 列出各窗口的 token 用量, 用于标定预算折算系数:
+// 平台已用额度 / 该模型窗口内 total = 该模型的系数 (填进 budget.units)。
+func runUsage(path string, windows []string) {
+	maxWindow := time.Duration(0)
+	for _, w := range windows {
+		if d, ok := parseBudgetDur(w); ok && d > maxWindow {
+			maxWindow = d
+		}
+	}
+	type entry struct {
+		ts    time.Time
+		up    string
+		model string
+		usage Usage
+		miss  bool
+	}
+	var entries []entry
+	for _, fp := range logFilesFor(path, maxWindow) {
+		f, err := os.Open(fp)
+		if err != nil {
+			continue
+		}
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			var rec logRec
+			if err := json.Unmarshal(sc.Bytes(), &rec); err != nil || rec.Usage == nil {
+				continue
+			}
+			t, err := time.Parse(time.RFC3339Nano, rec.Ts)
+			if err != nil {
+				continue
+			}
+			entries = append(entries, entry{ts: t, up: rec.Upstream, model: rec.Model, usage: *rec.Usage, miss: rec.Missing})
+		}
+		f.Close()
+	}
+
+	now := time.Now()
+	groups := append(append([]string{}, windows...), "")
+	for _, w := range groups {
+		label, span := "全部", time.Duration(0)
+		if w != "" {
+			label = w
+			span, _ = parseBudgetDur(w)
+		}
+		rows := map[string]*usageRow{}
+		var order []string
+		for _, e := range entries {
+			if w != "" && now.Sub(e.ts) > span {
+				continue
+			}
+			key := e.up + "/" + e.model
+			r, ok := rows[key]
+			if !ok {
+				r = &usageRow{Key: key}
+				rows[key] = r
+				order = append(order, key)
+			}
+			r.Reqs++
+			if e.miss {
+				r.Miss++
+			}
+			r.Prompt += e.usage.Prompt
+			r.Completion += e.usage.Completion
+			r.Cached += e.usage.Cached
+			r.Total += e.usage.Total
+		}
+		sort.Slice(order, func(i, j int) bool { return rows[order[i]].Total > rows[order[j]].Total })
+		fmt.Printf("== 窗口 %s (仅含有 usage 的记录)\n", label)
+		fmt.Printf("%-40s %6s %6s %9s %10s %9s %9s\n",
+			"upstream/model", "reqs", "miss", "prompt", "completion", "cached", "total")
+		for _, k := range order {
+			r := rows[k]
+			fmt.Printf("%-40s %6d %6d %9d %10d %9d %9d\n",
+				r.Key, r.Reqs, r.Miss, r.Prompt, r.Completion, r.Cached, r.Total)
+		}
+	}
+	fmt.Println("提示: 折算系数 = 平台已用额度 / 该模型窗口内 total; 按真实模型 id 填进对应上游的 budget.units")
+}
+
 func main() {
 	cfgPath := flag.String("config", "config.local.json", "config file path")
 	summary := flag.String("summary", "", "aggregate JSONL request log and exit")
+	usage := flag.String("usage", "", "list token usage by upstream/model and window, then exit")
+	windows := flag.String("windows", "3h,12h,24h", "windows for -usage, comma separated")
 	check := flag.Bool("check", false, "validate config and exit")
 	flag.Parse()
 
 	if *summary != "" {
 		runSummary(*summary)
+		return
+	}
+	if *usage != "" {
+		var ws []string
+		for _, s := range strings.Split(*windows, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				ws = append(ws, s)
+			}
+		}
+		runUsage(*usage, ws)
 		return
 	}
 	if *check {

@@ -2,7 +2,7 @@
 # llm-request-tollgate 自测: 对本地假上游跑代理, 按用例断言 (设计 §4.7)。
 #
 # 用法: test/run_selftest.sh <case|all>
-#   case: alias | keyenv | fallback | breaker | budget | rotate | ratelimit | usage | stream | logging | overhead
+#   case: alias | keyenv | fallback | breaker | budget | rotate | ratelimit | usage | usage-report | stream | logging | overhead
 # 每个用例独立起一个假上游 + 一个代理 (各自端口, 互不干扰)。
 set -u
 
@@ -427,6 +427,38 @@ EOF
   # O9: 非流响应 model 改回逻辑名。
   m=$(jq -r '.model' "$TMP/resp.txt")
   [ "$m" = "test-model" ] && pass "非流响应 model 改回逻辑名" || fail "非流响应 model=$m (want test-model)"
+
+  # 4) 缓存命中 token: 上游给 prompt_tokens_details.cached_tokens 时记入日志 (系数标定要用)。
+  curl -s -o /dev/null -X POST "http://127.0.0.1:18803/v1/chat/completions" \
+    -H 'Content-Type: application/json' -H 'Authorization: Bearer dummy' -H 'X-Fake-Cached: 5' \
+    -d '{"model":"test-model","messages":[{"role":"user","content":"hi"}]}'
+  grep '"upstream":"fu"' "$LOG" | tail -1 | grep -q '"cached":5' \
+    && pass "缓存命中 token 记入日志 (cached=5)" || fail "cached 未记入日志"
+}
+
+case_usage_report() {
+  say "=== -usage (上游/模型 × 窗口 token 分解, 标定系数用) ==="
+  local LOG="$TMP/log-usagecmd.jsonl"
+  rm -f "$LOG" "$TMP/log-usagecmd-"*.jsonl
+  local now old
+  now=$(python3 -c "import datetime;print(datetime.datetime.now(datetime.timezone.utc).isoformat())")
+  old=$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(hours=8)).isoformat())")
+  printf '{"ts":"%s","logical":"a","upstream":"ustc","model":"deepseek-flash","usage":{"prompt":1000,"completion":2000,"total":3000,"cached":500},"missing_usage":false}\n' "$now" >>"$LOG"
+  printf '{"ts":"%s","logical":"b","upstream":"ustc","model":"qwen-chat","usage":{"prompt":10,"completion":20,"total":30},"missing_usage":false}\n' "$now" >>"$LOG"
+  printf '{"ts":"%s","logical":"a","upstream":"ustc","model":"deepseek-flash","usage":{"prompt":7,"completion":3,"total":10},"missing_usage":false}\n' "$old" >>"$LOG"
+
+  "$BIN/tollgate" -usage "$LOG" -windows 3h >"$TMP/usage3h.txt" 2>&1
+  "$BIN/tollgate" -usage "$LOG" >"$TMP/usageall.txt" 2>&1
+
+  local t c
+  t=$(awk -v w="3h" -v k="ustc/deepseek-flash" '/^== 窗口 /{b=($0 ~ ("^== 窗口 " w " "))} b && $1==k{print $7}' "$TMP/usage3h.txt")
+  [ "$t" = "3000" ] && pass "3h 窗口按模型汇总 deepseek-flash total=3000" || fail "3h deepseek-flash total=$t"
+  t=$(awk -v w="3h" -v k="ustc/qwen-chat" '/^== 窗口 /{b=($0 ~ ("^== 窗口 " w " "))} b && $1==k{print $7}' "$TMP/usage3h.txt")
+  [ "$t" = "30" ] && pass "3h 窗口另一模型单列 qwen-chat total=30" || fail "3h qwen-chat total=$t"
+  c=$(awk -v w="3h" -v k="ustc/deepseek-flash" '/^== 窗口 /{b=($0 ~ ("^== 窗口 " w " "))} b && $1==k{print $6}' "$TMP/usage3h.txt")
+  [ "$c" = "500" ] && pass "cached 列单列 (500)" || fail "cached 列=$c"
+  t=$(awk -v w="全部" -v k="ustc/deepseek-flash" '/^== 窗口 /{b=($0 ~ ("^== 窗口 " w " "))} b && $1==k{print $7}' "$TMP/usageall.txt")
+  [ "$t" = "3010" ] && pass "全部窗口含 8 小时前旧记录 (3010)" || fail "全部 total=$t"
 }
 
 case_ratelimit_min() {
@@ -562,6 +594,7 @@ case_all() {
   case_rotate
   case_stream
   case_usage
+  case_usage_report
   case_ratelimit_min
   case_ratelimit_429
   case_logging
@@ -579,6 +612,7 @@ main() {
     rotate)        case_rotate ;;
     stream)        case_stream ;;
     usage)         case_usage ;;
+    usage-report)  case_usage_report ;;
     ratelimit)     case_ratelimit_min; case_ratelimit_429 ;;
     logging)       case_logging ;;
     overhead)      case_overhead ;;

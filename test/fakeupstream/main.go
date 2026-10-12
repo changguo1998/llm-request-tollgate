@@ -6,6 +6,7 @@
 //   - 头 x-abort-after=N: 发出 N 个 data 块后直接关流 (不回 [DONE]),
 //     用于验证代理的 F6 行为 (流中失败发 SSE error 事件)。
 //   - usage 确定性生成: prompt_tokens = 7 + runeCount(body)/4, completion = 42,
+//     请求带 X-Fake-Cached: N 时额外回放 prompt_tokens_details.cached_tokens = N,
 //     测试脚本用同一公式核对代理日志。
 package main
 
@@ -49,6 +50,24 @@ func main() {
 		// 确定性用量: 测试脚本按同一组数值核对代理日志。
 		const promptTokens = 7
 		const completionTokens = 42
+		// 测试钩子: 带 X-Fake-Cached 时额外回放缓存命中 token (验证代理的缓存口径解析),
+		// 缺省不带, 保持既有断言里 usage 的形态不变。
+		cachedTokens := 0
+		if v := r.Header.Get("X-Fake-Cached"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				cachedTokens = n
+			}
+		}
+		usageMap := func() map[string]any {
+			u := map[string]any{
+				"prompt_tokens": promptTokens, "completion_tokens": completionTokens,
+				"total_tokens": promptTokens + completionTokens,
+			}
+			if cachedTokens > 0 {
+				u["prompt_tokens_details"] = map[string]any{"cached_tokens": cachedTokens}
+			}
+			return u
+		}
 
 		if !req.Stream {
 			w.Header().Set("Content-Type", "application/json")
@@ -60,10 +79,7 @@ func main() {
 					"message": map[string]any{"role": "assistant", "content": "Hello world!"},
 				}},
 				// 非流式响应按真实 provider 行为总是带 usage。
-				"usage": map[string]any{
-					"prompt_tokens": promptTokens, "completion_tokens": completionTokens,
-					"total_tokens": promptTokens + completionTokens,
-				},
+				"usage": usageMap(),
 			}
 			json.NewEncoder(w).Encode(resp)
 			return
@@ -111,7 +127,11 @@ func main() {
 		if includeUsage {
 			usage := `{"id":"chatcmpl-fake","object":"chat.completion.chunk","model":"` + req.Model + `","choices":[],"usage":{"prompt_tokens":` +
 				strconv.Itoa(promptTokens) + `,"completion_tokens":` + strconv.Itoa(completionTokens) +
-				`,"total_tokens":` + strconv.Itoa(promptTokens+completionTokens) + `}}`
+				`,"total_tokens":` + strconv.Itoa(promptTokens+completionTokens)
+			if cachedTokens > 0 {
+				usage += `,"prompt_tokens_details":{"cached_tokens":` + strconv.Itoa(cachedTokens) + `}`
+			}
+			usage += `}}`
 			if !send(usage) {
 				return
 			}

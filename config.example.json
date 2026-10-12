@@ -15,7 +15,7 @@
       "key_env": "TOLLGATE_USTC_KEY",
       "headers": {},
       "include_usage": true,
-      "budget": { "windows": { "3h": 30, "12h": 70, "24h": 100 }, "unit": 1, "refresh_sec": 60 },
+      "budget": { "windows": { "3h": 30, "12h": 70, "24h": 100 }, "unit": 1, "units": { "deepseek-v4.1-flash": 0.000002 }, "refresh_sec": 60 },
       "limits": { "rate_per_sec": 0.34, "burst": 1, "concurrency": 1 }
     },
     {

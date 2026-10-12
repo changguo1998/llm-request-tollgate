@@ -1,8 +1,8 @@
 # llm-request-tollgate — 顶层设计
 
-> 状态：第一版已实现 (main.go 单文件代理 + test/ 假上游自测, 77/77 断言全绿,
-> 2026-10-13; 预算闸门 D12 与日志按天轮转同批加入)。实现形态是自研单文件
-> 代理，不加插件，不引入现成网关。
+> 状态：第一版已实现 (main.go 单文件代理 + test/ 假上游自测, 82/82 断言全绿,
+> 2026-10-13; 预算闸门 D12、日志按天轮转、用量分解命令 `-usage` 同批加入)。
+> 实现形态是自研单文件代理，不加插件，不引入现成网关。
 > O1/O2/O3/O5 已实现（常驻自检 / -summary 汇总 / source 标识 / GET /v1/models）。
 > 文末附录保留已否决路径的调研记录，备查不再执行。
 
@@ -136,6 +136,13 @@ base URL 都可以改（有的在配置文件里，有的支持 profile 或临�
 - 花费不在代理内记（§1.4）；余额与花费走上游余额接口，后续接入。
 - 提供本地查询面：JSONL 日志 + `-summary` 汇总命令（O2 已实现）；`-summary` 传目录
   会汇总目录下全部 `*.jsonl`，跨天归档也能一起看。
+- 用量记三种输入口径：`prompt` / `cached`（命中缓存的输入 token）/ `completion`，另记
+  `total`。缓存价通常是输入价的 1/10，标定系数时必须分开看，所以代理把上游的三种
+  缓存字段名（`prompt_tokens_details.cached_tokens`、`prompt_cache_hit_tokens`、
+  `cache_read_input_tokens`）都解析进来。
+- `-usage <log|dir>` 按 上游 + 真实模型 × 窗口（`-windows`，缺省 3h/12h/24h，另加「全部」）
+  列出请求数 / 缺 usage 数 / 四类 token，用于标定预算折算系数：
+  系数 = 平台已用额度 ÷ 该模型窗口内 `total`，按真实模型 id 填进 `budget.units`。
 - 日志按本地日历天轮转：跨天（或隔天启动）时把上一段日志归档为
   `<base>-YYYY-MM-DD.jsonl`，同名不覆盖（依次 `-1`/`-2`）；归档不自动删除，留存交给外部。
   预算聚合跨归档读最近窗口内的文件，因此窗口跨越午夜也不会漏算。
@@ -221,8 +228,9 @@ base URL 都可以改（有的在配置文件里，有的支持 profile 或临�
 - `budget`：预算闸门（选配，缺省不启用）。`windows` 是滚动窗口限额表，例如
   `{"3h": 30, "12h": 70, "24h": 100}`（键为 3h/12h/90m/7d 这类时长，值是对应的平台
   额度上限）；代理定时（`refresh_sec`，缺省 60s）从 `log_path` 重建各窗口 token 累计，
-  任一窗口已用 × `unit` ≥ 上限即返 429 `budget_exceeded`；`unit` 是 token 折算平台额度
-  的系数（缺省 1，按网页已用对照标定）。
+  任一窗口已用 × 系数 ≥ 上限即返 429 `budget_exceeded`。系数按模型给：`units` 是
+  `{真实模型 id: 系数}`，缺省回落 `unit`，再回落 1；系数用 `-usage` 与平台面板对照标定
+  （平台各模型扣额倍率不同，公开的每模型价格见 `GET /api/models/public`）。
 - `include_usage`：per-upstream 开关，用来承接 O8 的探测结果。
 - `timeouts.queue_wait_ms` 对应 F3 的排队等待上限。
 - `aliases` 的值是 `[[上游 id, 真实模型 id], ...]`，顺序即优先级。
