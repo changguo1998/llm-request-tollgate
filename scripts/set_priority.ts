@@ -3,7 +3,7 @@
  * TUI editor for tollgate priorities in the shared model-list store.
  *
  * Edits ``tollgate_priority`` on provider entries and on model entries of the
- * store (``~/fff/config/llm-models.json``), previews the resulting candidate
+ * store (``$FFF_HOME/config/llm-models.json``, default ``~/fff/config``), previews the resulting candidate
  * order live, and can regenerate the proxy config + hot-reload the service.
  *
  * Candidate order inside an alias = model priority desc -> provider priority
@@ -50,7 +50,8 @@ type Candidate = { provider: string; model: Model };
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const GEN = join(REPO_ROOT, "scripts", "gen_tollgate_config.py");
-const DEFAULT_STORE = join(process.env.FFF_PRIVATE ?? join(homedir(), ".fff"), "config", "llm-models.json");
+const FFF_HOME = process.env.FFF_HOME || join(homedir(), "fff");
+const DEFAULT_STORE = join(FFF_HOME, "config", "llm-models.json");
 const DEFAULT_CONFIG = join(REPO_ROOT, "config.local.json");
 const PRIORITY = "tollgate_priority";
 const GROUP = "tollgate_group";
