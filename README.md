@@ -106,18 +106,30 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 生成 `upstreams` 与 `aliases`:
 
 - 别名的逻辑名取条目里的 `tollgate_group`, 没有就是模型 id 本身; 同名 (同 id 跨上游, 或显式
-  `tollgate_group`) 的归并成一个别名, 候选顺序 = `--providers` 顺序 = fallback 优先级。
-- `tollgate_group` 手工维护, 但不会被 store 更新脚本冲掉 (`merge_models_by_id` 继承 provider
-  API 不提供的字段)。跨上游同族不同名的模型 (如 ustc 的 `deepseek-flash` 与 ark 的
-  `deepseek-v4-1-flash*`) 就靠它并成一个别名。
-- `key_env` 取 store 里 `apiKey` 的占位符名; `limits` / `budget` / `auth_header` 等设置从
-  现有配置继承, 不会被覆盖 (缺失的 `budget.cooldown_ms` 会补默认值, `--cooldown-ms` 可改)。
+  `tollgate_group`) 的归并成一个别名。
+- 候选顺序 = fallback 优先级 = 模型的 `tollgate_priority` 降序, 同值看 provider 的
+  `tollgate_priority` 降序, 再同值按 `--providers` 顺序; 0 最小, 缺省即 0。
+- `tollgate_group` / `tollgate_priority` 手工维护, 但不会被 store 更新脚本冲掉
+  (`merge_models_by_id` 继承 provider API 不提供的字段)。跨上游同族不同名的模型 (如 ustc 的
+  `deepseek-flash` 与 ark 的 `deepseek-v4-1-flash*`) 就靠 `tollgate_group` 并成一个别名。
+- `key_env` 取 store 里 `apiKey` 的占位符名; `auth_header` 等设置从现有配置继承, 不会被覆盖。
+  provider 条目上的 `budget` (windows / units / cooldown_ms) 以 store 为准, store 没写的键才
+  回落现有配置 (缺失的 `budget.cooldown_ms` 补默认值, `--cooldown-ms` 可改)。
 - 写入 `config.local.json` (即 `~/fff/config/tollgate.json`); `--dry-run` 只打印,
   `--providers` 改上游与优先级。
 
 ```bash
 python3 scripts/gen_tollgate_config.py --dry-run
 python3 scripts/gen_tollgate_config.py
+```
+
+优先级用 TUI 调 (Node >= 22.6 直接跑 TS, 零依赖零构建): provider 面板 + 模型列表 +
+候选顺序实时预览, `+/-` 调值, `s` 存 store, `r` 重生成, `h` hup:
+
+```bash
+node scripts/set_priority.ts            # 交互式
+node scripts/set_priority.ts --order    # 只看多候选别名的当前顺序
+node scripts/set_priority.ts --set group 9
 ```
 
 ### 预算系数怎么定
@@ -152,4 +164,6 @@ python3 scripts/gen_tollgate_config.py
 - `deploy/` 常驻: `tollgate.service` 模板 + `install_service.sh` (systemd 用户服务)。
 - `scripts/gen_tollgate_config.py` 由 fff 模型列表生成本项目配置 (读
   `~/fff/config/llm-models.json` + 黑名单, 按 `tollgate_group` 归并成别名; 见下)。
+- `scripts/set_priority.ts` 调优先级的 TUI (Node >= 22.6 跑 TS, 无依赖): 候选顺序实时预览,
+  可保存 store / 重生成配置 / hup; 另有 `--order` / `--set` 无终端模式。
 - `tmp/` 一键验收脚本 (临时, 输出进 `tmp/*.log`, 不提交)。
