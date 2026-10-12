@@ -37,6 +37,14 @@ go build ./...
 
 agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 
+## 常驻与升级
+
+- 安装常驻: `./deploy/install_service.sh` (systemd 用户服务, 崩了自动拉起)。
+- 改代码后的更新: `go build -o llm-request-tollgate .` 然后
+  `systemctl --user restart tollgate.service` (二进制被替换不会自动重启, 需手动 restart)。
+- 只改配置 (别名/上游): `systemctl --user kill -s HUP tollgate` 热加载, 不用重启。
+- 自检: `./test/healthcheck.sh`。
+
 ## 配置
 
 `config.local.json` (gitignored, 地址与密钥不入库), 结构见 `config.example.json`:
