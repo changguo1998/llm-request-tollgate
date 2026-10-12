@@ -61,12 +61,11 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
     再 `./deploy/tollgate.sh restart` (二进制被替换不会自动重启, 需手动 restart)。
   - `hup` 改 `config.local.json` 别名/上游后热加载, 不用重启。
 - 自检: `./test/healthcheck.sh`。
-- **密钥来源**: 服务只从进程环境读 (`key_env`), 不落盘。unit 的 `ExecStart` 是
-  `/bin/bash -ic 'aikey all; exec <代理>'` — `-i` 让 bash 自己 source `~/.bashrc`
-  (fff 的 alias 与 `aikey` 因此就位), `aikey all` 再遍历 `~/.fff/keys/*.ai` 把密钥加载进
-  本进程环境。所以重启后不需要任何手工导入; 加载情况见 `./deploy/tollgate.sh logs`
-  (会打印 `Loaded ustc.ai` 等)。
-  排查: `ps -o cmd= -p $(systemctl --user show -p MainPID --value tollgate.service)`。
+- **重启后起不来?** 多半是缺 key 环境变量 (服务只从环境读, 不落盘)。常驻做法:
+  `~/fff/config/systemd/fff-keys.service` (软链到 `~/.config/systemd/user`, `enable` 后开机把
+  `~/.fff/keys/*.ai` 导入用户环境), 本服务模板里已 `Wants=/After=` 它; 手工兜底:
+  `for f in ~/.fff/keys/*.ai; do set -a; . "$f"; set +a; done` 后
+  `systemctl --user import-environment USTC_API_KEY GROUP_API_KEY ARKCP_API_KEY ARKAP_API_KEY`。
 - 密钥注入 (`key_env`): 真 key 只存环境变量, 不落任何盘。
   - 名字与 fff 的 `~/.fff/keys/*.ai` 一致 (`USTC_API_KEY` / `GROUP_API_KEY` /
     `ARKCP_API_KEY` / `ARKAP_API_KEY`), 即 store 里 `apiKey` 的占位符名。
