@@ -8,11 +8,12 @@ models into tollgate aliases, and writes the proxy config (default: this
 repository's ``config.local.json``, which is a symlink to
 ``~/fff/config/tollgate.json``).
 
-Grouping: a model's alias name is its ``model_group`` field when the store
+Grouping: a model's alias name is its ``tollgate_group`` field when the store
 entry carries one, otherwise the model id itself. Models sharing an alias name
-(same id served by several providers, or an explicit ``model_group``) collapse
-into one alias whose candidates are ordered by ``--providers`` order, which is
-the failover priority. ``model_group`` survives the store updaters because
+(same id served by several providers, or an explicit ``tollgate_group``) collapse
+into one alias; candidate order (= failover priority) is the model's
+``tollgate_priority`` descending (missing counts as 0, the lowest), ties broken
+by ``--providers`` order. Both fields survive the store updaters because
 ``merge_models_by_id`` inherits fields the provider API does not report.
 
 Rewritten: the ``upstreams`` list (ids + base_url) and ``aliases``.
@@ -58,6 +59,8 @@ DEFAULT_PROXY_URL = ""  # 空 = 从配置的 listen 推导
 DEFAULT_PROXY_KEY_ENV = "TOLLGATE_API_KEY"
 PROXY_PROVIDER = "tollgate"  # store 里代表本代理自己的 provider 名
 PROXY_KIND = "proxy"  # store 条目的 kind 标记: 生成列表/上游时一律跳过, 防自转发递归
+PRIORITY_FIELD = "tollgate_priority"  # 模型级优先级: 越大越先用, 缺省 0 (最小)
+GROUP_FIELD = "tollgate_group"  # 模型级分组: 同值并成一个别名, 缺省用模型 id
 
 # Upstream fields carried over from an existing config entry.
 PRESERVED_UPSTREAM_KEYS = (
@@ -84,18 +87,25 @@ def load_json(path: Path):
 
 
 def alias_name(model: dict) -> str:
-    """Alias a model belongs to: explicit model_group, else the model id."""
-    group = model.get("model_group")
+    """Alias a model belongs to: explicit tollgate_group, else the model id."""
+    group = model.get(GROUP_FIELD)
     return group.strip() if isinstance(group, str) and group.strip() else model["id"]
+
+
+def priority_of(model: dict) -> int:
+    """Candidate order inside an alias: higher wins, missing/0 is the lowest."""
+    value = model.get(PRIORITY_FIELD)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def build_aliases(store: dict, providers: list[str], dropped: set[str]):
     """Return (aliases, kept counts, dropped counts) with candidates in provider order."""
     aliases: dict[str, list[list[str]]] = {}
+    ranked: dict[str, list[tuple[int, int, str]]] = {}
     kept: dict[str, int] = {}
     removed: dict[str, int] = {}
     warnings: list[str] = []
-    for provider in providers:
+    for rank, provider in enumerate(providers):
         models = store[provider].get("models", [])
         kept[provider] = 0
         removed[provider] = 0
@@ -105,13 +115,21 @@ def build_aliases(store: dict, providers: list[str], dropped: set[str]):
                 removed[provider] += 1
                 continue
             name = alias_name(model)
-            candidates = aliases.setdefault(name, [])
-            pair = [provider, model_id]
-            if pair not in candidates:
-                candidates.append(pair)
+            # 候选顺序: tollgate_priority 降序 (越大越先用), 同优先级按 providers 顺序。
+            ranked.setdefault(name, []).append((-priority_of(model), rank, model_id))
             kept[provider] += 1
         if not kept[provider]:
             warnings.append(f"provider {provider}: no model left after the droplist")
+    for name, items in ranked.items():
+        seen = set()
+        candidates = []
+        for _, rank, model_id in sorted(items):
+            pair = [providers[rank], model_id]
+            if tuple(pair) in seen:
+                continue
+            seen.add(tuple(pair))
+            candidates.append(pair)
+        aliases[name] = candidates
     return aliases, kept, removed, warnings
 
 

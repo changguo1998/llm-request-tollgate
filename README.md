@@ -105,9 +105,9 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 由 fff 的 `fff-update-*-llm-list.py` 维护) 与 `llm-models-droplist.json` (精确匹配黑名单),
 生成 `upstreams` 与 `aliases`:
 
-- 别名的逻辑名取条目里的 `model_group`, 没有就是模型 id 本身; 同名 (同 id 跨上游, 或显式
-  `model_group`) 的归并成一个别名, 候选顺序 = `--providers` 顺序 = fallback 优先级。
-- `model_group` 手工维护, 但不会被 store 更新脚本冲掉 (`merge_models_by_id` 继承 provider
+- 别名的逻辑名取条目里的 `tollgate_group`, 没有就是模型 id 本身; 同名 (同 id 跨上游, 或显式
+  `tollgate_group`) 的归并成一个别名, 候选顺序 = `--providers` 顺序 = fallback 优先级。
+- `tollgate_group` 手工维护, 但不会被 store 更新脚本冲掉 (`merge_models_by_id` 继承 provider
   API 不提供的字段)。跨上游同族不同名的模型 (如 ustc 的 `deepseek-flash` 与 ark 的
   `deepseek-v4-1-flash*`) 就靠它并成一个别名。
 - `key_env` 取 store 里 `apiKey` 的占位符名; `limits` / `budget` / `auth_header` 等设置从
@@ -151,5 +151,5 @@ python3 scripts/gen_tollgate_config.py
 - `test/healthcheck.sh` 自检: 二进制 / 配置 (-check) / 端口三项, 退出码 0 = 全通过。
 - `deploy/` 常驻: `tollgate.service` 模板 + `install_service.sh` (systemd 用户服务)。
 - `scripts/gen_tollgate_config.py` 由 fff 模型列表生成本项目配置 (读
-  `~/fff/config/llm-models.json` + 黑名单, 按 `model_group` 归并成别名; 见下)。
+  `~/fff/config/llm-models.json` + 黑名单, 按 `tollgate_group` 归并成别名; 见下)。
 - `tmp/` 一键验收脚本 (临时, 输出进 `tmp/*.log`, 不提交)。
