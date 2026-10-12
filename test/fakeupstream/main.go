@@ -69,6 +69,9 @@ func main() {
 			return u
 		}
 
+		// 回显收到的认证头, 自测据此断言代理发的 scheme (Bearer 前缀)。
+		w.Header().Set("X-Fake-Auth", r.Header.Get("Authorization"))
+
 		if !req.Stream {
 			w.Header().Set("Content-Type", "application/json")
 			resp := map[string]any{

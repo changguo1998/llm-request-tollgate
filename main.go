@@ -76,6 +76,7 @@ type UpstreamCfg struct {
 	AuthHeader     string            `json:"auth_header"`
 	Key            string            `json:"key"`
 	KeyEnv         string            `json:"key_env,omitempty"`
+	KeyPrefix      *string           `json:"key_prefix,omitempty"`
 	Headers        map[string]string `json:"headers"`
 	IncludeUsage   bool              `json:"include_usage"`
 	BreakerFail    int               `json:"breaker_fail,omitempty"`
@@ -1128,6 +1129,18 @@ func relayStream(w http.ResponseWriter, body io.Reader, logical string) (*Usage,
 	return usage, missing
 }
 
+// keyPrefix 给出认证头里的 scheme: 显式配置优先; 缺省 Authorization 用 "Bearer ",
+// 其余头 (api-key / x-api-key 这类) 直接放裸 key。
+func (u *UpstreamCfg) keyPrefix() string {
+	if u.KeyPrefix != nil {
+		return *u.KeyPrefix
+	}
+	if strings.EqualFold(u.AuthHeader, "Authorization") {
+		return "Bearer "
+	}
+	return ""
+}
+
 // prepareOutboundHeaders 拷贝客户端头, 替换认证, 删 hop-by-hop 与 Accept-Encoding。
 func prepareOutboundHeaders(dst, src http.Header, up *UpstreamCfg) {
 	for k, vv := range src {
@@ -1141,7 +1154,7 @@ func prepareOutboundHeaders(dst, src http.Header, up *UpstreamCfg) {
 	}
 	dst.Del("Accept-Encoding")
 	if up.AuthHeader != "" {
-		dst.Set(up.AuthHeader, up.Key)
+		dst.Set(up.AuthHeader, up.keyPrefix()+up.Key)
 	}
 	for k, v := range up.Headers {
 		dst.Set(k, v)

@@ -1,6 +1,6 @@
 # llm-request-tollgate — 顶层设计
 
-> 状态：第一版已实现 (main.go 单文件代理 + test/ 假上游自测, 82/82 断言全绿,
+> 状态：第一版已实现 (main.go 单文件代理 + test/ 假上游自测, 83/83 断言全绿,
 > 2026-10-13; 预算闸门 D12、日志按天轮转、用量分解命令 `-usage` 同批加入)。
 > 实现形态是自研单文件代理，不加插件，不引入现成网关。
 > O1/O2/O3/O5 已实现（常驻自检 / -summary 汇总 / source 标识 / GET /v1/models）。
@@ -222,6 +222,10 @@ base URL 都可以改（有的在配置文件里，有的支持 profile 或临�
 
 - `base_url` 自带路径前缀（含 `/v1`），以 §4.5 那家的实测形态为准。
 - `auth_header` 与 `headers`：有的中转不用 `Authorization`（例如 `api-key`），有的要额外头。
+- `key_prefix`：认证头里的 scheme，缺省对 `Authorization` 用 `"Bearer "`，其余头（`api-key` /
+  `x-api-key` 这类）直接放裸 key；显式给值可覆盖，给 `""` 即裸 key 进 `Authorization`。
+  实测（2026-10-13）：ustc 与火山 ARK 都要求 `Bearer ` 前缀，裸 key 会被判
+  "Malformed API Key" / "API key ... invalid"。
 - `key_env`：配置只存环境变量名，真 key 启动/热加载时从环境取，不落盘；缺省回落 `key`。
 - `breaker_fail` / `breaker_cooldown_ms`：熔断参数（连续失败阈值 / 冷却毫秒），选配，
   缺省 5 次 / 30 秒。

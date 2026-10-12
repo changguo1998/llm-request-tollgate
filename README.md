@@ -37,7 +37,7 @@
 go build ./...
 # 填好 config.local.json (从 config.example.json 复制) 后:
 ./llm-request-tollgate -config config.local.json
-# 起假上游 + 全量自测 (77 项断言):
+# 起假上游 + 全量自测 (83 项断言):
 ./test/run_selftest.sh all
 # 常驻 (systemd 用户服务, 崩了自动拉起):
 ./deploy/install_service.sh
@@ -64,8 +64,9 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
   - 名字与 fff 的 `~/.fff/keys/*.ai` 一致 (`USTC_API_KEY` / `GROUP_API_KEY` /
     `ARKCP_API_KEY` / `ARKAP_API_KEY`), 即 store 里 `apiKey` 的占位符名。
   - 交互用: `export USTC_API_KEY=...` (建议写进 shell 启动文件)。
-  - systemd 服务用: `systemctl --user import-environment USTC_API_KEY GROUP_API_KEY ARKCP_API_KEY ARKAP_API_KEY`
-    或 `systemctl --user set-environment USTC_API_KEY=...`, 然后 `./deploy/tollgate.sh restart`。
+  - systemd 服务用: `for f in ~/.fff/keys/*.ai; do set -a; . "$f"; set +a; done` 后
+    `systemctl --user import-environment USTC_API_KEY GROUP_API_KEY ARKCP_API_KEY ARKAP_API_KEY`
+    (或 `systemctl --user set-environment USTC_API_KEY=...`), 再 `./deploy/tollgate.sh restart`。
 
 ## 配置
 
@@ -79,6 +80,8 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 - `upstreams`: 每个上游一条记录 (id / base_url / auth_header / key 或 key_env / headers /
   include_usage / limits / budget), 限速参数挂在记录上, 即「上游 + 凭据」分组。
   `key_env` 只存环境变量名, 真 key 启动时从环境取 (密钥不落盘, 见「常驻与升级」)。
+  `key_prefix` 是认证头里的 scheme: 缺省对 `Authorization` 用 `Bearer `, 其他头不带
+  (ustc 与火山 ARK 实测都要 `Bearer `; 给 `""` 可强制裸 key)。
   `budget`: `{ windows: {"3h":30,"12h":70,"24h":100}, unit:1, refresh_sec:60 }` —
   滚动窗口限额; `unit` 是 token 折算平台额度的系数 (默认 1, 按网页已用对照后调整);
   `refresh_sec` 是定时扫日志的间隔。
@@ -135,7 +138,7 @@ python3 scripts/gen_tollgate_config.py
 - `main.go` 单文件代理 (含假上游自测所需的全部实现)。
 - `test/fakeupstream/` 假上游: 回放思考块 / 文本 / 工具调用 / usage 的 SSE,
   支持中途断流 (验证 F6)。
-- `test/run_selftest.sh` 自测: 13 组用例 82 项断言, 对本地假上游跑代理。
+- `test/run_selftest.sh` 自测: 13 组用例 83 项断言, 对本地假上游跑代理。
 - `test/healthcheck.sh` 自检: 二进制 / 配置 (-check) / 端口三项, 退出码 0 = 全通过。
 - `deploy/` 常驻: `tollgate.service` 模板 + `install_service.sh` (systemd 用户服务)。
 - `scripts/gen_tollgate_config.py` 由 fff 模型列表生成本项目配置 (读

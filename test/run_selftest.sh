@@ -100,6 +100,13 @@ case_alias() {
   code=$(curl -s -o "$TMP/resp.txt" -w '%{http_code}' -X GET "http://127.0.0.1:18800/v1/models")
   [ "$code" = "200" ] && pass "/v1/models -> 200 (O5)" || fail "/v1/models -> $code"
   grep -q '"test-model"' "$TMP/resp.txt" && pass "/v1/models 含逻辑名 test-model" || fail "/v1/models 缺 test-model"
+
+  # 认证头 scheme: Authorization 缺省带 "Bearer " 前缀 (key_prefix 可覆盖)。
+  curl -s -D "$TMP/hdr-auth.txt" -o /dev/null -X POST "http://127.0.0.1:18800/v1/chat/completions" \
+    -H 'Content-Type: application/json' -H 'Authorization: Bearer client-key' \
+    -d '{"model":"test-model","messages":[{"role":"user","content":"hi"}]}'
+  auth=$(grep -i '^x-fake-auth:' "$TMP/hdr-auth.txt" | tr -d '\r' | sed 's/^[^:]*: *//')
+  [ "$auth" = "Bearer fake-key" ] && pass "认证头替换为 Bearer <上游 key>" || fail "认证头=$auth (want Bearer fake-key)"
 }
 
 case_keyenv() {
