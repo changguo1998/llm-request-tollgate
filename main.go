@@ -1,6 +1,6 @@
 // llm-request-tollgate: 自研单文件 OpenAI 兼容代理 (设计文档 docs/design.md)。
 //
-// 单进程内含七件事 (设计 §4.1):
+// 单进程内含八件事 (设计 §4.1):
 //  1. 别名表 (白名单 + 路由): 逻辑模型名 -> [(上游, 真实模型 id), ...],
 //     未命中的模型名直接返 404, 不猜上游 (D2)。
 //  2. 按上游分组 (v1 一个上游一把 key, "上游+凭据" 等价于上游记录) 的
@@ -14,6 +14,7 @@
 //  6. 响应整形: 非流 / 流式 chunk 里的 model 字段改回请求的逻辑名 (O9)。
 //  7. 对外面: GET /v1/models 返回逻辑名清单 (O5); 日志记 source 标识 (O3);
 //     -summary 汇总命令 (O2); -check 配置自检 + deploy/ 常驻与自检脚本 (O1)。
+//  8. 集中 fallback: 候选按序尝试, 首字节前 429/5xx/传输失败换下一个, 全败透传最后错误。
 //
 // 配置: config.local.json (gitignored, 软链到 ~/fff/config), SIGHUP 热加载别名与上游 (F1);
 // key: 支持 key_env 字段只存环境变量名, 真 key 启动/热加载时从环境变量取, 不落盘。
@@ -270,6 +271,7 @@ type logRec struct {
 	Client      string `json:"client"`
 	UA          string `json:"ua,omitempty"`
 	Source      string `json:"source,omitempty"`
+	Fallbacks   int    `json:"fallbacks,omitempty"`
 	Err         string `json:"err,omitempty"`
 	BudgetAllow bool   `json:"budget_allow"`
 }
@@ -404,6 +406,40 @@ var clientAuthHeaders = []string{
 	"Authorization", "Api-Key", "X-Api-Key", "api-key", "X-Goog-Api-Key", "Proxy-Authorization",
 }
 
+// shouldFallback: 该状态码值得换下一个候选重试 (首字节前)。429 与 5xx 可重试;
+// 其余 4xx (模型不存在 / 参数错 / 鉴权错) 不重试, 直接透传。
+func shouldFallback(status int) bool {
+	return status == http.StatusTooManyRequests || status >= 500
+}
+
+// buildAttemptPayload 按候选上游生成转发请求体: 真实模型 id + 按上游开关注入
+// include_usage。每次从原始 payload 复制, 不跨尝试共享可变状态。
+func buildAttemptPayload(payload map[string]any, model string, includeUsage, stream bool) ([]byte, error) {
+	p := make(map[string]any, len(payload))
+	for k, v := range payload {
+		p[k] = v
+	}
+	if stream {
+		var so map[string]any
+		if orig, ok := p["stream_options"].(map[string]any); ok {
+			so = make(map[string]any, len(orig)+1)
+			for k, v := range orig {
+				so[k] = v
+			}
+		} else if includeUsage {
+			so = map[string]any{}
+		}
+		if so != nil {
+			if includeUsage {
+				so["include_usage"] = true
+			}
+			p["stream_options"] = so
+		}
+	}
+	p["model"] = model
+	return json.Marshal(p)
+}
+
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/v1/models" {
 		if r.Method != http.MethodGet {
@@ -508,46 +544,114 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	queueMs := time.Since(gateStart).Milliseconds()
 	queued := queueMs >= 5
 
-	// 改写请求体: 真实模型 id + 强制 include_usage (设计 §4.3)。
-	payload["model"] = realModel
-	if chosen.IncludeUsage && stream {
-		so, _ := payload["stream_options"].(map[string]any)
-		if so == nil {
-			so = map[string]any{}
-			payload["stream_options"] = so
+	// 集中 fallback: 按候选顺序尝试, 只在还没给客户端写任何字节前
+	// (传输失败 / 上游 429 或 5xx) 换下一个候选; 全部失败原样透传最后错误。
+	type attempt struct {
+		up  *UpstreamCfg
+		mod string
+	}
+	attempts := make([]attempt, 0, len(alias))
+	for _, cand := range alias {
+		if u, ok := a.upstreams[cand.Upstream]; ok {
+			attempts = append(attempts, attempt{u, cand.Model})
 		}
-		so["include_usage"] = true
-	}
-	newBody, err := json.Marshal(payload)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "server_error", "rewrite body failed")
-		return
 	}
 
-	outReq, err := http.NewRequestWithContext(r.Context(), r.Method,
-		chosen.BaseURL+upstreamPath, bytes.NewReader(newBody))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
-		return
-	}
-	outReq.ContentLength = int64(len(newBody))
-	prepareOutboundHeaders(outReq.Header, r.Header, chosen)
+	var (
+		resp            *http.Response
+		lastErr         error
+		lastStatus      int
+		lastBody        []byte
+		lastHdr         http.Header
+		lastUpID, lastM string
+		failed          int
+		servedUp        *UpstreamCfg
+		servedMod       string
+	)
+	for _, at := range attempts {
+		body, err := buildAttemptPayload(payload, at.mod, at.up.IncludeUsage, stream)
+		if err != nil {
+			lastErr = err
+			lastUpID, lastM = at.up.ID, at.mod
+			failed++
+			continue
+		}
+		outReq, err := http.NewRequestWithContext(r.Context(), r.Method,
+			at.up.BaseURL+upstreamPath, bytes.NewReader(body))
+		if err != nil {
+			lastErr = err
+			lastUpID, lastM = at.up.ID, at.mod
+			failed++
+			continue
+		}
+		outReq.ContentLength = int64(len(body))
+		prepareOutboundHeaders(outReq.Header, r.Header, at.up)
 
-	resp, err := a.transport.RoundTrip(outReq)
-	if err != nil {
-		// 首字节之前失败: 真实错误原样交给 agent (设计 §2.2)。
-		writeError(w, http.StatusBadGateway, "upstream_error", err.Error())
+		resp, err = a.transport.RoundTrip(outReq)
+		if err != nil {
+			lastErr = err
+			lastUpID, lastM = at.up.ID, at.mod
+			failed++
+			continue
+		}
+		if shouldFallback(resp.StatusCode) {
+			b, rerr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("upstream %s returned %d", at.up.ID, resp.StatusCode)
+			lastStatus, lastHdr, lastBody = resp.StatusCode, resp.Header.Clone(), b
+			lastUpID, lastM = at.up.ID, at.mod
+			failed++
+			if rerr != nil {
+				lastErr = rerr
+			}
+			continue
+		}
+		servedUp, servedMod = at.up, at.mod
+		break
+	}
+
+	if servedUp == nil {
+		// 全部候选失败: 最近一次是 HTTP 错误就保留状态码/头/体原样透传, 否则 502。
+		if lastStatus != 0 && lastBody != nil {
+			dst := w.Header()
+			for k, vv := range lastHdr {
+				if isHopHeader(k) {
+					continue
+				}
+				for _, v := range vv {
+					dst.Add(k, v)
+				}
+			}
+			w.WriteHeader(lastStatus)
+			w.Write(lastBody)
+			a.logReq(logRec{
+				Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
+				Upstream: lastUpID, Model: lastM, Path: r.URL.Path, Stream: stream,
+				Status: lastStatus, Missing: true, Queued: queued, QueueMs: queueMs,
+				Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"),
+				Source: r.Header.Get("X-Tollgate-Source"),
+				Err:    lastErr.Error(), Fallbacks: failed, BudgetAllow: budgetAllow,
+			})
+			return
+		}
+		msg := "all upstreams failed"
+		if lastErr != nil {
+			msg = lastErr.Error()
+		}
+		writeError(w, http.StatusBadGateway, "upstream_error", msg)
 		a.logReq(logRec{
 			Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
-			Upstream: chosen.ID, Model: realModel, Path: r.URL.Path, Stream: stream,
+			Upstream: lastUpID, Model: lastM, Path: r.URL.Path, Stream: stream,
 			Status: http.StatusBadGateway, Missing: true, Queued: queued, QueueMs: queueMs,
 			Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"),
 			Source: r.Header.Get("X-Tollgate-Source"),
-			Err:    err.Error(), BudgetAllow: budgetAllow,
+			Err:    msg, Fallbacks: failed, BudgetAllow: budgetAllow,
 		})
 		return
 	}
 	defer resp.Body.Close()
+	chosen = servedUp
+	realModel = servedMod
 
 	// 转发响应头 (F9): 除 hop-by-hop 外原样透传。
 	dst := w.Header()
@@ -590,7 +694,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
 		Upstream: chosen.ID, Model: realModel, Path: r.URL.Path, Stream: stream,
 		Status: status, Usage: usage, Missing: missing, Queued: queued, QueueMs: queueMs,
-		Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"), Source: r.Header.Get("X-Tollgate-Source"), BudgetAllow: budgetAllow,
+		Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"), Source: r.Header.Get("X-Tollgate-Source"),
+		Fallbacks: failed, BudgetAllow: budgetAllow,
 	})
 }
 

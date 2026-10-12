@@ -2,7 +2,7 @@
 # llm-request-tollgate 自测: 对本地假上游跑代理, 按用例断言 (设计 §4.7)。
 #
 # 用法: test/run_selftest.sh <case|all>
-#   case: alias | keyenv | ratelimit | usage | stream | logging | overhead
+#   case: alias | keyenv | fallback | ratelimit | usage | stream | logging | overhead
 # 每个用例独立起一个假上游 + 一个代理 (各自端口, 互不干扰)。
 set -u
 
@@ -126,6 +126,40 @@ EOF
   else
     fail "有 env -> -check 失败"
   fi
+}
+
+case_fallback() {
+  say "=== fallback (候选依序, 失败切下一个) ==="
+  local LOG="$TMP/log-fb.jsonl"
+  rm -f "$LOG"
+  cat >"$TMP/cfg-fb.json" <<EOF
+{
+  "listen": "127.0.0.1:18813",
+  "log_path": "$LOG",
+  "timeouts": { "connect_ms": 1000, "response_header_ms": 5000, "stream_idle_ms": 3000, "queue_wait_ms": 10000 },
+  "upstreams": [
+    { "id": "dead", "base_url": "http://127.0.0.1:19999/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true, "limits": { "rate_per_sec": 100, "burst": 10, "concurrency": 10 } },
+    { "id": "fu", "base_url": "http://127.0.0.1:19013/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true, "limits": { "rate_per_sec": 100, "burst": 10, "concurrency": 10 } }
+  ],
+  "aliases": {
+    "test-model": [["dead", "deepseek-v4.1-flash"], ["fu", "deepseek-v4.1-flash"]],
+    "onlydead-model": [["dead", "deepseek-v4.1-flash"]]
+  }
+}
+EOF
+  start_fake 19013 20
+  start_proxy 18813 "$TMP/cfg-fb.json"
+
+  # dead 上游端口无人监听 -> 传输失败, 应切换到 fu
+  local code
+  code=$(post 18813 '{"model":"test-model","messages":[{"role":"user","content":"hi"}]}')
+  [ "$code" = "200" ] && pass "dead->fu 切换后 200" || fail "fallback -> $code"
+  grep '"upstream":"fu"' "$LOG" | grep -q '"fallbacks":1' \
+    && pass "日志记 upstream=fu, fallbacks=1" || fail "fallback 日志不对"
+
+  # 全部候选失败 -> 502 透传
+  code=$(post 18813 '{"model":"onlydead-model","messages":[{"role":"user","content":"hi"}]}')
+  [ "$code" = "502" ] && pass "全部失败 -> 502" || fail "allfail -> $code"
 }
 
 case_stream() {
@@ -355,6 +389,7 @@ case_overhead() {
 case_all() {
   case_alias
   case_keyenv
+  case_fallback
   case_stream
   case_usage
   case_ratelimit_min
@@ -368,6 +403,7 @@ main() {
   case "${1:-all}" in
     alias)         case_alias ;;
     keyenv)        case_keyenv ;;
+    fallback)      case_fallback ;;
     stream)        case_stream ;;
     usage)         case_usage ;;
     ratelimit)     case_ratelimit_min; case_ratelimit_429 ;;

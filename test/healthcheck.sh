@@ -6,6 +6,14 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CFG="${1:-$ROOT/config.local.json}"
 BIN="$ROOT/llm-request-tollgate"
+
+# key_env 密钥只存在环境变量(内存), 从 systemd 用户管理器同步 (与服务同源, 不落盘)。
+while IFS= read -r line; do
+  case "$line" in
+    TOLLGATE_*=*) export "$line" ;;
+  esac
+done < <(systemctl --user show-environment 2>/dev/null)
+
 PASS=0
 FAIL=0
 
