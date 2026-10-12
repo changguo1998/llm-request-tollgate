@@ -4,19 +4,18 @@
 Description=llm-request-tollgate (LLM request proxy)
 After=network-online.target
 Wants=network-online.target
-# fff-keys.service (在 ~/fff/config/systemd, 软链到 ~/.config/systemd/user) 负责把
-# ~/.fff/keys/*.ai 里的密钥导入 systemd 用户环境; 缺了它, 重启后本服务会因 key_env
-# 解析失败起不来。没有该 unit 时 Wants 只是警告, 不影响启动。
-After=fff-keys.service
-Wants=fff-keys.service
 
 [Service]
 Type=simple
 WorkingDirectory=__ROOT__
-# 密钥只从环境变量来 (key_env), 不落盘:
-#   systemctl --user import-environment USTC_API_KEY GROUP_API_KEY ARKCP_API_KEY ARKAP_API_KEY
-#   或 systemctl --user set-environment USTC_API_KEY=... (名字与配置里的 key_env 一致)
-ExecStart=__ROOT__/llm-request-tollgate -config __ROOT__/config.local.json
+# 密钥只从环境变量来 (key_env), 不落盘。ExecStart 包一层 shell, 借用 fff 自己的
+# `aikey all` (遍历 ~/.fff/keys/*.ai 逐个 fffenv) 把密钥加载进本进程环境:
+# 先 source shellrc.sh 拿 FFF_HOME/FFF_PRIVATE/PATH, 再取定义 fffenv 与 aikey 的两个
+# aliases.d 文件 -- 不直接 source ~/.bashrc, 因为它在非交互 shell 里会提前 return
+# ("If not running interactively" 分支), 根本不会定义 aikey; 也不整份 source aliases.sh,
+# 免得牵入依赖 fffz 的别名文件。加载结果 (Loaded xxx.ai) 会进 journal:
+#   ./deploy/tollgate.sh logs
+ExecStart=/bin/bash -c '. %h/fff/config/shellrc.sh; . %h/fff/config/aliases.d/25-env.sh; . %h/fff/config/aliases.d/10-ai.sh; aikey all; exec __ROOT__/llm-request-tollgate -config __ROOT__/config.local.json'
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=10
