@@ -156,7 +156,30 @@ def run_hup() -> tuple:
 
 # ---------- TUI ----------
 
-HELP = "up/down 移动  Tab 换面板  +/- 调优先级  = 输入值  / 过滤  s 保存  r 重生成  h hup  q 退出"
+# 底部常驻键位提示: (键, 说明); 超宽自动折到第二行。
+KEYS = (
+    ("\u2191/\u2193", "移动"), ("PgUp/PgDn", "翻页"), ("g/G", "首末"), ("Tab", "换面板"),
+    ("+/-", "优先级"), ("=", "输入值"), ("/", "过滤"), ("s", "保存"),
+    ("r", "重生成"), ("h", "hup"), ("q", "退出"),
+)
+FOOTER_ROWS = 3  # 1 行消息 + 2 行键位
+
+
+def layout_keys(width: int, rows: int = FOOTER_ROWS - 1) -> list:
+    """把键位提示按宽度折成若干行 (返回每行的 (键, 说明) 列表)。"""
+    lines, current, used = [], [], 0
+    for key, desc in KEYS:
+        need = len(key) + len(desc) + 3
+        if current and used + need > width - 1:
+            lines.append(current)
+            current, used = [], 0
+            if len(lines) >= rows:
+                break
+        current.append((key, desc))
+        used += need
+    if current and len(lines) < rows:
+        lines.append(current)
+    return lines
 
 
 class Tui:
@@ -226,18 +249,29 @@ class Tui:
         stdscr.erase()
         height, width = stdscr.getmaxyx()
         left_w = max(38, width // 2)
-        prov_h = min(len(self.providers()) + 3, max(4, height // 3))
+        body = max(6, height - FOOTER_ROWS)
+        prov_h = min(len(self.providers()) + 3, max(4, body // 3))
         self.draw_providers(stdscr, prov_h, left_w)
-        self.draw_models(stdscr, prov_h, height, left_w)
-        self.draw_preview(stdscr, height, width, left_w + 1)
+        self.draw_models(stdscr, prov_h, body, left_w)
+        self.draw_preview(stdscr, body, width, left_w + 1)
+        self.draw_footer(stdscr, height, width)
+        stdscr.refresh()
+
+    def draw_footer(self, stdscr, height: int, width: int) -> None:
+        """消息行 (反显) + 常驻键位提示 (键名高亮, 说明灰)."""
         msg = f" {self.message}" + (" [未保存]" if self.dirty is True else "") + " "
         try:
-            stdscr.addnstr(height - 1, 0, msg, width - 1, curses.A_REVERSE)
-            if len(msg) < width - 1:
-                stdscr.addnstr(height - 1, len(msg), " " + HELP, width - 2 - len(msg), curses.A_DIM)
+            stdscr.addnstr(height - FOOTER_ROWS, 0, msg.ljust(width - 1), width - 1, curses.A_REVERSE)
         except curses.error:
             pass
-        stdscr.refresh()
+        for line, items in enumerate(layout_keys(width)):
+            x = 0
+            for key, desc in items:
+                seg, tail = f" {key} ", f"{desc} "
+                self.safe_add(stdscr, height - FOOTER_ROWS + 1 + line, x, seg, curses.A_BOLD)
+                x += len(seg)
+                self.safe_add(stdscr, height - FOOTER_ROWS + 1 + line, x, tail, curses.A_DIM)
+                x += len(tail)
 
     def draw_providers(self, stdscr, prov_h: int, left_w: int) -> None:
         head = " Providers " + ("(焦点)" if self.focus == "provider" else "")
@@ -282,7 +316,7 @@ class Tui:
         cands = build_aliases(self.store, self.config, self.store_path).get(alias, [])
         self.safe_add(stdscr, 1, x, f" {alias} ({len(cands)} 候选)", curses.A_BOLD)
         for i, (name, model) in enumerate(cands):
-            if i + 2 >= height - 1:
+            if i + 2 >= height:
                 break
             entry = self.store["providers"][name]
             text = f" {i + 1}. {name}/{model['id']}  M{priority(model)} P{priority(entry)}"
