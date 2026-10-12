@@ -39,10 +39,11 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 
 ## 常驻与升级
 
-- 安装常驻: `./deploy/install_service.sh` (systemd 用户服务, 崩了自动拉起)。
-- 改代码后的更新: `go build -o llm-request-tollgate .` 然后
-  `systemctl --user restart tollgate.service` (二进制被替换不会自动重启, 需手动 restart)。
-- 只改配置 (别名/上游): `systemctl --user kill -s HUP tollgate` 热加载, 不用重启。
+- 安装常驻: `./deploy/tollgate.sh install` (systemd 用户服务, 崩了自动拉起)。
+- 日常操作: `./deploy/tollgate.sh <status|logs|restart|stop|start|hup|uninstall>`
+  - `restart` 更新代码后用它: 先 `go build -o llm-request-tollgate .`
+    再 `./deploy/tollgate.sh restart` (二进制被替换不会自动重启, 需手动 restart)。
+  - `hup` 改 `config.local.json` 别名/上游后热加载, 不用重启。
 - 自检: `./test/healthcheck.sh`。
 
 ## 配置
