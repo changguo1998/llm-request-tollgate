@@ -6,11 +6,6 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CFG="${1:-$ROOT/config.local.json}"
 BIN="$ROOT/llm-request-tollgate"
-
-# key 从环境变量来: 有 tollgate.env 就先加载 (与系统服务 EnvironmentFile 同源)。
-ENVFILE="$HOME/fff/config/tollgate.env"
-[ -f "$ENVFILE" ] && set -a && . "$ENVFILE" && set +a
-
 PASS=0
 FAIL=0
 

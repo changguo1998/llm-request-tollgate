@@ -45,6 +45,10 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
     再 `./deploy/tollgate.sh restart` (二进制被替换不会自动重启, 需手动 restart)。
   - `hup` 改 `config.local.json` 别名/上游后热加载, 不用重启。
 - 自检: `./test/healthcheck.sh`。
+- 密钥注入 (`key_env`): 真 key 只存环境变量, 不落任何盘。
+  - 交互用: `export TOLLGATE_USTC_KEY=...` (建议写进 shell 启动文件)。
+  - systemd 服务用: `systemctl --user import-environment TOLLGATE_USTC_KEY TOLLGATE_GROUP_KEY`
+    或 `systemctl --user set-environment TOLLGATE_USTC_KEY=...`, 然后 `./deploy/tollgate.sh restart`。
 
 ## 配置
 
@@ -56,8 +60,7 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 - `timeouts`: 建连 / 等响应头 / 流空闲 / 排队上限。
 - `upstreams`: 每个上游一条记录 (id / base_url / auth_header / key 或 key_env / headers /
   include_usage / limits), 限速参数挂在记录上, 即「上游 + 凭据」分组。
-  `key_env` 只存环境变量名, 真 key 启动时从环境取 (密钥不落盘; systemd 服务经
-  `~/fff/config/tollgate.env` 注入, 该 env 文件不进 git, 见「常驻与升级」)。
+  `key_env` 只存环境变量名, 真 key 启动时从环境取 (密钥不落盘, 见「常驻与升级」)。
 - `aliases`: 逻辑名 -> `[[上游 id, 真实模型 id], ...]`。
 
 别名与上游支持 `SIGHUP` 热加载, 限速器状态按上游 id 保留不被重置。

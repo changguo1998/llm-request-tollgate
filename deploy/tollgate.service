@@ -8,8 +8,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=__ROOT__
-# 密钥从环境变量来 (key_env), 值放 ~/fff/config/tollgate.env (不进 git)。
-EnvironmentFile=-%h/fff/config/tollgate.env
+# 密钥只从环境变量来 (key_env), 不落盘:
+#   systemctl --user import-environment TOLLGATE_USTC_KEY TOLLGATE_GROUP_KEY
+#   或 systemctl --user set-environment TOLLGATE_USTC_KEY=...
 ExecStart=__ROOT__/llm-request-tollgate -config __ROOT__/config.local.json
 Restart=on-failure
 RestartSec=3
