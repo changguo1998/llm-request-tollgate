@@ -10,8 +10,9 @@
 //     透明解压 (设计 §4.9.1), 不加 X-Forwarded-For (F9)。
 //  4. 用量提取: 强写 stream_options.include_usage, 流末 usage chunk / 非流式
 //     响应体 usage; 缺 usage 按 F7 字符口径兜底并计数。
-//  5. 预算判定点 (D12): 每上游配滚动窗口限额, 定时扫日志重建窗口 token 累计,
-//     任一窗口满额返 429 budget_exceeded (放置恒放行, 见设计 §1.4 / D5 演进)。
+//  5. 预算自适应 (D12/D13): 定时扫日志重建窗口 token 累计; 不拦截请求, 而是把上游
+//     的 429 当限额信号: 该上游 (provider+key) 进冷却, 跨候选切下一个模型, 并据
+//     撞墙时的窗口累计反推折算系数 (落 var/budget-units.json)。
 //  6. 响应整形: 非流 / 流式 chunk 里的 model 字段改回请求的逻辑名 (O9)。
 //  7. 对外面: GET /v1/models 返回逻辑名清单 (O5); 日志记 source 标识 (O3);
 //     -summary 汇总命令 (O2); -check 配置自检 + deploy/ 常驻与自检脚本 (O1)。
@@ -341,23 +342,24 @@ func rewriteModel(data []byte, logical string) []byte {
 // ---------- 日志 (JSONL) ----------
 
 type logRec struct {
-	Ts          string `json:"ts"`
-	Logical     string `json:"logical"`
-	Upstream    string `json:"upstream"`
-	Model       string `json:"model"`
-	Path        string `json:"path"`
-	Stream      bool   `json:"stream"`
-	Status      int    `json:"status"`
-	Usage       *Usage `json:"usage,omitempty"`
-	Missing     bool   `json:"missing_usage"`
-	Queued      bool   `json:"queued"`
-	QueueMs     int64  `json:"queue_ms"`
-	Client      string `json:"client"`
-	UA          string `json:"ua,omitempty"`
-	Source      string `json:"source,omitempty"`
-	Fallbacks   int    `json:"fallbacks,omitempty"`
-	Err         string `json:"err,omitempty"`
-	BudgetAllow bool   `json:"budget_allow"`
+	Ts        string `json:"ts"`
+	Logical   string `json:"logical"`
+	Upstream  string `json:"upstream"`
+	Model     string `json:"model"`
+	Path      string `json:"path"`
+	Stream    bool   `json:"stream"`
+	Status    int    `json:"status"`
+	Usage     *Usage `json:"usage,omitempty"`
+	Missing   bool   `json:"missing_usage"`
+	Queued    bool   `json:"queued"`
+	QueueMs   int64  `json:"queue_ms"`
+	Client    string `json:"client"`
+	UA        string `json:"ua,omitempty"`
+	Source    string `json:"source,omitempty"`
+	Fallbacks int    `json:"fallbacks,omitempty"`
+	Err       string `json:"err,omitempty"`
+	BudgetHit bool   `json:"budget_hit,omitempty"`
+	CoolSkips int    `json:"cooldown_skips,omitempty"`
 }
 
 // ---------- 预算闸门 (D12): 定时从日志重建窗口累计 ----------
@@ -365,23 +367,14 @@ type logRec struct {
 // BudgetCfg 预算闸门 (D12): 定时从请求日志重建各窗口累计, 满额拒新请求。
 // Windows: "3h" -> 限额, ...; Unit 是 token 折算平台额度的系数 (默认 1);
 // Units 按真实模型 id 覆盖 Unit (平台各模型扣额倍率不同, 系数用 -usage 标定);
+// CooldownMs 是撞 429 后该上游 (provider+key) 的冷却时长 (默认 5 分钟);
 // RefreshSec 是定时扫日志的间隔秒数 (默认 60)。
 type BudgetCfg struct {
 	Windows    map[string]float64 `json:"windows"`
 	Unit       float64            `json:"unit,omitempty"`
 	Units      map[string]float64 `json:"units,omitempty"`
+	CooldownMs int                `json:"cooldown_ms,omitempty"`
 	RefreshSec int                `json:"refresh_sec,omitempty"`
-}
-
-// unitOf 取某真实模型的折算系数: Units 优先, 回落 Unit, 再回落 1。
-func unitOf(b *BudgetCfg, model string) float64 {
-	if v, ok := b.Units[model]; ok && v > 0 {
-		return v
-	}
-	if b.Unit > 0 {
-		return b.Unit
-	}
-	return 1
 }
 
 // budgetState 持有上次扫描重建的窗口累计: upstreamID -> 窗口key -> 已用(×unit)。
@@ -395,8 +388,11 @@ type App struct {
 	transport *http.Transport
 	streamIdl time.Duration
 
-	budgetMu  sync.Mutex
-	budgetUse map[string]map[string]float64
+	budgetMu   sync.Mutex
+	budgetRaw  map[string]map[string]float64 // 上游 -> 窗口 -> 原始 token 累计
+	budgetCoef map[string]float64            // 上游 -> 撞墙反推的折算系数
+	coolUntil  map[string]time.Time          // 上游 -> 冷却截止时间
+	statePath  string                        // 系数/冷却状态文件 (var/budget-units.json)
 
 	logMu  sync.Mutex
 	logW   *os.File
@@ -430,8 +426,8 @@ func parseBudgetDur(s string) (time.Duration, bool) {
 	return 0, false
 }
 
-// refreshBudget 扫一遍请求日志, 为每个配了预算的上游重建各窗口累计 (D12)。
-// 只处理最近 24h 内的成功记录 (usage 非空); 被拒行 usage 为空, 不重复累计。
+// refreshBudget 扫一遍请求日志, 为每个配了预算的上游重建各窗口原始 token 累计 (D12)。
+// 只统计有 usage 的记录; 冷却已过期的条目顺手清掉。
 func (a *App) refreshBudget() {
 	a.mu.RLock()
 	targets := map[string]*BudgetCfg{}
@@ -447,7 +443,7 @@ func (a *App) refreshBudget() {
 	}
 
 	now := time.Now()
-	use := make(map[string]map[string]float64, len(targets))
+	raw := make(map[string]map[string]float64, len(targets))
 	maxWindow := time.Duration(0)
 	for id, b := range targets {
 		m := make(map[string]float64, len(b.Windows))
@@ -457,7 +453,7 @@ func (a *App) refreshBudget() {
 				maxWindow = d
 			}
 		}
-		use[id] = m
+		raw[id] = m
 	}
 
 	// 跨天时窗口会跨越归档边界, 因此当前日志与最近归档一起读。
@@ -472,28 +468,31 @@ func (a *App) refreshBudget() {
 			if err := json.Unmarshal(sc.Bytes(), &rec); err != nil || rec.Usage == nil {
 				continue
 			}
-			b, ok := targets[rec.Upstream]
-			if !ok {
+			if _, ok := targets[rec.Upstream]; !ok {
 				continue
 			}
 			t, err := time.Parse(time.RFC3339Nano, rec.Ts)
 			if err != nil || t.After(now) {
 				continue
 			}
-			unit := unitOf(b, rec.Model)
-			for w := range use[rec.Upstream] {
+			for w := range raw[rec.Upstream] {
 				d, ok := parseBudgetDur(w)
 				if !ok || now.Sub(t) > d {
 					continue
 				}
-				use[rec.Upstream][w] += float64(rec.Usage.Total) * unit
+				raw[rec.Upstream][w] += float64(rec.Usage.Total)
 			}
 		}
 		f.Close()
 	}
 
 	a.budgetMu.Lock()
-	a.budgetUse = use
+	a.budgetRaw = raw
+	for id, until := range a.coolUntil {
+		if now.After(until) {
+			delete(a.coolUntil, id)
+		}
+	}
 	a.budgetMu.Unlock()
 }
 
@@ -523,23 +522,181 @@ func (a *App) startBudgetLoop() {
 	}()
 }
 
-// budgetOver 判断某上游任一配置窗口的累计已达上限。
-func (a *App) budgetOver(id string) bool {
-	a.mu.RLock()
-	b := a.upstreams[id].Budget
-	a.mu.RUnlock()
-	if b == nil || len(b.Windows) == 0 {
-		return false
+const defaultBudgetCooldown = 5 * time.Minute
+
+// quotaHints / rateHints 用来区分「额度撞墙」与「限流」两类 429: 只有前者才反推系数
+// (限流时的窗口累计与额度无关, 拿它标定会算出荒唐的值); 冷却两类都进。
+var (
+	quotaHints = []string{"budget", "quota", "credit", "balance", "insufficient", "额度", "余额"}
+	rateHints  = []string{"rate limit", "ratelimit", "rate_limit", "rpm", "tpm", "too many requests", "限流", "频率"}
+)
+
+func looksLikeQuotaError(body []byte) bool {
+	text := strings.ToLower(string(body))
+	for _, hint := range rateHints {
+		if strings.Contains(text, hint) {
+			return false
+		}
 	}
-	a.budgetMu.Lock()
-	m := a.budgetUse[id]
-	a.budgetMu.Unlock()
-	for w, max := range b.Windows {
-		if v, ok := m[w]; ok && v >= max && max > 0 {
+	for _, hint := range quotaHints {
+		if strings.Contains(text, hint) {
 			return true
 		}
 	}
 	return false
+}
+
+// cooling 报告某上游是否在冷却, 以及剩余时长。
+func (a *App) cooling(upID string) (bool, time.Duration) {
+	a.budgetMu.Lock()
+	until, ok := a.coolUntil[upID]
+	a.budgetMu.Unlock()
+	if !ok {
+		return false, 0
+	}
+	left := time.Until(until)
+	if left <= 0 {
+		return false, 0
+	}
+	return true, left
+}
+
+// markLimitHit 处理上游的 429 (D13): 该上游 (provider+key) 进冷却;
+// body 像额度类错误时, 用撞墙时刻的窗口累计反推折算系数 (取各窗口最紧的下界:
+// 撞满的窗口给出 coefficient >= max/已用, 取最大值以免低估)。
+func (a *App) markLimitHit(u *UpstreamCfg, model string, body []byte) {
+	if u.Budget == nil {
+		return
+	}
+	cooldown := time.Duration(u.Budget.CooldownMs) * time.Millisecond
+	if cooldown <= 0 {
+		cooldown = defaultBudgetCooldown
+	}
+	a.budgetMu.Lock()
+	a.coolUntil[u.ID] = time.Now().Add(cooldown)
+	coef := 0.0
+	if looksLikeQuotaError(body) {
+		for w, max := range u.Budget.Windows {
+			used := a.budgetRaw[u.ID][w]
+			if used > 0 && max > 0 {
+				if c := max / used; c > coef {
+					coef = c
+				}
+			}
+		}
+		if coef > 0 {
+			a.budgetCoef[u.ID] = coef
+		}
+	}
+	rawCopy := map[string]float64{}
+	for w, v := range a.budgetRaw[u.ID] {
+		rawCopy[w] = v
+	}
+	a.budgetMu.Unlock()
+
+	if coef > 0 {
+		log.Printf("budget limit hit on %s (model %s): cooldown %s, calibrated unit %.9g (raw tokens %v)",
+			u.ID, model, cooldown, coef, rawCopy)
+	} else {
+		log.Printf("limit hit on %s (model %s): cooldown %s (not quota-shaped, unit kept)",
+			u.ID, model, cooldown)
+	}
+	a.saveBudgetState()
+}
+
+// ---------- 系数/冷却状态文件 ----------
+
+type budgetState struct {
+	Units     map[string]float64 `json:"units,omitempty"`
+	Cooldown  map[string]string  `json:"cooldown_until,omitempty"`
+	UpdatedAt string             `json:"updated_at,omitempty"`
+}
+
+// loadBudgetState 读回上次标定的系数与冷却 (进程重启不丢); 过期的冷却直接丢弃。
+func (a *App) loadBudgetState() {
+	path := a.statePath
+	if path == "" {
+		return
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var st budgetState
+	if err := json.Unmarshal(b, &st); err != nil {
+		log.Printf("budget state %s unreadable: %v", path, err)
+		return
+	}
+	now := time.Now()
+	a.budgetMu.Lock()
+	for id, v := range st.Units {
+		if v > 0 {
+			a.budgetCoef[id] = v
+		}
+	}
+	for id, ts := range st.Cooldown {
+		if until, err := time.Parse(time.RFC3339Nano, ts); err == nil && until.After(now) {
+			a.coolUntil[id] = until
+		}
+	}
+	a.budgetMu.Unlock()
+}
+
+// saveBudgetState 原子写状态文件 (临时文件 + rename)。
+func (a *App) saveBudgetState() {
+	path := a.statePath
+	if path == "" {
+		return
+	}
+	a.budgetMu.Lock()
+	st := budgetState{
+		Units:     map[string]float64{},
+		Cooldown:  map[string]string{},
+		UpdatedAt: time.Now().Format(time.RFC3339Nano),
+	}
+	for id, v := range a.budgetCoef {
+		st.Units[id] = v
+	}
+	for id, until := range a.coolUntil {
+		if until.After(time.Now()) {
+			st.Cooldown[id] = until.Format(time.RFC3339Nano)
+		}
+	}
+	a.budgetMu.Unlock()
+
+	b, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+		log.Printf("budget state write failed: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		log.Printf("budget state rename failed: %v", err)
+	}
+}
+
+// coefficientOf 取某模型的折算系数: 配置的 units 优先, 其次配置的 unit,
+// 再次撞墙标定值, 最后 1。
+func (a *App) coefficientOf(u *UpstreamCfg, model string) float64 {
+	if u.Budget == nil {
+		return 1
+	}
+	if v, ok := u.Budget.Units[model]; ok && v > 0 {
+		return v
+	}
+	if u.Budget.Unit > 0 {
+		return u.Budget.Unit
+	}
+	a.budgetMu.Lock()
+	c := a.budgetCoef[u.ID]
+	a.budgetMu.Unlock()
+	if c > 0 {
+		return c
+	}
+	return 1
 }
 
 type aliasTarget struct {
@@ -549,16 +706,23 @@ type aliasTarget struct {
 
 func newApp(c *Config) (*App, error) {
 	a := &App{
-		upstreams: map[string]*UpstreamCfg{},
-		aliases:   map[string][]aliasTarget{},
-		limiters:  map[string]*Limiter{},
-		breakers:  map[string]*breaker{},
-		budgetUse: map[string]map[string]float64{},
+		upstreams:  map[string]*UpstreamCfg{},
+		aliases:    map[string][]aliasTarget{},
+		limiters:   map[string]*Limiter{},
+		breakers:   map[string]*breaker{},
+		budgetRaw:  map[string]map[string]float64{},
+		budgetCoef: map[string]float64{},
+		coolUntil:  map[string]time.Time{},
 	}
 	a.applyConfig(c)
 	if err := a.openLog(); err != nil {
 		return nil, err
 	}
+	// 系数与冷却状态放在日志同目录 (var/), 不进仓库。
+	if c.LogPath != "" {
+		a.statePath = filepath.Join(filepath.Dir(c.LogPath), "budget-units.json")
+	}
+	a.loadBudgetState()
 	a.startBudgetLoop()
 	return a, nil
 }
@@ -845,28 +1009,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 预算判定点 (D12): 定时从请求日志重建的窗口累计已达上限 -> 拒服务。
-	// 放在限速闸之前 (F4): 不占并发额度、不排队就返 429 (agent 自行重试)。
-	budgetAllow := true
-	if chosen.Budget != nil && a.budgetOver(chosen.ID) {
-		budgetAllow = false
-		refresh := chosen.Budget.RefreshSec
-		if refresh < 1 {
-			refresh = 60
-		}
-		w.Header().Set("Retry-After", strconv.Itoa(max(1, refresh)))
-		writeError(w, http.StatusTooManyRequests, "budget_exceeded",
-			"upstream "+chosen.ID+" budget exhausted, retry later")
-		a.logReq(logRec{
-			Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
-			Upstream: chosen.ID, Model: realModel, Path: r.URL.Path, Stream: stream,
-			Status: http.StatusTooManyRequests, Missing: true, Client: r.RemoteAddr,
-			UA: r.Header.Get("User-Agent"), Source: r.Header.Get("X-Tollgate-Source"),
-			Err: "budget_exceeded", BudgetAllow: budgetAllow,
-		})
-		return
-	}
-
+	// 预算不再提前拦截 (D13): 判定改为「上游 429 = 限额信号」, 见尝试循环里的
+	// markLimitHit (该上游进冷却 + 跨候选切换 + 反推折算系数)。
 	// 限速闸: 信号量 + 令牌桶, 共用 queue_wait 排队预算 (F3/F4)。
 	// 注意: 信号量一旦拿到就必须释放, 否则后面请求永远排队 (429 泄漏)。
 	gateCtx, cancel := context.WithTimeout(r.Context(), queueWait)
@@ -880,7 +1024,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Upstream: chosen.ID, Model: realModel, Path: r.URL.Path, Stream: stream,
 			Status: http.StatusTooManyRequests, Missing: true, Client: r.RemoteAddr,
 			UA: r.Header.Get("User-Agent"), Source: r.Header.Get("X-Tollgate-Source"),
-			Err: "rate_limited", BudgetAllow: budgetAllow,
+			Err: "rate_limited",
 		})
 		return
 	}
@@ -894,7 +1038,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Upstream: chosen.ID, Model: realModel, Path: r.URL.Path, Stream: stream,
 			Status: http.StatusTooManyRequests, Missing: true, Client: r.RemoteAddr,
 			UA: r.Header.Get("User-Agent"), Source: r.Header.Get("X-Tollgate-Source"),
-			Err: "rate_limited", BudgetAllow: budgetAllow,
+			Err: "rate_limited",
 		})
 		return
 	}
@@ -925,7 +1069,17 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		servedUp        *UpstreamCfg
 		servedMod       string
 	)
+	coolSkips := 0
+	budgetHit := false
 	for _, at := range attempts {
+		if cool, left := a.cooling(at.up.ID); cool {
+			// 该上游 (provider+key) 撞过限额, 冷却期内不真发, 直接换下一个候选。
+			lastErr = fmt.Errorf("upstream %s cooling for %s", at.up.ID, left.Round(time.Second))
+			lastUpID, lastM = at.up.ID, at.mod
+			coolSkips++
+			failed++
+			continue
+		}
 		br := a.breakers[at.up.ID]
 		if !br.allow() {
 			// 熔断打开: 不真发, 直接视作该候选失败换下一个。
@@ -964,6 +1118,11 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			br.recordFail()
 			b, rerr := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			if resp.StatusCode == http.StatusTooManyRequests {
+				// 上游 429: 当作限额信号处理 (冷却 + 可能的系数标定), 再切下一个候选。
+				budgetHit = true
+				a.markLimitHit(at.up, at.mod, b)
+			}
 			lastErr = fmt.Errorf("upstream %s returned %d", at.up.ID, resp.StatusCode)
 			lastStatus, lastHdr, lastBody = resp.StatusCode, resp.Header.Clone(), b
 			lastUpID, lastM = at.up.ID, at.mod
@@ -998,7 +1157,29 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				Status: lastStatus, Missing: true, Queued: queued, QueueMs: queueMs,
 				Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"),
 				Source: r.Header.Get("X-Tollgate-Source"),
-				Err:    lastErr.Error(), Fallbacks: failed, BudgetAllow: budgetAllow,
+				Err:    lastErr.Error(), Fallbacks: failed, BudgetHit: budgetHit, CoolSkips: coolSkips,
+			})
+			return
+		}
+		// 候选全在限额冷却里: 回 429 + Retry-After 让 agent 退避 (不是我们的闸门,
+		// 而是上游限额的传导), 比 502 更贴近真实原因。
+		if coolSkips > 0 && lastStatus == 0 {
+			left := time.Duration(0)
+			for _, at := range attempts {
+				if cool, l := a.cooling(at.up.ID); cool && l > left {
+					left = l
+				}
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(left.Seconds())))))
+			writeError(w, http.StatusTooManyRequests, "upstream_cooling",
+				"all candidates for "+logical+" are cooling down after upstream limit hits")
+			a.logReq(logRec{
+				Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
+				Upstream: lastUpID, Model: lastM, Path: r.URL.Path, Stream: stream,
+				Status: http.StatusTooManyRequests, Missing: true, Queued: queued, QueueMs: queueMs,
+				Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"),
+				Source: r.Header.Get("X-Tollgate-Source"),
+				Err:    "upstream_cooling", Fallbacks: failed, BudgetHit: budgetHit, CoolSkips: coolSkips,
 			})
 			return
 		}
@@ -1013,7 +1194,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Status: http.StatusBadGateway, Missing: true, Queued: queued, QueueMs: queueMs,
 			Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"),
 			Source: r.Header.Get("X-Tollgate-Source"),
-			Err:    msg, Fallbacks: failed, BudgetAllow: budgetAllow,
+			Err:    msg, Fallbacks: failed, BudgetHit: budgetHit, CoolSkips: coolSkips,
 		})
 		return
 	}
@@ -1063,7 +1244,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Upstream: chosen.ID, Model: realModel, Path: r.URL.Path, Stream: stream,
 		Status: status, Usage: usage, Missing: missing, Queued: queued, QueueMs: queueMs,
 		Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"), Source: r.Header.Get("X-Tollgate-Source"),
-		Fallbacks: failed, BudgetAllow: budgetAllow,
+		Fallbacks: failed, BudgetHit: budgetHit, CoolSkips: coolSkips,
 	})
 }
 

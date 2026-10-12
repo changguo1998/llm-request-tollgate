@@ -247,80 +247,162 @@ EOF
 }
 
 case_budget() {
-  say "=== budget (定时扫日志重建窗口累计, 满额拒服务 D12) ==="
-  local LOG="$TMP/log-budget.jsonl"
-  rm -f "$LOG" "$TMP/hdr-budget.txt"
-  local TS
-  TS=$(python3 -c "import datetime;print(datetime.datetime.now(datetime.timezone.utc).isoformat())")
-  # 预写 2 条近 1h 的成功记录: 每笔 total=50, 3h 窗口 (max 30) 已超, 12h/24h 未满。
-  local i
-  for i in 1 2; do
-    printf '{"ts":"%s","logical":"test-model","upstream":"fu","model":"deepseek-v4.1-flash","usage":{"prompt":7,"completion":43,"total":50},"missing_usage":false}\n' "$TS" >>"$LOG"
+  say "=== budget (上游 429 = 限额信号: 冷却 + 切换 + 系数标定 D13) ==="
+  local D="$TMP/budget"
+  local LOG="$D/log.jsonl"
+  rm -rf "$D"
+  mkdir -p "$D"
+  rm -f "$TMP/budget-count.txt"
+  # 假上游: 永远 429 (额度类错误), 并记下被调用次数
+  cat >"$TMP/srvbudget.py" <<'PY'
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+count = 0
+class H(BaseHTTPRequestHandler):
+    def do_POST(self):
+        global count
+        count += 1
+        open(sys.argv[2], 'w').write(str(count))
+        b = b'{"error":{"message":"Budget has been exceeded! Current cost: 30.0, Max budget: 30.0","type":"budget_exceeded","code":"429"}}'
+        self.send_response(429)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+    def log_message(self, *a): pass
+HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
+PY
+  python3 "$TMP/srvbudget.py" 19994 "$TMP/budget-count.txt" >/dev/null 2>&1 & BL=$!
+  PROCS+=("$BL")
+  for _ in $(seq 1 100); do
+    if (exec 3<>/dev/tcp/127.0.0.1/19994) 2>/dev/null; then exec 3>&- 3<&- 2>/dev/null || true; break; fi
+    sleep 0.05
   done
+  # 预置 50 token 的窗口累计: 撞墙时反推系数 = 30/50 = 0.6 (确定性断言用)
+  printf '{"ts":"%s","logical":"test-model","upstream":"limited","model":"deepseek-v4.1-flash","usage":{"prompt":20,"completion":30,"total":50},"missing_usage":false}\n' \
+    "$(python3 -c "import datetime;print(datetime.datetime.now(datetime.timezone.utc).isoformat())")" >>"$LOG"
   cat >"$TMP/cfg-budget.json" <<EOF
 {
   "listen": "127.0.0.1:18820",
   "log_path": "$LOG",
   "timeouts": { "connect_ms": 1000, "response_header_ms": 5000, "stream_idle_ms": 3000, "queue_wait_ms": 10000 },
   "upstreams": [
-    { "id": "fu", "base_url": "http://127.0.0.1:19020/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true, "budget": { "windows": { "3h": 30, "12h": 70, "24h": 100 }, "refresh_sec": 1 }, "limits": { "rate_per_sec": 100, "burst": 10, "concurrency": 10 } }
+    { "id": "limited", "base_url": "http://127.0.0.1:19994/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true, "budget": { "windows": { "3h": 30 }, "cooldown_ms": 1500, "refresh_sec": 1 }, "limits": { "rate_per_sec": 100, "burst": 10, "concurrency": 10 } },
+    { "id": "fu", "base_url": "http://127.0.0.1:19020/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true, "limits": { "rate_per_sec": 100, "burst": 10, "concurrency": 10 } }
   ],
-  "aliases": { "test-model": [["fu", "deepseek-v4.1-flash"]] }
+  "aliases": {
+    "test-model": [["limited", "deepseek-v4.1-flash"], ["fu", "deepseek-v4.1-flash"]],
+    "only-limited": [["limited", "deepseek-v4.1-flash"]]
+  }
 }
 EOF
   start_fake 19020 20
   start_proxy 18820 "$TMP/cfg-budget.json"
 
   local BODY='{"model":"test-model","messages":[{"role":"user","content":"hi"}]}'
-  local code retry
-  code=$(curl -s -D "$TMP/hdr-budget.txt" -o "$TMP/resp.txt" -w '%{http_code}' \
+  local code n retry unit
+
+  # A: limited 429 -> 自动切 fu, 客户端仍 200
+  code=$(post 18820 "$BODY")
+  [ "$code" = "200" ] && pass "429 后切下一个候选 -> 200" || fail "fallback -> $code"
+  grep '"upstream":"fu"' "$LOG" | tail -1 | grep -q '"fallbacks":1' \
+    && pass "日志记 upstream=fu, fallbacks=1" || fail "fallback 日志不对"
+  grep -q '"budget_hit":true' "$LOG" && pass "日志记 budget_hit=true" || fail "budget_hit 未记"
+
+  # 系数标定: 30/50 = 0.6 落状态文件
+  sleep 0.3
+  if [ -f "$D/budget-units.json" ]; then
+    unit=$(jq -r '.units.limited // empty' "$D/budget-units.json")
+    if [ -n "$unit" ] && python3 -c "import sys; sys.exit(0 if abs(float('$unit') - 0.6) < 1e-9 else 1)"; then
+      pass "撞墙反推系数 = 0.6 (30/50) 并落状态文件"
+    else
+      fail "状态文件系数=$unit (want 0.6)"
+    fi
+    jq -e '.cooldown_until.limited' "$D/budget-units.json" >/dev/null 2>&1 \
+      && pass "状态文件记冷却截止时间" || fail "状态文件缺 cooldown_until"
+  else
+    fail "未生成状态文件 $D/budget-units.json"
+  fi
+
+  # B: 冷却期内不再真发该上游 (计数仍为 1), 仍由 fu 服务
+  code=$(post 18820 "$BODY")
+  [ "$code" = "200" ] && pass "冷却期内请求仍成功 (走备用)" || fail "冷却期请求 -> $code"
+  n=$(cat "$TMP/budget-count.txt" 2>/dev/null)
+  [ "$n" = "1" ] && pass "冷却期内不再请求该上游 (计数=$n)" || fail "冷却期仍请求了该上游 (计数=$n)"
+  grep -q '"cooldown_skips":1' "$LOG" && pass "日志记 cooldown_skips=1" || fail "cooldown_skips 未记"
+
+  # C: 唯一候选在冷却 -> 429 + Retry-After (不伪造 502)
+  code=$(curl -s -D "$TMP/hdr-cool.txt" -o "$TMP/resp.txt" -w '%{http_code}' \
     -X POST "http://127.0.0.1:18820/v1/chat/completions" \
-    -H 'Content-Type: application/json' -H 'Authorization: Bearer dummy' -d "$BODY")
-  [ "$code" = "429" ] && pass "预算满额 -> 429" || fail "budget -> $code (want 429)"
-  jq -e '.error.code == "budget_exceeded"' "$TMP/resp.txt" >/dev/null 2>&1 \
-    && pass "error.code=budget_exceeded" || fail "429 error 体不对"
-  retry=$(grep -i '^retry-after:' "$TMP/hdr-budget.txt" | tr -d '\r' | awk '{print $2}')
+    -H 'Content-Type: application/json' -H 'Authorization: Bearer dummy' \
+    -d '{"model":"only-limited","messages":[{"role":"user","content":"hi"}]}')
+  [ "$code" = "429" ] && pass "候选全冷却 -> 429" || fail "全冷却 -> $code (want 429)"
+  jq -e '.error.code == "upstream_cooling"' "$TMP/resp.txt" >/dev/null 2>&1 \
+    && pass "error.code=upstream_cooling" || fail "429 error 体不对"
+  retry=$(grep -i '^retry-after:' "$TMP/hdr-cool.txt" | tr -d '\r' | awk '{print $2}')
   if [ -n "$retry" ] && python3 -c "import sys; sys.exit(0 if int('$retry') >= 1 else 1)" 2>/dev/null; then
     pass "Retry-After: $retry"
   else
     fail "Retry-After 缺失/非法 ($retry)"
   fi
-  grep '"err":"budget_exceeded"' "$LOG" | grep -q '"budget_allow":false' \
-    && pass "日志记 err=budget_exceeded, budget_allow=false" || fail "预算拒绝日志不对"
 
-  # 清空日志, 等一次刷新 (1s ticker) -> 累计归零 -> 恢复放行
-  : >"$LOG"
+  # D: 冷却 1500ms 过后重新尝试该上游 (计数变 2)
   sleep 1.6
   code=$(post 18820 "$BODY")
-  [ "$code" = "200" ] && pass "日志清空刷新后恢复 200" || fail "恢复 -> $code"
+  [ "$code" = "200" ] && pass "冷却结束后请求成功" || fail "冷却后 -> $code"
+  n=$(cat "$TMP/budget-count.txt" 2>/dev/null)
+  [ "$n" = "2" ] && pass "冷却结束后重新尝试该上游 (计数=$n)" || fail "冷却后计数=$n (want 2)"
 }
 
 case_rotate() {
-  say "=== rotate (按本地日历天轮转 + 归档参与聚合) ==="
-  local LOG="$TMP/log-rotate.jsonl"
+  say "=== rotate (按本地日历天轮转 + 归档参与窗口累计) ==="
+  local D="$TMP/rotate"
+  local LOG="$D/log.jsonl"
   local DAY DECOY OLD
   DAY=$(date -d 'yesterday' +%F)
-  DECOY="$TMP/log-rotate-$DAY.jsonl"
-  OLD="$TMP/log-rotate-$DAY-1.jsonl"
-  rm -f "$LOG" "$TMP/log-rotate-"*.jsonl
+  DECOY="$D/log-$DAY.jsonl"
+  OLD="$D/log-$DAY-1.jsonl"
+  rm -rf "$D"
+  mkdir -p "$D"
   # 既有归档 (同名) 不能被覆盖; 上一段日志应落到 -1 序号。
   echo '{"marker":"decoy"}' >"$DECOY"
-  printf '{"ts":"%s","logical":"test-model","upstream":"fu","model":"deepseek-v4.1-flash","usage":{"prompt":7,"completion":43,"total":50},"missing_usage":false}\n' \
+  # 昨天那段日志: 50 token 记在 limited 上游 (撞墙标定要跨归档读到它)
+  printf '{"ts":"%s","logical":"only","upstream":"limited","model":"deepseek-v4.1-flash","usage":{"prompt":20,"completion":30,"total":50},"missing_usage":false}\n' \
     "$(python3 -c "import datetime;print(datetime.datetime.now(datetime.timezone.utc).isoformat())")" >"$LOG"
   # mtime 拨到昨天 23:50: 模拟"昨天写的日志, 今天启动代理"。
   touch -d 'yesterday 23:50' "$LOG"
+  # 429 上游 (额度类错误), 用来触发撞墙标定。
+  cat >"$TMP/srvquota.py" <<'PY'
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def do_POST(self):
+        b = b'{"error":{"message":"Budget has been exceeded! Max budget: 30.0","type":"budget_exceeded","code":"429"}}'
+        self.send_response(429)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+    def log_message(self, *a): pass
+HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
+PY
+  python3 "$TMP/srvquota.py" 19995 >/dev/null 2>&1 & QL=$!
+  PROCS+=("$QL")
+  for _ in $(seq 1 100); do
+    if (exec 3<>/dev/tcp/127.0.0.1/19995) 2>/dev/null; then exec 3>&- 3<&- 2>/dev/null || true; break; fi
+    sleep 0.05
+  done
   cat >"$TMP/cfg-rotate.json" <<EOF
 {
   "listen": "127.0.0.1:18840",
   "log_path": "$LOG",
   "timeouts": { "connect_ms": 1000, "response_header_ms": 5000, "stream_idle_ms": 3000, "queue_wait_ms": 10000 },
   "upstreams": [
-    { "id": "fu", "base_url": "http://127.0.0.1:19040/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true, "budget": { "windows": { "3h": 30 }, "refresh_sec": 1 }, "limits": { "rate_per_sec": 100, "burst": 10, "concurrency": 10 } }
+    { "id": "limited", "base_url": "http://127.0.0.1:19995/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true, "budget": { "windows": { "3h": 30 }, "cooldown_ms": 1000, "refresh_sec": 1 }, "limits": { "rate_per_sec": 100, "burst": 10, "concurrency": 10 } }
   ],
-  "aliases": { "test-model": [["fu", "deepseek-v4.1-flash"]] }
+  "aliases": { "only": [["limited", "deepseek-v4.1-flash"]] }
 }
 EOF
-  start_fake 19040 20
   start_proxy 18840 "$TMP/cfg-rotate.json"
 
   grep -q '"marker":"decoy"' "$DECOY" && pass "既有归档不被覆盖" || fail "既有归档被覆盖"
@@ -331,9 +413,20 @@ EOF
   fi
   [ ! -s "$LOG" ] && pass "当前日志新开且为空" || fail "当前日志未新开"
 
-  local code
-  code=$(post 18840 '{"model":"test-model","messages":[{"role":"user","content":"hi"}]}')
-  [ "$code" = "429" ] && pass "归档记录计入窗口累计 -> 429" || fail "跨天归档未计入 ($code)"
+  # 撞墙: 若归档里的 50 token 没被读进窗口累计, 就反推不出系数 0.6。
+  local code unit
+  code=$(curl -s -o "$TMP/resp.txt" -w '%{http_code}' \
+    -X POST "http://127.0.0.1:18840/v1/chat/completions" \
+    -H 'Content-Type: application/json' -H 'Authorization: Bearer dummy' \
+    -d '{"model":"only","messages":[{"role":"user","content":"hi"}]}')
+  [ "$code" = "429" ] && pass "唯一候选 429 原样透传" || fail "429 透传 -> $code"
+  sleep 0.3
+  unit=$(jq -r '.units.limited // empty' "$D/budget-units.json" 2>/dev/null)
+  if [ -n "$unit" ] && python3 -c "import sys; sys.exit(0 if abs(float('$unit') - 0.6) < 1e-9 else 1)"; then
+    pass "归档记录计入窗口累计 (反推系数 0.6)"
+  else
+    fail "跨天归档未计入 (系数=${unit:-空})"
+  fi
 }
 
 case_stream() {
@@ -535,7 +628,7 @@ case_logging() {
   while IFS= read -r line; do
     n=$((n + 1))
     if ! printf '%s' "$line" | jq -e \
-      'has("logical") and has("upstream") and has("model") and has("usage") and has("missing_usage") and has("queued") and has("status") and has("budget_allow") and .logical=="test-model" and .model=="deepseek-v4.1-flash" and .upstream=="fu"' \
+      'has("logical") and has("upstream") and has("model") and has("usage") and has("missing_usage") and has("queued") and has("status") and .logical=="test-model" and .model=="deepseek-v4.1-flash" and .upstream=="fu"' \
       >/dev/null 2>&1; then
       bad=$((bad + 1))
     fi

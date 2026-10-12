@@ -13,7 +13,9 @@
 4. 用量记账: 强写 `stream_options.include_usage`, 从流末 usage / 非流式响应体
    提取 token 用量 (含缓存命中 token, 三种上游字段名都认); 缺 usage 按字符粗估 (F7)
    并记 `missing_usage`。`-usage` 按 上游/模型 × 窗口 列出 token 分解, 用于标定预算系数。
-5. 预算判定点: 每上游配滚动窗口限额, 定时从日志重建累计, 满额拒服务 (D12)。
+5. 预算自适应 (D12/D13): 不提前拦截请求; 上游返 429 即视为限额信号 — 该上游
+   (provider+key) 进冷却 (`budget.cooldown_ms`, 默认 5 分钟), 请求自动切下一个候选, 并用
+   撞墙时刻的窗口累计反推折算系数 (落 `var/budget-units.json`, 重启不丢)。
 6. 响应整形: 非流 / 流式 chunk 里的 `model` 字段改回请求的逻辑名,
    对外隐藏真实上游 id。
 7. 运维面: `GET /v1/models` 返回逻辑名清单; 请求头 `X-Tollgate-Source`
@@ -23,10 +25,9 @@
    下一个; 全部失败保留最近一次错误 (状态码/头/体) 原样透传; 其余 4xx 不重试。
 9. 熔断: 每上游连续失败 (默认 5 次) 打开, 冷却期 (默认 30s) 内跳过该候选不再真发,
    冷却后自动恢复; 参数可配 (`breaker_fail` / `breaker_cooldown_ms`)。
-10. 预算闸门 (D12): 每上游可配滚动窗口限额 (`budget.windows`, 如 3h/12h/24h),
-    代理定时从请求日志重建各窗口 token 累计, 任一窗口满额即返 429 `budget_exceeded`;
-    重启后从日志重建不丢消耗 (账本永不落盘, 日志即账本)。每个模型可用 `budget.units`
-    配各自的折算系数 (平台各模型扣额倍率不同)。
+10. 限额冷却与系数标定 (D13): 上游 429 后该上游冷却期内不再真发 (日志 `cooldown_skips`),
+    候选全在冷却时返 429 `upstream_cooling` + `Retry-After`; 额度类 429 会用窗口累计
+    反推 `unit`, 状态存 `var/budget-units.json` (配置里的 `units` 仍优先)。
 11. 日志按天轮转: 跨本地日期 (或隔天启动) 时把上一段日志归档为
     `<base>-YYYY-MM-DD.jsonl` (同名不覆盖, 依次加 -1/-2); 预算聚合与 `-summary`
     都跨归档读, 归档不自动删除 (留存交给外部)。
@@ -37,7 +38,7 @@
 go build ./...
 # 填好 config.local.json (从 config.example.json 复制) 后:
 ./llm-request-tollgate -config config.local.json
-# 起假上游 + 全量自测 (83 项断言):
+# 起假上游 + 全量自测 (91 项断言):
 ./test/run_selftest.sh all
 # 常驻 (systemd 用户服务, 崩了自动拉起):
 ./deploy/install_service.sh
@@ -82,9 +83,10 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
   `key_env` 只存环境变量名, 真 key 启动时从环境取 (密钥不落盘, 见「常驻与升级」)。
   `key_prefix` 是认证头里的 scheme: 缺省对 `Authorization` 用 `Bearer `, 其他头不带
   (ustc 与火山 ARK 实测都要 `Bearer `; 给 `""` 可强制裸 key)。
-  `budget`: `{ windows: {"3h":30,"12h":70,"24h":100}, unit:1, refresh_sec:60 }` —
-  滚动窗口限额; `unit` 是 token 折算平台额度的系数 (默认 1, 按网页已用对照后调整);
-  `refresh_sec` 是定时扫日志的间隔。
+  `budget`: `{ windows: {"3h":30,"12h":70,"24h":100}, unit:1, units:{}, cooldown_ms:300000,
+  refresh_sec:60 }` — `windows` 是滚动窗口限额 (用于标定与诊断), `unit`/`units` 是 token
+  折算平台额度的系数 (模型级 `units` 优先, 其次 `unit`, 再次撞墙标定值), `cooldown_ms`
+  是 429 后的冷却时长, `refresh_sec` 是定时扫日志的间隔。
 - `aliases`: 逻辑名 -> `[[上游 id, 真实模型 id], ...]`。
 
 别名与上游支持 `SIGHUP` 热加载, 限速器状态按上游 id 保留不被重置。
@@ -129,7 +131,7 @@ python3 scripts/gen_tollgate_config.py
 - 转发只做 `POST /v1/chat/completions` (D4); `GET /v1/models` 返回逻辑名清单 (O5);
   `/responses` 一律 404。
 - 集中 fallback + 熔断只覆盖首字节前 (传输失败/429/5xx); 首字节之后不切后端。
-- 预算闸门按 token 窗口累计, 折算系数 `unit` 默认 1 (平台额度口径待实测标定)。
+- 预算不提前拦截: 靠上游 429 触发冷却与系数标定; 未撞过墙时系数默认 1 (仅影响估算)。
 - 归档日志不自动清理, 也不压缩; 留存与清理交给外部 (logrotate 或手动)。
 - 接真上游前的清单见设计文档 §5.4。
 
@@ -138,7 +140,7 @@ python3 scripts/gen_tollgate_config.py
 - `main.go` 单文件代理 (含假上游自测所需的全部实现)。
 - `test/fakeupstream/` 假上游: 回放思考块 / 文本 / 工具调用 / usage 的 SSE,
   支持中途断流 (验证 F6)。
-- `test/run_selftest.sh` 自测: 13 组用例 83 项断言, 对本地假上游跑代理。
+- `test/run_selftest.sh` 自测: 13 组用例 91 项断言, 对本地假上游跑代理。
 - `test/healthcheck.sh` 自检: 二进制 / 配置 (-check) / 端口三项, 退出码 0 = 全通过。
 - `deploy/` 常驻: `tollgate.service` 模板 + `install_service.sh` (systemd 用户服务)。
 - `scripts/gen_tollgate_config.py` 由 fff 模型列表生成本项目配置 (读
