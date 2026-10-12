@@ -20,8 +20,10 @@ Preserved from the existing config: service-level fields (listen, log_path,
 timeouts) and per-upstream settings (auth_header, key_env, headers,
 include_usage, limits, budget, breaker_*). New upstreams get
 Besides the config, it upserts a ``tollgate`` provider into the model-list store
-(``--no-store`` skips it): one model per alias, so agents synced from the store
-can point at this proxy instead of the upstreams.
+(``--no-store`` skips it): one model per alias, baseUrl derived from the config's
+``listen``, so agents synced from the store can point at this proxy instead of
+the upstreams. Hand-curated fields (provider keys, per-model contextWindow /
+maxTokens / thinkingLevelMap) survive the update.
 
 Every upstream carries ``budget.cooldown_ms`` (429 cooldown, default 5 min).
 ``key_env`` taken from the store's ``apiKey`` placeholder (``$USTC_API_KEY`` ->
@@ -47,7 +49,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_FFF_CONFIG = Path.home() / "fff" / "config"
 DEFAULT_OUT = REPO_ROOT / "config.local.json"
 DEFAULT_PROVIDERS = "ustc,group,arkcp,arkap"
-DEFAULT_PROXY_URL = "http://127.0.0.1:8787/v1"
+DEFAULT_PROXY_URL = ""  # 空 = 从配置的 listen 推导
 DEFAULT_PROXY_KEY_ENV = "TOLLGATE_API_KEY"
 PROXY_PROVIDER = "tollgate"  # store 里代表本代理自己的 provider 名
 
@@ -164,10 +166,38 @@ def build_proxy_provider(config: dict, store: dict, providers: list[str], proxy_
     }
 
 
+def derive_proxy_url(listen: str) -> str:
+    """Proxy base URL agents should use, derived from the config's listen address."""
+    host, _, port = listen.rpartition(":")
+    if not host:
+        host, port = "127.0.0.1", listen
+    if host in ("0.0.0.0", "::", "[::]", "*"):
+        host = "127.0.0.1"  # 通配监听要落到回环地址
+    return f"http://{host}:{port}/v1"
+
+
 def write_proxy_provider(store_path: Path, entry: dict) -> None:
-    """Upsert providers.tollgate in the shared model-list store (keeps other providers)."""
+    """Upsert providers.tollgate in the shared model-list store.
+
+    Other providers are untouched; keys and per-model fields we do not generate
+    (hand-curated contextWindow / maxTokens / thinkingLevelMap, extra provider
+    keys) are inherited from the existing entry, like merge_models_by_id does
+    for the upstream providers.
+    """
     data = load_json(store_path) if store_path.exists() else {"providers": {}}
-    data.setdefault("providers", {})[PROXY_PROVIDER] = entry
+    providers = data.setdefault("providers", {})
+    old = providers.get(PROXY_PROVIDER, {})
+    merged = {k: v for k, v in old.items() if k not in entry}
+    merged.update(entry)
+    curated = {m["id"]: m for m in old.get("models", [])}
+    models = []
+    for model in entry["models"]:
+        previous = curated.get(model["id"], {})
+        item = {k: v for k, v in previous.items() if k not in model}
+        item.update(model)
+        models.append({k: item[k] for k in sorted(item)})
+    merged["models"] = models
+    providers[PROXY_PROVIDER] = merged
     store_path.write_text(json.dumps(data, indent=4) + "\n", encoding="utf-8")
 
 
@@ -221,9 +251,10 @@ def build_config(args) -> tuple[dict, list[str]]:
             f" 模型 {kept[provider]:2d} (黑名单剔除 {removed[provider]:2d})  {env_name}{missing}"
         )
     multi = {n: c for n, c in config["aliases"].items() if len(c) > 1}
-    proxy_entry = build_proxy_provider(config, store, providers, args.proxy_url, args.proxy_key_env)
+    proxy_url = args.proxy_url or derive_proxy_url(config["listen"])
+    proxy_entry = build_proxy_provider(config, store, providers, proxy_url, args.proxy_key_env)
     lines.append(
-        f"  {PROXY_PROVIDER:6s} {args.proxy_url:42s} 模型 {len(proxy_entry['models']):2d}"
+        f"  {PROXY_PROVIDER:6s} {proxy_url:42s} 模型 {len(proxy_entry['models']):2d}"
         f" (别名即逻辑名)  {args.proxy_key_env}"
     )
     lines.append(f"  别名 {len(config['aliases'])} 个, 其中多候选 {len(multi)} 个:")
@@ -244,7 +275,10 @@ def main() -> int:
         "--cooldown-ms", type=int, default=DEFAULT_COOLDOWN_MS,
         help=f"429 cooldown per upstream in ms (default {DEFAULT_COOLDOWN_MS})",
     )
-    parser.add_argument("--proxy-url", default=DEFAULT_PROXY_URL, help="base URL agents use")
+    parser.add_argument(
+        "--proxy-url", default=DEFAULT_PROXY_URL,
+        help="base URL agents use (default: derived from the config's listen)",
+    )
     parser.add_argument(
         "--proxy-key-env", default=DEFAULT_PROXY_KEY_ENV,
         help="placeholder key env name for the proxy provider entry",
