@@ -19,6 +19,10 @@ Rewritten: the ``upstreams`` list (ids + base_url) and ``aliases``.
 Preserved from the existing config: service-level fields (listen, log_path,
 timeouts) and per-upstream settings (auth_header, key_env, headers,
 include_usage, limits, budget, breaker_*). New upstreams get
+Besides the config, it upserts a ``tollgate`` provider into the model-list store
+(``--no-store`` skips it): one model per alias, so agents synced from the store
+can point at this proxy instead of the upstreams.
+
 Every upstream carries ``budget.cooldown_ms`` (429 cooldown, default 5 min).
 ``key_env`` taken from the store's ``apiKey`` placeholder (``$USTC_API_KEY`` ->
 ``USTC_API_KEY``), else ``TOLLGATE_<ID>_KEY``, and the limits of an existing
@@ -43,6 +47,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_FFF_CONFIG = Path.home() / "fff" / "config"
 DEFAULT_OUT = REPO_ROOT / "config.local.json"
 DEFAULT_PROVIDERS = "ustc,group,arkcp,arkap"
+DEFAULT_PROXY_URL = "http://127.0.0.1:8787/v1"
+DEFAULT_PROXY_KEY_ENV = "TOLLGATE_API_KEY"
+PROXY_PROVIDER = "tollgate"  # store 里代表本代理自己的 provider 名
 
 # Upstream fields carried over from an existing config entry.
 PRESERVED_UPSTREAM_KEYS = (
@@ -130,6 +137,40 @@ def build_upstreams(store: dict, providers: list[str], existing: dict, cooldown_
     return upstreams
 
 
+def build_proxy_provider(config: dict, store: dict, providers: list[str], proxy_url: str,
+                         key_env: str) -> dict:
+    """Build the store entry representing this proxy: one model per alias (logical name).
+
+    The proxy hides upstream ids, so agents only ever see alias names; reasoning is
+    inherited from whichever candidate model declares it.
+    """
+    reasoning = set()
+    for provider in providers:
+        for model in store[provider].get("models", []):
+            if model.get("reasoning"):
+                reasoning.add(model["id"])
+    models = []
+    for name in sorted(config["aliases"]):
+        entry = {"id": name}
+        if any(model_id in reasoning for _, model_id in config["aliases"][name]):
+            entry["reasoning"] = True
+        models.append(entry)
+    return {
+        "api": "openai-completions",
+        "apiKey": f"${key_env}",
+        "baseUrl": proxy_url,
+        "compat": {"supportsDeveloperRole": False},
+        "models": models,
+    }
+
+
+def write_proxy_provider(store_path: Path, entry: dict) -> None:
+    """Upsert providers.tollgate in the shared model-list store (keeps other providers)."""
+    data = load_json(store_path) if store_path.exists() else {"providers": {}}
+    data.setdefault("providers", {})[PROXY_PROVIDER] = entry
+    store_path.write_text(json.dumps(data, indent=4) + "\n", encoding="utf-8")
+
+
 def config_path_label(path: Path) -> str:
     if path.is_symlink():
         return f"{path} -> {os.path.realpath(path)}"
@@ -143,6 +184,8 @@ def build_config(args) -> tuple[dict, list[str]]:
     dropped = set(load_json(drop_path)) if drop_path.exists() else set()
 
     providers = [p.strip() for p in args.providers.split(",") if p.strip()]
+    if PROXY_PROVIDER in providers:
+        raise SystemExit(f"{PROXY_PROVIDER} is this proxy itself, not an upstream")
     unknown = [p for p in providers if p not in store]
     if unknown:
         raise SystemExit(f"providers not in the store: {', '.join(unknown)}")
@@ -178,13 +221,18 @@ def build_config(args) -> tuple[dict, list[str]]:
             f" 模型 {kept[provider]:2d} (黑名单剔除 {removed[provider]:2d})  {env_name}{missing}"
         )
     multi = {n: c for n, c in config["aliases"].items() if len(c) > 1}
+    proxy_entry = build_proxy_provider(config, store, providers, args.proxy_url, args.proxy_key_env)
+    lines.append(
+        f"  {PROXY_PROVIDER:6s} {args.proxy_url:42s} 模型 {len(proxy_entry['models']):2d}"
+        f" (别名即逻辑名)  {args.proxy_key_env}"
+    )
     lines.append(f"  别名 {len(config['aliases'])} 个, 其中多候选 {len(multi)} 个:")
     for name, candidates in list(multi.items())[:12]:
         lines.append("    " + name + " <- " + ", ".join(f"{p}/{m}" for p, m in candidates))
     if len(multi) > 12:
         lines.append(f"    ... 其余 {len(multi) - 12} 个多候选别名见配置文件")
     lines.extend(f"  注意: {w}" for w in warnings)
-    return config, lines
+    return config, proxy_entry, lines
 
 
 def main() -> int:
@@ -196,10 +244,19 @@ def main() -> int:
         "--cooldown-ms", type=int, default=DEFAULT_COOLDOWN_MS,
         help=f"429 cooldown per upstream in ms (default {DEFAULT_COOLDOWN_MS})",
     )
+    parser.add_argument("--proxy-url", default=DEFAULT_PROXY_URL, help="base URL agents use")
+    parser.add_argument(
+        "--proxy-key-env", default=DEFAULT_PROXY_KEY_ENV,
+        help="placeholder key env name for the proxy provider entry",
+    )
+    parser.add_argument(
+        "--no-store", action="store_true",
+        help=f"do not write the {PROXY_PROVIDER} provider into the model-list store",
+    )
     parser.add_argument("--dry-run", action="store_true", help="print the config instead of writing")
     args = parser.parse_args()
 
-    config, lines = build_config(args)
+    config, proxy_entry, lines = build_config(args)
     text = json.dumps(config, ensure_ascii=False, indent=2) + "\n"
 
     if args.dry_run:
@@ -210,6 +267,10 @@ def main() -> int:
     out = Path(os.path.expanduser(args.out))
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
+    if not args.no_store:
+        store_path = Path(os.path.expanduser(args.fff_dir)) / "llm-models.json"
+        write_proxy_provider(store_path, proxy_entry)
+        lines.append(f"已更新 store 的 {PROXY_PROVIDER} provider: {store_path}")
     print("\n".join(lines))
     print(f"已写入 {config_path_label(out)}")
     return 0
