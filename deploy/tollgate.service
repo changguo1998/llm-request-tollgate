@@ -1,0 +1,17 @@
+# llm-request-tollgate systemd 用户服务模板 (O1)。
+# 安装: ./deploy/install_service.sh (会把 __ROOT__ 替换为仓库绝对路径)。
+[Unit]
+Description=llm-request-tollgate (LLM request proxy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__ROOT__
+ExecStart=__ROOT__/llm-request-tollgate -config __ROOT__/config.local.json
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

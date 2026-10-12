@@ -15,6 +15,9 @@
 5. 预算判定点: 第一版恒放行只留位置 (余额接口后续接入)。
 6. 响应整形: 非流 / 流式 chunk 里的 `model` 字段改回请求的逻辑名,
    对外隐藏真实上游 id。
+7. 运维面: `GET /v1/models` 返回逻辑名清单; 请求头 `X-Tollgate-Source`
+   记入日志 `source` 字段; `-summary` 汇总请求日志; `deploy/` + `test/healthcheck.sh`
+   常驻与自检。
 
 ## 快速开始
 
@@ -22,8 +25,14 @@
 go build ./...
 # 填好 config.local.json (从 config.example.json 复制) 后:
 ./llm-request-tollgate -config config.local.json
-# 起假上游 + 全量自测 (45 项断言):
+# 起假上游 + 全量自测 (49 项断言):
 ./test/run_selftest.sh all
+# 常驻 (systemd 用户服务, 崩了自动拉起):
+./deploy/install_service.sh
+# 自检 (二进制 / 配置 / 端口):
+./test/healthcheck.sh
+# 汇总请求日志 (按 逻辑名+来源, 含 token 用量):
+./llm-request-tollgate -summary var/requests.jsonl
 ```
 
 agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
@@ -42,7 +51,8 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 
 ## v1 边界
 
-- 只做 `POST /v1/chat/completions` (D4); `/responses`、`/v1/models` 一律 404。
+- 转发只做 `POST /v1/chat/completions` (D4); `GET /v1/models` 返回逻辑名清单 (O5);
+  `/responses` 一律 404。
 - 无集中 fallback / 熔断; 首字节之后不切后端。
 - 预算判定恒放行 (D5); 账本不落盘, 明细在日志。
 - 接真上游前的清单见设计文档 §5.4。
@@ -52,5 +62,7 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 - `main.go` 单文件代理 (含假上游自测所需的全部实现)。
 - `test/fakeupstream/` 假上游: 回放思考块 / 文本 / 工具调用 / usage 的 SSE,
   支持中途断流 (验证 F6)。
-- `test/run_selftest.sh` 自测: 7 组用例 45 项断言, 对本地假上游跑代理。
-- `tmp/verify.sh` 一键验收脚本 (临时, 输出进 `tmp/verify.log`, 不提交)。
+- `test/run_selftest.sh` 自测: 7 组用例 49 项断言, 对本地假上游跑代理。
+- `test/healthcheck.sh` 自检: 二进制 / 配置 (-check) / 端口三项, 退出码 0 = 全通过。
+- `deploy/` 常驻: `tollgate.service` 模板 + `install_service.sh` (systemd 用户服务)。
+- `tmp/` 一键验收脚本 (临时, 输出进 `tmp/*.log`, 不提交)。

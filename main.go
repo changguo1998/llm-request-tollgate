@@ -1,6 +1,6 @@
 // llm-request-tollgate: 自研单文件 OpenAI 兼容代理 (设计文档 docs/design.md)。
 //
-// 单进程内含五件事 (设计 §4.1):
+// 单进程内含七件事 (设计 §4.1):
 //  1. 别名表 (白名单 + 路由): 逻辑模型名 -> [(上游, 真实模型 id), ...],
 //     未命中的模型名直接返 404, 不猜上游 (D2)。
 //  2. 按上游分组 (v1 一个上游一把 key, "上游+凭据" 等价于上游记录) 的
@@ -12,6 +12,8 @@
 //     响应体 usage; 缺 usage 按 F7 字符口径兜底并计数。
 //  5. 预算判定点: 第一版恒放行只留位置 (D5)。
 //  6. 响应整形: 非流 / 流式 chunk 里的 model 字段改回请求的逻辑名 (O9)。
+//  7. 对外面: GET /v1/models 返回逻辑名清单 (O5); 日志记 source 标识 (O3);
+//     -summary 汇总命令 (O2); -check 配置自检 + deploy/ 常驻与自检脚本 (O1)。
 //
 // 配置: config.local.json (gitignored), SIGHUP 热加载别名与上游 (F1)。
 // 日志: JSONL 追加写, 逐笔明细 (F5, F8)。
@@ -24,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"math"
@@ -31,6 +34,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -263,6 +267,7 @@ type logRec struct {
 	QueueMs     int64  `json:"queue_ms"`
 	Client      string `json:"client"`
 	UA          string `json:"ua,omitempty"`
+	Source      string `json:"source,omitempty"`
 	Err         string `json:"err,omitempty"`
 	BudgetAllow bool   `json:"budget_allow"`
 }
@@ -398,6 +403,15 @@ var clientAuthHeaders = []string{
 }
 
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/v1/models" {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+				"only GET /v1/models")
+			return
+		}
+		a.serveModels(w)
+		return
+	}
 	if r.Method != http.MethodPost || r.URL.Path != clientPath {
 		writeError(w, http.StatusNotFound, "not_found",
 			"unsupported path/method: "+r.Method+" "+r.URL.Path)
@@ -470,7 +484,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
 			Upstream: chosen.ID, Model: realModel, Path: r.URL.Path, Stream: stream,
 			Status: http.StatusTooManyRequests, Missing: true, Client: r.RemoteAddr,
-			UA: r.Header.Get("User-Agent"), Err: "rate_limited", BudgetAllow: budgetAllow,
+			UA: r.Header.Get("User-Agent"), Source: r.Header.Get("X-Tollgate-Source"),
+			Err: "rate_limited", BudgetAllow: budgetAllow,
 		})
 		return
 	}
@@ -483,7 +498,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
 			Upstream: chosen.ID, Model: realModel, Path: r.URL.Path, Stream: stream,
 			Status: http.StatusTooManyRequests, Missing: true, Client: r.RemoteAddr,
-			UA: r.Header.Get("User-Agent"), Err: "rate_limited", BudgetAllow: budgetAllow,
+			UA: r.Header.Get("User-Agent"), Source: r.Header.Get("X-Tollgate-Source"),
+			Err: "rate_limited", BudgetAllow: budgetAllow,
 		})
 		return
 	}
@@ -524,7 +540,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Upstream: chosen.ID, Model: realModel, Path: r.URL.Path, Stream: stream,
 			Status: http.StatusBadGateway, Missing: true, Queued: queued, QueueMs: queueMs,
 			Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"),
-			Err: err.Error(), BudgetAllow: budgetAllow,
+			Source: r.Header.Get("X-Tollgate-Source"),
+			Err:    err.Error(), BudgetAllow: budgetAllow,
 		})
 		return
 	}
@@ -571,7 +588,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
 		Upstream: chosen.ID, Model: realModel, Path: r.URL.Path, Stream: stream,
 		Status: status, Usage: usage, Missing: missing, Queued: queued, QueueMs: queueMs,
-		Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"), BudgetAllow: budgetAllow,
+		Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"), Source: r.Header.Get("X-Tollgate-Source"), BudgetAllow: budgetAllow,
 	})
 }
 
@@ -674,6 +691,23 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 	})
 }
 
+// serveModels 返回别名表里的逻辑模型清单 (O5)。只列对外名字, 不暴露上游真实 id。
+func (a *App) serveModels(w http.ResponseWriter) {
+	a.mu.RLock()
+	names := make([]string, 0, len(a.aliases))
+	for n := range a.aliases {
+		names = append(names, n)
+	}
+	a.mu.RUnlock()
+	sort.Strings(names)
+	data := make([]map[string]string, 0, len(names))
+	for _, n := range names {
+		data = append(data, map[string]string{"id": n, "object": "model"})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
+}
+
 // ---------- 入口 ----------
 
 func loadConfig(path string) (*Config, error) {
@@ -694,9 +728,106 @@ func loadConfig(path string) (*Config, error) {
 	return &c, nil
 }
 
+// sumRow 是 -summary 的每行聚合 (O2)。
+type sumRow struct {
+	Key     string
+	Up      string
+	Reqs    int
+	Errs    int
+	Queued  int
+	Missing int
+	P, C, T int
+}
+
+// runSummary 汇总 JSONL 请求日志 (O2): 按 逻辑名+来源 分组, 来源取 source, 缺省用 ua。
+func runSummary(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		log.Fatalf("summary: %v", err)
+	}
+	defer f.Close()
+	rows := map[string]*sumRow{}
+	var order []string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var rec logRec
+		if err := json.Unmarshal(sc.Bytes(), &rec); err != nil || rec.Logical == "" {
+			continue
+		}
+		src := rec.Source
+		if src == "" {
+			src = rec.UA
+		}
+		key := rec.Logical + "\x00" + src
+		r, ok := rows[key]
+		if !ok {
+			r = &sumRow{Key: rec.Logical + " / " + src}
+			rows[key] = r
+			order = append(order, key)
+		}
+		if r.Up == "" {
+			r.Up = rec.Upstream
+		}
+		r.Reqs++
+		if rec.Status >= 400 {
+			r.Errs++
+		}
+		if rec.Queued {
+			r.Queued++
+		}
+		if rec.Missing {
+			r.Missing++
+		}
+		if rec.Usage != nil {
+			r.P += rec.Usage.Prompt
+			r.C += rec.Usage.Completion
+			r.T += rec.Usage.Total
+		}
+	}
+	if err := sc.Err(); err != nil {
+		log.Fatalf("summary: %v", err)
+	}
+	sort.Slice(order, func(i, j int) bool {
+		return rows[order[i]].T > rows[order[j]].T
+	})
+	fmt.Printf("%-34s %-10s %6s %5s %5s %5s %8s %8s %8s\n",
+		"logical/source", "upstream", "reqs", "err", "queued", "miss", "prompt", "completion", "total")
+	tot := &sumRow{Key: "TOTAL"}
+	for _, k := range order {
+		r := rows[k]
+		fmt.Printf("%-34s %-10s %6d %5d %5d %5d %8d %8d %8d\n",
+			r.Key, r.Up, r.Reqs, r.Errs, r.Queued, r.Missing, r.P, r.C, r.T)
+		tot.Reqs += r.Reqs
+		tot.Errs += r.Errs
+		tot.Queued += r.Queued
+		tot.Missing += r.Missing
+		tot.P += r.P
+		tot.C += r.C
+		tot.T += r.T
+	}
+	fmt.Printf("%-34s %-10s %6d %5d %5d %5d %8d %8d %8d\n",
+		tot.Key, "", tot.Reqs, tot.Errs, tot.Queued, tot.Missing, tot.P, tot.C, tot.T)
+}
+
 func main() {
 	cfgPath := flag.String("config", "config.local.json", "config file path")
+	summary := flag.String("summary", "", "aggregate JSONL request log and exit")
+	check := flag.Bool("check", false, "validate config and exit")
 	flag.Parse()
+
+	if *summary != "" {
+		runSummary(*summary)
+		return
+	}
+	if *check {
+		cfg, err := loadConfig(*cfgPath)
+		if err != nil {
+			log.Fatalf("config invalid: %v", err)
+		}
+		log.Printf("config OK: listen=%s log_path=%s upstreams=%d aliases=%d",
+			cfg.Listen, cfg.LogPath, len(cfg.Upstreams), len(cfg.Aliases))
+		return
+	}
 
 	cfg, err := loadConfig(*cfgPath)
 	if err != nil {

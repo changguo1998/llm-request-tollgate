@@ -50,7 +50,7 @@ start_fake() { # <port> <delay ms>
 start_proxy() { # <port> <config>
   "$BIN/tollgate" -config "$2" >"$TMP/proxy-$1.log" 2>&1 &
   PROCS+=("$!")
-  if wait_code "$1" 404; then pass "proxy up on $1"; else fail "proxy not ready on $1"; fi
+  if wait_code "$1" 200; then pass "proxy up on $1"; else fail "proxy not ready on $1"; fi
 }
 
 # gen_config1: 单上游配置。参数: 输出文件 监听端口 日志 假上游端口 上游id
@@ -98,7 +98,8 @@ case_alias() {
   ecode=$(jq -r '.error.code' "$TMP/resp.txt")
   [ "$ecode" = "model_not_found" ] && pass "error.code=model_not_found" || fail "error.code=$ecode"
   code=$(curl -s -o "$TMP/resp.txt" -w '%{http_code}' -X GET "http://127.0.0.1:18800/v1/models")
-  [ "$code" = "404" ] && pass "/v1/models -> 404 (D4)" || fail "/v1/models -> $code"
+  [ "$code" = "200" ] && pass "/v1/models -> 200 (O5)" || fail "/v1/models -> $code"
+  grep -q '"test-model"' "$TMP/resp.txt" && pass "/v1/models 含逻辑名 test-model" || fail "/v1/models 缺 test-model"
 }
 
 case_stream() {
@@ -275,6 +276,21 @@ case_logging() {
   done <"$LOG"
   [ "$n" -ge 2 ] && [ "$bad" = 0 ] \
     && pass "日志 $n 行, 字段齐全, 模型名已改写为真实 id" || fail "日志校验: n=$n bad=$bad"
+
+  # O3: source 头写入日志。
+  curl -s -o /dev/null -X POST "http://127.0.0.1:18806/v1/chat/completions" \
+    -H 'Content-Type: application/json' -H 'Authorization: Bearer dummy' -H 'X-Tollgate-Source: agent-x' \
+    -d '{"model":"test-model","messages":[{"role":"user","content":"hi"}]}'
+  grep '"source":"agent-x"' "$LOG" | tail -1 | grep -q '"logical":"test-model"' \
+    && pass "日志记 source=agent-x (O3)" || fail "source 未记入日志"
+
+  # O2: -summary 聚合, TOTAL 请求数 = 日志行数。
+  "$BIN/tollgate" -summary "$LOG" >"$TMP/summary.txt" 2>&1
+  grep -F 'test-model / agent-x' "$TMP/summary.txt" >/dev/null 2>&1 \
+    && pass "-summary 含 test-model / agent-x 分组行 (O2)" || fail "-summary 缺分组行"
+  n=$(wc -l <"$LOG")
+  m=$(awk '$1=="TOTAL"{print $2}' "$TMP/summary.txt")
+  [ "$n" = "$m" ] && pass "-summary TOTAL=$m 与日志行数 $n 一致" || fail "-summary TOTAL=$m, 日志行数 $n"
 }
 
 case_overhead() {
