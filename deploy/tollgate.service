@@ -4,6 +4,11 @@
 Description=llm-request-tollgate (LLM request proxy)
 After=network-online.target
 Wants=network-online.target
+# fff-keys.service (在 ~/fff/config/systemd, 软链到 ~/.config/systemd/user) 负责把
+# ~/.fff/keys/*.ai 里的密钥导入 systemd 用户环境; 缺了它, 重启后本服务会因 key_env
+# 解析失败起不来。没有该 unit 时 Wants 只是警告, 不影响启动。
+After=fff-keys.service
+Wants=fff-keys.service
 
 [Service]
 Type=simple
