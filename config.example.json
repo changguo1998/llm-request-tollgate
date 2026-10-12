@@ -12,7 +12,7 @@
       "id": "ustc",
       "base_url": "https://example.invalid/v1",
       "auth_header": "Authorization",
-      "key_env": "TOLLGATE_USTC_KEY",
+      "key_env": "USTC_API_KEY",
       "headers": {},
       "include_usage": true,
       "budget": { "windows": { "3h": 30, "12h": 70, "24h": 100 }, "unit": 1, "units": { "deepseek-v4.1-flash": 0.000002 }, "refresh_sec": 60 },
@@ -22,7 +22,7 @@
       "id": "group",
       "base_url": "https://example.invalid/v1",
       "auth_header": "Authorization",
-      "key_env": "TOLLGATE_GROUP_KEY",
+      "key_env": "GROUP_API_KEY",
       "headers": {},
       "include_usage": true,
       "limits": { "rate_per_sec": 0.34, "burst": 1, "concurrency": 1 }

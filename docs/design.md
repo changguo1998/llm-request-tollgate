@@ -208,7 +208,7 @@ base URL 都可以改（有的在配置文件里，有的支持 profile 或临�
       "id": "ustc",
       "base_url": "https://example.invalid/v1",
       "auth_header": "Authorization",
-      "key_env": "TOLLGATE_USTC_KEY",
+      "key_env": "USTC_API_KEY",
       "headers": {},
       "include_usage": true,
       "limits": { "rate_per_sec": 0.34, "burst": 1, "concurrency": 1 }

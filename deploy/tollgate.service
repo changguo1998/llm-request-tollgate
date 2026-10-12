@@ -9,8 +9,8 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=__ROOT__
 # 密钥只从环境变量来 (key_env), 不落盘:
-#   systemctl --user import-environment TOLLGATE_USTC_KEY TOLLGATE_GROUP_KEY
-#   或 systemctl --user set-environment TOLLGATE_USTC_KEY=...
+#   systemctl --user import-environment USTC_API_KEY GROUP_API_KEY ARKCP_API_KEY ARKAP_API_KEY
+#   或 systemctl --user set-environment USTC_API_KEY=... (名字与配置里的 key_env 一致)
 ExecStart=__ROOT__/llm-request-tollgate -config __ROOT__/config.local.json
 Restart=on-failure
 RestartSec=3

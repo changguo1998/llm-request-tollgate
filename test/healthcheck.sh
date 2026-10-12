@@ -10,7 +10,7 @@ BIN="$ROOT/llm-request-tollgate"
 # key_env 密钥只存在环境变量(内存), 从 systemd 用户管理器同步 (与服务同源, 不落盘)。
 while IFS= read -r line; do
   case "$line" in
-    TOLLGATE_*=*) export "$line" ;;
+    TOLLGATE_*=*|USTC_API_KEY=*|GROUP_API_KEY=*|ARKCP_API_KEY=*|ARKAP_API_KEY=*) export "$line" ;;
   esac
 done < <(systemctl --user show-environment 2>/dev/null)
 
