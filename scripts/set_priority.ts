@@ -21,9 +21,8 @@
  *     s                   save store  r     save + regenerate config
  *     h                   hup service q     quit (asks when unsaved)
  *
- * Non-interactive:
- *     node scripts/set_priority.ts --order [alias]
- *     node scripts/set_priority.ts --set <provider|model> <value>
+ * No command-line options; everything happens in the interface. Paths come from
+ * the environment: FFF_HOME (store directory), TOLLGATE_CONFIG (optional).
  */
 
 import { execFileSync } from "node:child_process";
@@ -417,20 +416,22 @@ class Tui {
   handle(input: string, quit: () => void): void {
     if (this.prompt) {
       const p = this.prompt;
+      const rest: string[] = [];
       for (const ch of input) {
+        if (!this.prompt) {
+          rest.push(ch); // 输入框已提交/取消, 同批剩下的按键按普通按键处理
+          continue;
+        }
         if (ch === "\r" || ch === "\n") {
           this.prompt = null;
           p.commit(p.buffer.trim());
-          return;
-        }
-        if (ch === "\x1b" || ch === "\x03") {
+        } else if (ch === "\x1b" || ch === "\x03") {
           this.prompt = null;
-          return;
-        }
-        if (ch === "\x7f") p.buffer = p.buffer.slice(0, -1);
+        } else if (ch === "\x7f") p.buffer = p.buffer.slice(0, -1);
         else if (ch >= " ") p.buffer += ch;
       }
-      return;
+      if (!rest.length) return;
+      input = rest.join("");
     }
     // 转义序列整块匹配; 其余按键逐字符处理 (成块到达的 "q\n" 也要能退出)。
     const sequences = ["\x1b[A", "\x1b[B", "\x1b[5~", "\x1b[6~", "\x1b[C", "\x1b[D"];
@@ -505,68 +506,15 @@ function runTui(tui: Tui): void {
   render();
 }
 
-// ---------- headless ----------
-
-function printOrder(store: Store, config: string, storePath: string, alias?: string): void {
-  for (const [name, cands] of buildAliases(store, config, storePath)) {
-    if (alias && !name.includes(alias)) continue;
-    if (!alias && cands.length < 2) continue;
-    console.log(`${name}:`);
-    cands.forEach((c, i) => {
-      console.log(`  ${i + 1}. ${c.provider}/${c.model.id}  M${priorityOf(c.model)} P${priorityOf(store.providers[c.provider])}`);
-    });
-  }
-}
-
-function headlessSet(storePath: string, token: string, value: number): number {
-  const store = loadStore(storePath);
-  const ups = upstreams(store);
-  if (token in ups) {
-    ups[token][PRIORITY] = value;
-    saveStore(storePath, store);
-    console.log(`${token}: provider 优先级 = ${value}`);
-    return 0;
-  }
-  const hits: [string, Model][] = [];
-  for (const [name, entry] of Object.entries(ups)) {
-    for (const model of entry.models ?? []) if (model.id === token || model.id.includes(token)) hits.push([name, model]);
-  }
-  if (hits.length !== 1) {
-    console.log(`需要唯一命中, 实际 ${hits.length}: ` + hits.slice(0, 8).map(([n, m]) => `${n}/${m.id}`).join(", "));
-    return 1;
-  }
-  hits[0][1][PRIORITY] = value;
-  saveStore(storePath, store);
-  console.log(`${hits[0][0]}/${hits[0][1].id}: 模型优先级 = ${value}`);
-  return 0;
-}
+// ---------- entry ----------
 
 function main(): number {
-  const argv = process.argv.slice(2);
-  const value = (flag: string, fallback: string) => {
-    const i = argv.indexOf(flag);
-    return i >= 0 && argv[i + 1] ? argv[i + 1] : fallback;
-  };
-  const storePath = resolve(value("--store", DEFAULT_STORE));
-  const config = resolve(value("--config", DEFAULT_CONFIG));
-
-  const orderIdx = argv.indexOf("--order");
-  if (orderIdx >= 0) {
-    const next = argv[orderIdx + 1];
-    printOrder(loadStore(storePath), config, storePath, next && !next.startsWith("--") ? next : undefined);
-    return 0;
-  }
-  const setIdx = argv.indexOf("--set");
-  if (setIdx >= 0) {
-    const [token, raw] = argv.slice(setIdx + 1);
-    if (!token || !raw || !Number.isInteger(Number(raw))) {
-      console.error("用法: --set <provider|模型> <值>");
-      return 2;
-    }
-    return headlessSet(storePath, token, Number(raw));
-  }
+  // 命令行不接受参数: 交互界面里做全部操作, 路径走环境变量
+  // (FFF_HOME 定位 store 所在目录, TOLLGATE_CONFIG 覆盖配置路径, 一般用不到)。
+  const storePath = DEFAULT_STORE;
+  const config = process.env.TOLLGATE_CONFIG ? resolve(process.env.TOLLGATE_CONFIG) : DEFAULT_CONFIG;
   if (!process.stdout.isTTY || !process.stdin.isTTY) {
-    console.error("TUI 需要终端; 无终端时用 --order / --set");
+    console.error("需要交互式终端: node scripts/set_priority.ts");
     return 1;
   }
   runTui(new Tui(storePath, config, loadStore(storePath)));

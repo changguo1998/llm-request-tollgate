@@ -123,13 +123,12 @@ python3 scripts/gen_tollgate_config.py --dry-run
 python3 scripts/gen_tollgate_config.py
 ```
 
-优先级用 TUI 调 (Node >= 22.6 直接跑 TS, 零依赖零构建): provider 面板 + 模型列表 +
-候选顺序实时预览, `+/-` 调值, `s` 存 store, `r` 重生成, `h` hup:
+优先级用 TUI 调 (Node >= 22.6 直接跑 TS, 零依赖零构建, 无命令行参数):
+provider 面板 + 模型列表 + 候选顺序实时预览; `+/-` 调值, `=` 输入数值, `Tab` 换面板,
+`/` 过滤, `s` 存 store, `r` 重生成配置, `h` hup, `q` 退出。改完直接 `r` `h` 即可生效。
 
 ```bash
-node scripts/set_priority.ts            # 交互式
-node scripts/set_priority.ts --order    # 只看多候选别名的当前顺序
-node scripts/set_priority.ts --set group 9
+node scripts/set_priority.ts
 ```
 
 ### 预算系数怎么定
@@ -164,6 +163,6 @@ node scripts/set_priority.ts --set group 9
 - `deploy/` 常驻: `tollgate.service` 模板 + `install_service.sh` (systemd 用户服务)。
 - `scripts/gen_tollgate_config.py` 由 fff 模型列表生成本项目配置 (读
   `~/fff/config/llm-models.json` + 黑名单, 按 `tollgate_group` 归并成别名; 见下)。
-- `scripts/set_priority.ts` 调优先级的 TUI (Node >= 22.6 跑 TS, 无依赖): 候选顺序实时预览,
-  可保存 store / 重生成配置 / hup; 另有 `--order` / `--set` 无终端模式。
+- `scripts/set_priority.ts` 调优先级的 TUI (Node >= 22.6 跑 TS, 无依赖无参数): 候选顺序
+  实时预览, 界面内即可保存 store / 重生成配置 / hup。
 - `tmp/` 一键验收脚本 (临时, 输出进 `tmp/*.log`, 不提交)。
