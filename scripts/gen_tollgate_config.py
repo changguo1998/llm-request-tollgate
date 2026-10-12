@@ -27,7 +27,10 @@ upstream (alias generation and ``--providers`` both refuse it), so the list can
 never be generated from itself. Hand-curated fields (provider keys, per-model contextWindow /
 maxTokens / thinkingLevelMap) survive the update.
 
-Every upstream carries ``budget.cooldown_ms`` (429 cooldown, default 5 min).
+Every upstream carries ``budget.cooldown_ms`` (429 cooldown, default 5 min); a
+``budget`` object on the store's provider entry (windows / units / cooldown_ms,
+next to api/baseUrl) overrides it, so quota numbers live with the provider
+metadata instead of only in the generated config.
 ``key_env`` taken from the store's ``apiKey`` placeholder (``$USTC_API_KEY`` ->
 ``USTC_API_KEY``), else ``TOLLGATE_<ID>_KEY``, and the limits of an existing
 upstream, falling
@@ -134,7 +137,10 @@ def build_upstreams(store: dict, providers: list[str], existing: dict, cooldown_
         entry.setdefault("include_usage", True)
         if "limits" not in entry:
             entry["limits"] = dict(sample["limits"]) if sample else dict(DEFAULT_LIMITS)
+        # 预算/限额口径以 store 里的 provider 条目为准 (与 api/baseUrl 同级),
+        # store 没写的键才回落到现有配置, 最后补冷却默认值。
         budget = dict(entry.get("budget") or {})
+        budget.update(store[provider].get("budget") or {})
         budget.setdefault("cooldown_ms", cooldown_ms)
         entry["budget"] = budget
         entry["base_url"] = store[provider]["baseUrl"]
