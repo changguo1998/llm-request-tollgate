@@ -1,0 +1,36 @@
+{
+  "listen": "127.0.0.1:8787",
+  "log_path": "var/requests.jsonl",
+  "timeouts": {
+    "connect_ms": 10000,
+    "response_header_ms": 120000,
+    "stream_idle_ms": 240000,
+    "queue_wait_ms": 60000
+  },
+  "upstreams": [
+    {
+      "id": "ustc",
+      "base_url": "https://example.invalid/v1",
+      "auth_header": "Authorization",
+      "key": "REPLACE_ME",
+      "headers": {},
+      "include_usage": true,
+      "limits": { "rate_per_sec": 0.34, "burst": 1, "concurrency": 1 }
+    },
+    {
+      "id": "group",
+      "base_url": "https://example.invalid/v1",
+      "auth_header": "Authorization",
+      "key": "REPLACE_ME",
+      "headers": {},
+      "include_usage": true,
+      "limits": { "rate_per_sec": 0.34, "burst": 1, "concurrency": 1 }
+    }
+  ],
+  "aliases": {
+    "deepseek-v4.1-flash": [
+      ["ustc", "deepseek-v4.1-flash"],
+      ["group", "deepseek-v4.1-flash"]
+    ]
+  }
+}
