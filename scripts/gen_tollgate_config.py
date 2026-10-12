@@ -146,19 +146,34 @@ def build_proxy_provider(config: dict, store: dict, providers: list[str], proxy_
                          key_env: str) -> dict:
     """Build the store entry representing this proxy: one model per alias (logical name).
 
-    The proxy hides upstream ids, so agents only ever see alias names; reasoning is
-    inherited from whichever candidate model declares it.
+    The proxy hides upstream ids, so agents only ever see alias names. reasoning is
+    inherited from whichever candidate declares it; contextWindow / maxTokens take
+    the smallest value across candidates, since a request may be served by any of
+    them (kimi drops models without a usable contextWindow).
     """
-    reasoning = set()
+    sources = {}
     for provider in providers:
         for model in store[provider].get("models", []):
-            if model.get("reasoning"):
-                reasoning.add(model["id"])
+            sources[model["id"]] = model
     models = []
     for name in sorted(config["aliases"]):
         entry = {"id": name}
-        if any(model_id in reasoning for _, model_id in config["aliases"][name]):
+        windows, max_tokens, reasons = [], [], False
+        for _, model_id in config["aliases"][name]:
+            source = sources.get(model_id, {})
+            if source.get("reasoning"):
+                reasons = True
+            if isinstance(source.get("contextWindow"), int):
+                windows.append(source["contextWindow"])
+            if isinstance(source.get("maxTokens"), int):
+                max_tokens.append(source["maxTokens"])
+        if reasons:
             entry["reasoning"] = True
+        # 取候选里的最小值: 请求可能落到任一候选, 只有保守值才不会被上游拒绝。
+        if windows:
+            entry["contextWindow"] = min(windows)
+        if max_tokens:
+            entry["maxTokens"] = min(max_tokens)
         models.append(entry)
     return {
         "kind": PROXY_KIND,
