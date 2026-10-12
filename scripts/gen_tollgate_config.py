@@ -22,7 +22,9 @@ include_usage, limits, budget, breaker_*). New upstreams get
 Besides the config, it upserts a ``tollgate`` provider into the model-list store
 (``--no-store`` skips it): one model per alias, baseUrl derived from the config's
 ``listen``, so agents synced from the store can point at this proxy instead of
-the upstreams. Hand-curated fields (provider keys, per-model contextWindow /
+the upstreams. That entry carries ``kind: "proxy"`` and is never treated as an
+upstream (alias generation and ``--providers`` both refuse it), so the list can
+never be generated from itself. Hand-curated fields (provider keys, per-model contextWindow /
 maxTokens / thinkingLevelMap) survive the update.
 
 Every upstream carries ``budget.cooldown_ms`` (429 cooldown, default 5 min).
@@ -52,6 +54,7 @@ DEFAULT_PROVIDERS = "ustc,group,arkcp,arkap"
 DEFAULT_PROXY_URL = ""  # 空 = 从配置的 listen 推导
 DEFAULT_PROXY_KEY_ENV = "TOLLGATE_API_KEY"
 PROXY_PROVIDER = "tollgate"  # store 里代表本代理自己的 provider 名
+PROXY_KIND = "proxy"  # store 条目的 kind 标记: 生成列表/上游时一律跳过, 防自转发递归
 
 # Upstream fields carried over from an existing config entry.
 PRESERVED_UPSTREAM_KEYS = (
@@ -158,6 +161,7 @@ def build_proxy_provider(config: dict, store: dict, providers: list[str], proxy_
             entry["reasoning"] = True
         models.append(entry)
     return {
+        "kind": PROXY_KIND,
         "api": "openai-completions",
         "apiKey": f"${key_env}",
         "baseUrl": proxy_url,
@@ -214,8 +218,10 @@ def build_config(args) -> tuple[dict, list[str]]:
     dropped = set(load_json(drop_path)) if drop_path.exists() else set()
 
     providers = [p.strip() for p in args.providers.split(",") if p.strip()]
-    if PROXY_PROVIDER in providers:
-        raise SystemExit(f"{PROXY_PROVIDER} is this proxy itself, not an upstream")
+    # 代理自身 (kind=proxy) 永远不能当上游, 否则请求会转发给自己形成递归。
+    marked = [p for p in providers if p == PROXY_PROVIDER or store.get(p, {}).get("kind") == PROXY_KIND]
+    if marked:
+        raise SystemExit(f"{', '.join(marked)} is this proxy itself (kind={PROXY_KIND}), not an upstream")
     unknown = [p for p in providers if p not in store]
     if unknown:
         raise SystemExit(f"providers not in the store: {', '.join(unknown)}")
