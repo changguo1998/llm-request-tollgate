@@ -120,6 +120,9 @@ case_stream() {
   printf '%s' "$body" | grep -q 'world!' && pass "文本块透传 (world!)" || fail "world! 缺失"
   printf '%s' "$body" | grep -q 'get_weather' && pass "工具调用透传" || fail "工具调用缺失"
   printf '%s' "$body" | grep -q 'data: \[DONE\]' && pass "以 [DONE] 结束" || fail "无 [DONE]"
+  # O9: 每个 data 块 (含 usage) 的 model 都改回逻辑名。
+  models=$(printf '%s' "$body" | grep '^data: ' | grep -v '^data: \[DONE\]$' | sed 's/^data: //' | jq -r '.model // empty' | sort -u)
+  [ "$models" = "test-model" ] && pass "流 chunk model 改回逻辑名" || fail "流 chunk model=$models (want test-model)"
   # 逐块不缓冲: 首字节远早于全流结束 (假上游每块延迟 150ms)
   if python3 -c "import sys; sys.exit(0 if float('$st') < 0.35 and float('$tt') > float('$st') + 0.2 else 1)"; then
     pass "逐块透传不缓冲 (首字节 ${st}s, 全流 ${tt}s)"
@@ -193,6 +196,9 @@ EOF
   [ "$tu" = "49" ] && pass "非流式 usage 提取 total=49" || fail "非流式 usage=$tu"
   grep '"upstream":"fu"' "$LOG" | tail -1 | grep -q '"usage":{"prompt":7,"completion":42,"total":49}' \
     && pass "非流式日志 usage 一致" || fail "非流式日志 usage 不一致"
+  # O9: 非流响应 model 改回逻辑名。
+  m=$(jq -r '.model' "$TMP/resp.txt")
+  [ "$m" = "test-model" ] && pass "非流响应 model 改回逻辑名" || fail "非流响应 model=$m (want test-model)"
 }
 
 case_ratelimit_min() {

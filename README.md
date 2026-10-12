@@ -13,6 +13,8 @@
 4. 用量记账: 强写 `stream_options.include_usage`, 从流末 usage / 非流式响应体
    提取 token 用量; 缺 usage 按字符粗估 (F7) 并记 `missing_usage`。
 5. 预算判定点: 第一版恒放行只留位置 (余额接口后续接入)。
+6. 响应整形: 非流 / 流式 chunk 里的 `model` 字段改回请求的逻辑名,
+   对外隐藏真实上游 id。
 
 ## 快速开始
 
@@ -20,7 +22,7 @@
 go build ./...
 # 填好 config.local.json (从 config.example.json 复制) 后:
 ./llm-request-tollgate -config config.local.json
-# 起假上游 + 全量自测 (43 项断言):
+# 起假上游 + 全量自测 (45 项断言):
 ./test/run_selftest.sh all
 ```
 
@@ -50,5 +52,5 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 - `main.go` 单文件代理 (含假上游自测所需的全部实现)。
 - `test/fakeupstream/` 假上游: 回放思考块 / 文本 / 工具调用 / usage 的 SSE,
   支持中途断流 (验证 F6)。
-- `test/run_selftest.sh` 自测: 7 组用例 43 项断言, 对本地假上游跑代理。
+- `test/run_selftest.sh` 自测: 7 组用例 45 项断言, 对本地假上游跑代理。
 - `tmp/verify.sh` 一键验收脚本 (临时, 输出进 `tmp/verify.log`, 不提交)。

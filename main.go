@@ -11,6 +11,7 @@
 //  4. 用量提取: 强写 stream_options.include_usage, 流末 usage chunk / 非流式
 //     响应体 usage; 缺 usage 按 F7 字符口径兜底并计数。
 //  5. 预算判定点: 第一版恒放行只留位置 (D5)。
+//  6. 响应整形: 非流 / 流式 chunk 里的 model 字段改回请求的逻辑名 (O9)。
 //
 // 配置: config.local.json (gitignored), SIGHUP 热加载别名与上游 (F1)。
 // 日志: JSONL 追加写, 逐笔明细 (F5, F8)。
@@ -203,6 +204,47 @@ func estimateUsageFromBody(buf []byte) int {
 		n += estimateTokens(c.Message.Content)
 	}
 	return n
+}
+
+// rewriteModel 把 JSON 里顶层 "model" 字段的值改成 logical, 其余字节原样保留 (O9)。
+// 仅处理值为不含量转义的简单字符串, 否则原样返回。
+func rewriteModel(data []byte, logical string) []byte {
+	if logical == "" {
+		return data
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return data
+	}
+	raw, ok := m["model"]
+	if !ok || len(raw) < 2 || raw[0] != '"' || bytes.IndexByte(raw, '\\') >= 0 {
+		return data
+	}
+	var cur string
+	if json.Unmarshal(raw, &cur) != nil || cur == logical {
+		return data
+	}
+	enc, _ := json.Marshal(logical)
+	key := []byte(`"model":`)
+	for from := 0; ; {
+		i := bytes.Index(data[from:], key)
+		if i < 0 {
+			return data
+		}
+		i += from
+		j := i + len(key)
+		for j < len(data) && (data[j] == ' ' || data[j] == '\t') {
+			j++
+		}
+		if j+len(raw) <= len(data) && bytes.Equal(data[j:j+len(raw)], raw) {
+			out := make([]byte, 0, len(data)+(len(enc)-len(raw)))
+			out = append(out, data[:j]...)
+			out = append(out, enc...)
+			out = append(out, data[j+len(raw):]...)
+			return out
+		}
+		from = i + 1
+	}
 }
 
 // ---------- 日志 (JSONL) ----------
@@ -505,7 +547,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if stream {
 		w.WriteHeader(status)
 		dst.Del("Content-Length")
-		usage, missing = relayStream(w, resp.Body)
+		usage, missing = relayStream(w, resp.Body, logical)
 	} else {
 		buf, rerr := io.ReadAll(resp.Body)
 		if rerr != nil {
@@ -513,6 +555,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			buf = []byte(`{"error":{"message":` + strconv.Quote(rerr.Error()) + `}}`)
 			dst.Set("Content-Type", "application/json")
 		}
+		buf = rewriteModel(buf, logical)
 		usage = extractUsage(buf)
 		missing = usage == nil
 		if missing {
@@ -535,7 +578,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // relayStream 按行透传 SSE, 期间提取流末 usage (设计 §4.9.2)。
 // 流未以 [DONE] 正常结束时, 发一个 SSE error 事件后关流, 不伪造正常结束 (F6)。
 // 返回提取到的 usage 与是否缺失 (配合 F7 兜底)。
-func relayStream(w http.ResponseWriter, body io.Reader) (*Usage, bool) {
+func relayStream(w http.ResponseWriter, body io.Reader, logical string) (*Usage, bool) {
 	flusher, _ := w.(http.Flusher)
 	sc := bufio.NewScanner(body)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
@@ -572,6 +615,10 @@ func relayStream(w http.ResponseWriter, body io.Reader) (*Usage, bool) {
 					}
 					for _, c := range chunk.Choices {
 						est += estimateTokens(c.Delta.Content)
+					}
+					// O9: 块内 model 改回逻辑名 (只改该字段, 其余字节原样)。
+					if data2 := rewriteModel([]byte(data), logical); string(data2) != data {
+						line = "data: " + string(data2)
 					}
 				}
 			}
