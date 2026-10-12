@@ -15,7 +15,8 @@
 //  7. 对外面: GET /v1/models 返回逻辑名清单 (O5); 日志记 source 标识 (O3);
 //     -summary 汇总命令 (O2); -check 配置自检 + deploy/ 常驻与自检脚本 (O1)。
 //
-// 配置: config.local.json (gitignored), SIGHUP 热加载别名与上游 (F1)。
+// 配置: config.local.json (gitignored, 软链到 ~/fff/config), SIGHUP 热加载别名与上游 (F1);
+// key: 支持 key_env 字段只存环境变量名, 真 key 启动/热加载时从环境变量取, 不落盘。
 // 日志: JSONL 追加写, 逐笔明细 (F5, F8)。
 package main
 
@@ -69,6 +70,7 @@ type UpstreamCfg struct {
 	BaseURL      string            `json:"base_url"`
 	AuthHeader   string            `json:"auth_header"`
 	Key          string            `json:"key"`
+	KeyEnv       string            `json:"key_env,omitempty"`
 	Headers      map[string]string `json:"headers"`
 	IncludeUsage bool              `json:"include_usage"`
 	Limits       Limits            `json:"limits"`
@@ -724,6 +726,17 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if c.LogPath == "" {
 		c.LogPath = "var/requests.jsonl"
+	}
+	// key_env: 配置只存环境变量名, 真 key 启动/热加载时从环境取, 不落盘。
+	for i := range c.Upstreams {
+		u := &c.Upstreams[i]
+		if u.KeyEnv != "" {
+			v, ok := os.LookupEnv(u.KeyEnv)
+			if !ok || v == "" {
+				return nil, fmt.Errorf("upstream %s: env %s not set", u.ID, u.KeyEnv)
+			}
+			u.Key = v
+		}
 	}
 	return &c, nil
 }

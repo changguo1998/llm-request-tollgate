@@ -189,7 +189,7 @@ base URL 都可以改（有的在配置文件里，有的支持 profile 或临�
       "id": "ustc",
       "base_url": "https://example.invalid/v1",
       "auth_header": "Authorization",
-      "key": "REPLACE_ME",
+      "key_env": "TOLLGATE_USTC_KEY",
       "headers": {},
       "include_usage": true,
       "limits": { "rate_per_sec": 0.34, "burst": 1, "concurrency": 1 }
@@ -203,6 +203,7 @@ base URL 都可以改（有的在配置文件里，有的支持 profile 或临�
 
 - `base_url` 自带路径前缀（含 `/v1`），以 §4.5 那家的实测形态为准。
 - `auth_header` 与 `headers`：有的中转不用 `Authorization`（例如 `api-key`），有的要额外头。
+- `key_env`：配置只存环境变量名，真 key 启动/热加载时从环境取，不落盘；缺省回落 `key`。
 - `include_usage`：per-upstream 开关，用来承接 O8 的探测结果。
 - `timeouts.queue_wait_ms` 对应 F3 的排队等待上限；预算判定恒放行，第一版没有对应配置项（D5）。
 - `aliases` 的值是 `[[上游 id, 真实模型 id], ...]`，顺序即优先级。

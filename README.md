@@ -48,12 +48,16 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 
 ## 配置
 
-`config.local.json` (gitignored, 地址与密钥不入库), 结构见 `config.example.json`:
+实际配置 `config.local.json` 是软链接 → `~/fff/config/tollgate.json` (gitignored,
+密钥不入库, 真配置在 ~/fff dotfiles 仓追踪); 仓库内只跟踪模板 `config.example.json`,
+结构见下:
 
 - `listen` 监听地址; `log_path` JSONL 日志路径。
 - `timeouts`: 建连 / 等响应头 / 流空闲 / 排队上限。
-- `upstreams`: 每个上游一条记录 (id / base_url / auth_header / key / headers /
+- `upstreams`: 每个上游一条记录 (id / base_url / auth_header / key 或 key_env / headers /
   include_usage / limits), 限速参数挂在记录上, 即「上游 + 凭据」分组。
+  `key_env` 只存环境变量名, 真 key 启动时从环境取 (密钥不落盘; systemd 服务经
+  `~/fff/config/tollgate.env` 注入, 该 env 文件不进 git, 见「常驻与升级」)。
 - `aliases`: 逻辑名 -> `[[上游 id, 真实模型 id], ...]`。
 
 别名与上游支持 `SIGHUP` 热加载, 限速器状态按上游 id 保留不被重置。

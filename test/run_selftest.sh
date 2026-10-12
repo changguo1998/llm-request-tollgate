@@ -2,7 +2,7 @@
 # llm-request-tollgate 自测: 对本地假上游跑代理, 按用例断言 (设计 §4.7)。
 #
 # 用法: test/run_selftest.sh <case|all>
-#   case: alias | ratelimit | usage | stream | logging | overhead
+#   case: alias | keyenv | ratelimit | usage | stream | logging | overhead
 # 每个用例独立起一个假上游 + 一个代理 (各自端口, 互不干扰)。
 set -u
 
@@ -100,6 +100,32 @@ case_alias() {
   code=$(curl -s -o "$TMP/resp.txt" -w '%{http_code}' -X GET "http://127.0.0.1:18800/v1/models")
   [ "$code" = "200" ] && pass "/v1/models -> 200 (O5)" || fail "/v1/models -> $code"
   grep -q '"test-model"' "$TMP/resp.txt" && pass "/v1/models 含逻辑名 test-model" || fail "/v1/models 缺 test-model"
+}
+
+case_keyenv() {
+  say "=== key_env (key 从环境变量取, 不落盘) ==="
+  local CFG="$TMP/cfg-keyenv.json"
+  cat >"$CFG" <<EOF
+{
+  "listen": "127.0.0.1:18812",
+  "log_path": "$TMP/log-keyenv.jsonl",
+  "timeouts": { "connect_ms": 1000, "response_header_ms": 5000, "stream_idle_ms": 3000, "queue_wait_ms": 10000 },
+  "upstreams": [
+    { "id": "fu", "base_url": "http://127.0.0.1:19012/v1", "auth_header": "Authorization", "key_env": "TG_TEST_KEY", "headers": {}, "include_usage": true, "limits": { "rate_per_sec": 100, "burst": 10, "concurrency": 10 } }
+  ],
+  "aliases": { "test-model": [["fu", "deepseek-v4.1-flash"]] }
+}
+EOF
+  if env -u TG_TEST_KEY "$BIN/tollgate" -config "$CFG" -check >/dev/null 2>&1; then
+    fail "缺 env 时应报错 (TG_TEST_KEY)"
+  else
+    pass "缺 env -> -check 报错"
+  fi
+  if TG_TEST_KEY=secret "$BIN/tollgate" -config "$CFG" -check >/dev/null 2>&1; then
+    pass "有 env -> -check 通过"
+  else
+    fail "有 env -> -check 失败"
+  fi
 }
 
 case_stream() {
@@ -328,6 +354,7 @@ case_overhead() {
 
 case_all() {
   case_alias
+  case_keyenv
   case_stream
   case_usage
   case_ratelimit_min
@@ -340,6 +367,7 @@ main() {
   build
   case "${1:-all}" in
     alias)         case_alias ;;
+    keyenv)        case_keyenv ;;
     stream)        case_stream ;;
     usage)         case_usage ;;
     ratelimit)     case_ratelimit_min; case_ratelimit_429 ;;

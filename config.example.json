@@ -12,7 +12,7 @@
       "id": "ustc",
       "base_url": "https://example.invalid/v1",
       "auth_header": "Authorization",
-      "key": "REPLACE_ME",
+      "key_env": "TOLLGATE_USTC_KEY",
       "headers": {},
       "include_usage": true,
       "limits": { "rate_per_sec": 0.34, "burst": 1, "concurrency": 1 }
@@ -21,7 +21,7 @@
       "id": "group",
       "base_url": "https://example.invalid/v1",
       "auth_header": "Authorization",
-      "key": "REPLACE_ME",
+      "key_env": "TOLLGATE_GROUP_KEY",
       "headers": {},
       "include_usage": true,
       "limits": { "rate_per_sec": 0.34, "burst": 1, "concurrency": 1 }
