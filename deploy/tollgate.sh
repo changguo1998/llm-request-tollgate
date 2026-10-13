@@ -25,7 +25,20 @@ case "${1:-}" in
     bash "$ROOT/deploy/install_service.sh"
     ;;
   status)
-    systemctl --user status "$SVC" --no-pager
+    # 有 user bus 就用 systemctl; 拿不到 bus (定时任务 / 受限沙箱 / 无会话) 时退回进程视角,
+    # 否则 status 会被误当成服务故障。
+    if systemctl --user status "$SVC" --no-pager 2>/dev/null; then
+      exit 0
+    fi
+    echo "systemctl 不可用 (连不上 user bus), 退回进程检查:"
+    pid="$(pgrep -f "$ROOT/llm-request-tollgate -config" | head -1 || true)"
+    if [ -n "$pid" ]; then
+      echo "  running  pid=$pid  启动于 $(stat -c %y "/proc/$pid" 2>/dev/null | cut -d. -f1)"
+      echo "  二进制   $ROOT/llm-request-tollgate 建于 $(stat -c %y "$ROOT/llm-request-tollgate" | cut -d. -f1)"
+      exit 0
+    fi
+    echo "  not running (没找到 llm-request-tollgate 进程)"
+    exit 1
     ;;
   logs)
     journalctl --user -u "$SVC" -f

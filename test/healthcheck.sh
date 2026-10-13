@@ -7,12 +7,26 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CFG="${1:-$ROOT/config.local.json}"
 BIN="$ROOT/llm-request-tollgate"
 
-# key_env 密钥只存在环境变量(内存), 从 systemd 用户管理器同步 (与服务同源, 不落盘)。
+# key_env 密钥只存在环境变量(内存)。两条来源: systemd 用户管理器里显式导入过的
+# (import-environment 的情况), 以及服务自己用的那套 fff 加载方式 —— unit 里
+# ExecStart 包了一层 shell 跑 `aikey all` (遍历 ~/.fff/keys/*.ai), 密钥从不进
+# systemd 的环境, 所以只查 show-environment 会让这一项永远失败。
 while IFS= read -r line; do
   case "$line" in
     TOLLGATE_*=*|USTC_API_KEY=*|GROUP_API_KEY=*|ARKCP_API_KEY=*|ARKAP_API_KEY=*) export "$line" ;;
   esac
 done < <(systemctl --user show-environment 2>/dev/null)
+
+load_fff_keys() { # 与 service 的 ExecStart 同源: 拿 aikey 再 aikey all
+  [ -r "$HOME/fff/config/shellrc.sh" ] || return 1
+  # shellcheck disable=SC1091
+  . "$HOME/fff/config/shellrc.sh"
+  for f in "$HOME/fff/config/aliases.d/25-env.sh" "$HOME/fff/config/aliases.d/10-ai.sh"; do
+    [ -r "$f" ] && . "$f"
+  done
+  command -v aikey >/dev/null 2>&1 || return 1
+  aikey all >/dev/null 2>&1
+}
 
 PASS=0
 FAIL=0
@@ -27,6 +41,10 @@ if [ -x "$BIN" ]; then
 else
   ck "二进制存在 ($BIN)" 1
   echo "  提示: cd $ROOT && go build -o llm-request-tollgate ."
+fi
+
+if [ -x "$BIN" ] && ! "$BIN" -config "$CFG" -check >/dev/null 2>&1; then
+  load_fff_keys && : # 缺密钥时按服务那套加载一次再试
 fi
 
 if [ -x "$BIN" ] && "$BIN" -config "$CFG" -check >/dev/null 2>&1; then
