@@ -1,44 +1,45 @@
 # llm-request-tollgate
 
 本机模型请求的统一闸口: 自研单文件 Go 代理 (无第三方依赖), 各 agent 把 base URL
-指向它, 由它统一做模型路由、限速与用量记账。设计文档见 [docs/design.md](docs/design.md)。
+指向它, 由它统一做模型路由、调度与用量记账。设计文档见 [docs/design.md](docs/design.md)。
 
 ## 做什么
 
-1. 别名白名单路由: 逻辑模型名 -> 一组 (上游, 真实模型 id), 顺序即优先级;
-   未注册的模型名直接 404, 不猜上游。
-2. 按上游分组的限速: 令牌桶 (速率 + 突发, 即严格最小间隔) + 信号量 (并发),
-   桶空排队, 超 `queue_wait_ms` 返 429 带 `Retry-After`。闸门按**当前候选**逐个过:
-   fallback 换到别的上游就重新排那个候选的队, 换之前先归还上一个候选的槽位;
-   `queue_wait_ms` 是整条请求共享的排队总预算, 不是每候选一份 (D16)。
-3. 请求转发: 密钥集中在代理 (客户端凭据一律替换), SSE 逐块原样透传不缓冲。
-4. 用量记账: 强写 `stream_options.include_usage`, 从流末 usage / 非流式响应体
-   提取 token 用量 (含缓存命中 token, 四种上游字段名都认); 缺 usage 按字符粗估 (F7)
-   并记 `missing_usage`。`-usage` 按 上游/模型 × 窗口 列出 token 分解, 用于标定预算系数。
-5. 预算自适应 (D12/D13): 不提前拦截请求; 上游返 429 即视为限额信号 — 该上游
-   (provider+key) 进冷却 (`budget.cooldown_ms`, 默认 5 分钟), 请求自动切下一个候选, 并用
-   撞墙时刻的窗口累计反推折算系数 (落 `var/budget-units.json`, 重启不丢)。
-6. 响应整形: 非流 / 流式 chunk 里的 `model` 字段改回请求的逻辑名,
-   对外隐藏真实上游 id。
-7. 运维面: `GET /v1/models` 返回逻辑名清单; 请求头 `X-Tollgate-Source`
-   记入日志 `source` 字段; `-summary` 汇总请求日志; `deploy/` + `test/healthcheck.sh`
-   常驻与自检。
-8. 集中 fallback: 候选按序尝试, 仅首字节前 (传输失败 / 上游 429 / 5xx) 自动切换
-   下一个; 全部失败保留最近一次错误 (状态码/头/体) 原样透传; 其余 4xx 不重试。
-9. 熔断: 每上游连续失败 (默认 5 次) 打开, 冷却期 (默认 30s) 内跳过该候选不再真发,
-   冷却后自动恢复; 参数可配 (`breaker_fail` / `breaker_cooldown_ms`)。
-10. 限额冷却与系数标定 (D13): 上游 429 后该上游冷却期内不再真发 (日志 `cooldown_skips`),
-    候选全在冷却时返 429 `upstream_cooling` + `Retry-After`; 额度类 429 会用窗口累计
-    反推 `unit`, 状态存 `var/budget-units.json` (配置里的 `units` 仍优先)。
-11. 日志按天轮转: 跨本地日期 (或隔天启动) 时把上一段日志归档为
-    `<base>-YYYY-MM-DD.jsonl` (同名不覆盖, 依次加 -1/-2); 预算聚合与 `-summary`
+01. 别名白名单路由: 逻辑模型名 -> 一组 (上游, 真实模型 id), 顺序即优先级;
+    未注册的模型名直接 404, 不猜上游。
+02. 按上游分组的调度 (设计 §5.5): 每个上游一条 FIFO 队列 + 自适应并发上限 —— 上限起点 1,
+    满了先用一笔超发试探 (不占槽位), 成功就把上限 +1; 出队节拍 `gate.interval_ms`
+    (缺省 500ms)。拿不到槽位最多等 `gate.sem_wait_ms` (20s), 入队后最多等
+    `gate.queue_wait_ms` (10s), 换候选就重新给这两段 (没有整请求总预算)。闸门按
+    **当前候选**逐个过, 换候选前先归还上一个候选的槽位; 候选链试完仍没发出去, 就
+    合成 429 说明原因, 带 `Retry-After`。
+03. 请求转发: 密钥集中在代理 (客户端凭据一律替换), SSE 逐块原样透传不缓冲。
+04. 用量记账: 强写 `stream_options.include_usage`, 从流末 usage / 非流式响应体
+    提取 token 用量 (含缓存命中 token, 四种上游字段名都认); 缺 usage 按字符粗估 (F7)
+    并记 `missing_usage`。`-usage` 按 上游/模型 × 窗口 列出 token 分解。
+05. 限制反应 (设计 §5.5.2/§5.5.3): 每个上游可用 `errors` 规则 (状态码 + body 关键词)
+    把报错分成并发 / 额度 / 其他三类; 命中额度 -> 锁该候选 `gate.quota_lock_ms` (10min),
+    其他 -> 按 `gate.retry_backoff_ms` (10/20/30s) 退避、连续 4 次熔断锁
+    `gate.breaker_lock_ms` (5min)。锁内不真发, 排队的请求整队迁移到下一个候选; 锁落
+    `var/gate-state.json` (重启仍生效)。服务不记账也不提前拦截, 只写日志。
+06. 响应整形: 非流 / 流式 chunk 里的 `model` 字段改回请求的逻辑名,
+    对外隐藏真实上游 id。
+07. 运维面: `GET /v1/models` 返回逻辑名清单; 请求头 `X-Tollgate-Source`
+    记入日志 `source` 字段; `-summary` 汇总请求日志; `deploy/` + `test/healthcheck.sh`
+    常驻与自检。
+08. 集中 fallback: 候选按序尝试, 仅首字节前 (传输失败 / 上游 429 / 5xx) 自动切换
+    下一个; 全部失败保留最近一次错误 (状态码/头/体) 原样透传; 其余 4xx 不重试。
+09. 供应商锁: 锁内跳过该候选不再真发 (日志 `lock_skips`), 候选全在锁里时返 429
+    `upstream_locked` + `Retry-After`, 锁到期自动恢复。
+10. 日志按天轮转: 跨本地日期 (或隔天启动) 时把上一段日志归档为
+    `<base>-YYYY-MM-DD.jsonl` (同名不覆盖, 依次加 -1/-2); `-summary` 与 `-usage`
     都跨归档读, 归档不自动删除 (留存交给外部)。
-12. 探测与延迟观测 (D14, 默认关闭, **只观测不接入**): 真实请求被动记 `ttfb_ms`
+11. 探测与延迟观测 (D14, 默认关闭, **只观测不接入**): 真实请求被动记 `ttfb_ms`
     (流式另记 `tps`); 开启 `probe` 后按 `interval_sec` 只主动探测 fallback 顺序里的
     **下一个**候选 (`scope=next`, 单候选别名不探)。结果看 `GET /v1/probe` 或
-    `-probe <config>`, 状态落 `var/probe.json`。探测不改变候选顺序, 不触发冷却 /
-    熔断 / 预算标记。自适应路由已决策不做 (设计 D15), 所以探测结果只进报告, 不接线路由。
-13. 双接口转发: `POST /v1/chat/completions` 与 `POST /v1/responses` (O5) 共用同一条链路
+    `-probe <config>`, 状态落 `var/probe.json`。探测不改变候选顺序, 不触发失败计数与锁。
+    自适应路由已决策不做 (设计 D15), 所以探测结果只进报告, 不接线路由。
+12. 双接口转发: `POST /v1/chat/completions` 与 `POST /v1/responses` (O5) 共用同一条链路
     (白名单 / 闸门 / fallback / 记账)。`/responses` 没有 `stream_options`, 不做
     include_usage 注入; 用量按 `input/output_tokens` 口径归一, 流以 `response.completed`
     判正常收尾 (该接口不保证发 `[DONE]`), 事件里嵌在 `response` 下的 `model` 也改回逻辑名。
@@ -49,7 +50,7 @@
 go build ./...
 # 填好 config.local.json (从 config.example.json 复制) 后:
 ./llm-request-tollgate -config config.local.json
-# 起假上游 + 全量自测 (138 项断言):
+# 起假上游 + 全量自测 (17 组用例 131 项断言):
 ./test/run_selftest.sh all
 # 常驻 (systemd 用户服务, 崩了自动拉起):
 ./deploy/install_service.sh
@@ -61,7 +62,7 @@ go build ./...
 # 看探测/延迟报告 (只读; 不接线路由), 或在线取 GET /v1/probe:
 ./llm-request-tollgate -probe config.local.json
 
-# 按 上游/模型 × 窗口 (3h/12h/24h/全部) 看 token 分解, 用来标定预算系数:
+# 按 上游/模型 × 窗口 (3h/12h/24h/全部) 看 token 分解:
 ./llm-request-tollgate -usage var/
 ```
 
@@ -95,32 +96,29 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 结构见下:
 
 - `listen` 监听地址; `log_path` JSONL 日志路径 (当前日志; 跨天自动归档到同目录
-  `<base>-YYYY-MM-DD.jsonl`, 见「做什么」第 11 条)。
-- `timeouts`: 建连 / 等响应头 / 流空闲 / 排队上限 (`queue_wait_ms` 是整条请求共享的
-  排队总预算, 见 D16)。
+  `<base>-YYYY-MM-DD.jsonl`, 见「做什么」第 10 条)。
+- `timeouts`: 建连 / 等响应头 / 流空闲 (等待上限已经收进 `gate`)。
+- `gate` (v2, 所有上游共用): `interval_ms` 出队节拍 (缺省 500ms), `sem_wait_ms` 等信号量
+  上限 (20s), `queue_wait_ms` 排队上限 (10s), `concurrency_lock_ms` / `quota_lock_ms` /
+  `breaker_lock_ms` 两把锁的时长 (1h / 10min / 5min), `retry_backoff_ms` 通用兜底的退避
+  序列 ([10000,20000,30000])。并发上限不在配置里 (起点固定 1, 每次重启重新爬)。
 - `upstreams`: 每个上游一条记录 (id / base_url / auth_header / key 或 key_env / headers /
-  include_usage / limits / budget), 限速参数挂在记录上, 即「上游 + 凭据」分组。
-  生成器给每个上游都写 `budget.cooldown_ms` (429 冷却, 默认 5 分钟); `windows` / `units`
-  按平台额度人工补 (ustc 已填 key 记录里的 3h 30 / 12h 70 / 24h 100)。
+  include_usage / errors), 调度状态按 id 分组 (一个上游一把 key, 即「上游 + 凭据」分组)。
+  `errors` 是 v2 的错误分类规则 (形状见设计文档 §4.8, 缺省空表 = 全部走通用兜底):
+  `{ "concurrency": { "status": [429], "keywords": ["concurrency limit"] }, "quota": { "status": [402], "keywords": ["insufficient balance"] } }` —— 状态码命中, 或 body 里
+  出现关键词, 即算命中 (OR); 具体规则待按各供应商 API 规范填。
   `key_env` 只存环境变量名, 真 key 启动时从环境取 (密钥不落盘, 见「常驻与升级」)。
   `key_prefix` 是认证头里的 scheme: 缺省对 `Authorization` 用 `Bearer `, 其他头不带
   (ustc 与火山 ARK 实测都要 `Bearer `; 给 `""` 可强制裸 key)。
-  `budget`: `{ windows: {"3h":30,"12h":70,"24h":100}, unit:1, units:{}, cooldown_ms:300000,
-  refresh_sec:60 }` — `windows` 是滚动窗口限额 (用于标定与诊断), `unit`/`units` 是 token
-  折算平台额度的系数 (模型级 `units` 优先, 其次 `unit`, 再次撞墙标定值), `cooldown_ms`
-  是 429 后的冷却时长, `refresh_sec` 是定时扫日志的间隔。
 - `aliases`: 逻辑名 -> `[[上游 id, 真实模型 id], ...]`。
-- `probe` (可选, 默认关闭): `{ enabled, scope:"next"|"all", interval_sec:900, max_tokens:8,
-  timeout_ms:30000, window:5, targets:[别名...], target_ttfb_ms, target_tps, switch_margin }`。
+- `probe` (可选, 默认关闭): `{ enabled, scope:"next"|"all", interval_sec:900, max_tokens:8, timeout_ms:30000, window:5, targets:[别名...], target_ttfb_ms, target_tps, switch_margin }`。
   `scope=next` 只探第二个候选 (第一个候选由真实流量被动观测); `targets` 为空则探所有多候选
   别名。`target_ttfb_ms` / `target_tps` 是两条标准, `switch_margin` 是"明显优势"阈值,
   三个**只用于报告里给建议**, 不影响路由 —— 自适应路由已决策不做 (设计 D15)。
-  探测参数启动时固化, 改配置要重启 (同 limits)。
+  探测参数启动时固化, 改配置要重启。
 
-别名与上游支持 `SIGHUP` 热加载, 限速器状态按上游 id 保留不被重置 (排队中的请求与令牌
-水位不该被 hup 清掉)。**例外**: `limits` 与 `breaker_fail` / `breaker_cooldown_ms`
-改了 `hup` 不生效 —— 日志会打印新旧值告警, 需 `restart` 才生效。
-预算累计每次定时扫描从日志重建, 不设独立状态 (日志即账本)。
+别名、上游与 `gate` 都支持 `SIGHUP` 热加载; 调度状态 (队列里排着的请求、爬到的并发上限、
+退避与锁) 按上游 id 保留, 不被 hup 清掉。
 
 ### 从 fff 模型列表生成配置
 
@@ -139,8 +137,6 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
   候选都支持才保留), 以及最小的 `contextWindow` / `maxTokens`; 缺等级表时 agent 会拒发
   `reasoning_effort`, 报 `UNSUPPORTED_REASONING_EFFORT` (dsh 客户端校验)。
 - `key_env` 取 store 里 `apiKey` 的占位符名; `auth_header` 等设置从现有配置继承, 不会被覆盖。
-  provider 条目上的 `budget` (windows / units / cooldown_ms) 以 store 为准, store 没写的键才
-  回落现有配置 (缺失的 `budget.cooldown_ms` 补默认值, `--cooldown-ms` 可改)。
 - 写入 `config.local.json` (即 `~/fff/config/tollgate.json`); `--dry-run` 只打印,
   `--providers` 改上游与优先级。
 
@@ -157,29 +153,23 @@ provider 面板 + 模型列表 + 候选顺序实时预览; `+/-` 调值, `=` 输
 node scripts/set_priority.ts
 ```
 
-### 预算系数怎么定
+### 用量分析 (计划中)
 
-`budget` 的限额与 `unit` 取决于平台额度口径, 标定一次即可:
-
-1. `./llm-request-tollgate -usage var/` 看某模型在窗口内的 `total` (同时看 `miss`: 不为 0
-   说明有估的用量, 系数会偏)。
-2. 打开平台网页面板读同一窗口的"已用额度"。
-3. 系数 = 已用额度 / `total`, 填进该上游的 `budget.units` (键是真实模型 id)。
-
-参考: 平台公开发布每模型价格 (`GET /api/models/public`, 无需登录), 例
-`deepseek-flash` 输入 2.0 / 缓存命中 0.2 / 输出 2.0 (每百万 token), qwen 系 1.0/0.1/1.0,
-`glm-5.3-flash` 4.0/0.4/4.0。若平台额度就是这些价格单位, 系数即 价格/1e6。
+服务只写日志, 不做窗口累计、不折算额度、也没有状态文件 —— 预算与用量分析交给一个独立的
+分析程序 (设计文档 §5.3 O10, 语言不限, 只读日志, 不随服务启动), **尚未实现**。
+现在能用的只有代理自带的两个离线子命令: `-summary` (请求数 / 429 / 等待 / 缺 usage /
+token) 与 `-usage` (上游 + 模型 × 窗口的 token 分解)。
 
 ## 当前边界
 
 - 转发覆盖 `POST /v1/chat/completions` 与 `POST /v1/responses` (O5); `GET /v1/models`
   返回逻辑名清单 (O5)。其余路径一律 404。
-- 被闸门拒的 429 在日志里带 `gate` (`concurrency` = 并发槽位, `rate` = 令牌桶) 与
-  实际等待时长 `queue_ms` (各候选排队之和), 便于区分「并发不够」和「频率不够」。
+- 被闸门挡下的 429 在日志里带 `gate` (`locked` 候选在锁里 / `sem_timeout` 等不到并发
+  槽位 / `queue_timeout` 排队超时 / `canceled` 客户端断开) 与等待时长 (`sem_ms` 等信号量、
+  `queue_ms` 排队, 都是各候选之和), 便于区分「并发不够」「排队超时」和「被锁」。
 - 不做负载均衡 (D15): 候选按列表顺序取第一个可用的, 不按权重 / 轮询 / 延迟分流;
   闸门被拒时也不溢出到其它空闲候选。
-- 集中 fallback + 熔断只覆盖首字节前 (传输失败/429/5xx); 首字节之后不切后端。
-- 预算不提前拦截: 靠上游 429 触发冷却与系数标定; 未撞过墙时系数默认 1 (仅影响估算)。
+- 集中 fallback 与供应商锁只覆盖首字节前 (传输失败 / 429 / 5xx); 首字节之后不切后端。
 - 归档日志不自动清理, 也不压缩; 留存与清理交给外部 (logrotate 或手动)。
 - 真上游已接入 (设计文档 §5.4 那份清单已满足); 上线前还缺切流顺序与回滚、以及「没有进程
   绕开代理」的验证 (设计文档 §5.3 O4)。
@@ -189,12 +179,14 @@ node scripts/set_priority.ts
 - `main.go` 单文件代理 (含假上游自测所需的全部实现)。
 - `test/fakeupstream/` 假上游: 回放思考块 / 文本 / 工具调用 / usage 的 SSE,
   支持中途断流 (验证 F6)。
-- `test/run_selftest.sh` 自测: 16 组用例 138 项断言, 对本地假上游跑代理。
+- `test/run_selftest.sh` 自测: 17 组用例 131 项断言, 对本地假上游跑代理。
 - `test/healthcheck.sh` 自检: 二进制 / 配置 (-check) / 端口三项, 退出码 0 = 全通过。
 - `deploy/` 常驻: `tollgate.service` 模板 + `install_service.sh` (systemd 用户服务)。
 - `scripts/gen_tollgate_config.py` 由 fff 模型列表生成本项目配置 (读
   `~/fff/config/llm-models.json` + 黑名单, 按 `tollgate_group` 归并成别名; 见下)。
 - `scripts/set_priority.ts` 调优先级的 TUI (Node >= 22.6 跑 TS, 无依赖无参数): 候选顺序
   实时预览, 界面内即可保存 store / 重生成配置 / hup。
-- `test/tmp/` 与 `var/` 是运行产物 (自测二进制/假上游日志; 请求日志与 `budget-units.json`
+- `gate_test.go` / `proxy_test.go` 单元与端到端测试 (`go test .`): 调度核心 (排队节拍、
+  试探放宽、两把锁、错误归类、退避熔断、锁落盘) 与经代理转发的完整链路。
+- `test/tmp/` 与 `var/` 是运行产物 (自测二进制/假上游日志; 请求日志与 `gate-state.json`
   等状态), 都在 `.gitignore` 内。

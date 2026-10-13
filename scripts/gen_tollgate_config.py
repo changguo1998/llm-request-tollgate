@@ -18,8 +18,8 @@ provider entry's ``tollgate_priority`` descending, then ``--providers`` order. B
 
 Rewritten: the ``upstreams`` list (ids + base_url) and ``aliases``.
 Preserved from the existing config: service-level fields (listen, log_path,
-timeouts) and per-upstream settings (auth_header, key_env, headers,
-include_usage, limits, budget, breaker_*). New upstreams get
+timeouts, gate) and per-upstream settings (auth_header, key_env, headers,
+include_usage, errors). New upstreams get
 Besides the config, it upserts a ``tollgate`` provider into the model-list store
 (``--no-store`` skips it): one model per alias, baseUrl derived from the config's
 ``listen``, so agents synced from the store can point at this proxy instead of
@@ -28,15 +28,13 @@ upstream (alias generation and ``--providers`` both refuse it), so the list can
 never be generated from itself. Hand-curated fields (provider keys, per-model contextWindow /
 maxTokens / thinkingLevelMap) survive the update.
 
-Every upstream carries ``budget.cooldown_ms`` (429 cooldown, default 5 min); a
-``budget`` object on the store's provider entry (windows / units / cooldown_ms,
-next to api/baseUrl) overrides it, so quota numbers live with the provider
-metadata instead of only in the generated config.
-``key_env`` taken from the store's ``apiKey`` placeholder (``$USTC_API_KEY`` ->
-``USTC_API_KEY``), else ``TOLLGATE_<ID>_KEY``, and the limits of an existing
-upstream, falling
-back to the config.example.json values -- tune rates per provider by hand
-(design §5.4), the store does not carry them.
+Gate parameters (``gate``) and error-classification rules (``errors``) are not
+generated: the global ``gate`` block is preserved from the existing config and
+falls back to the built-in defaults (design §5.5.4), and ``errors`` is empty
+until each vendor's API spec has been checked (design §4.8).
+``key_env`` comes from the store's ``apiKey`` placeholder (``$USTC_API_KEY`` ->
+``USTC_API_KEY``), else ``TOLLGATE_<ID>_KEY``; the other per-upstream settings
+are carried over from the existing config.
 
 Usage:
     scripts/gen_tollgate_config.py --dry-run
@@ -69,17 +67,12 @@ PRESERVED_UPSTREAM_KEYS = (
     "key_env",
     "headers",
     "include_usage",
-    "limits",
-    "budget",
-    "breaker_fail",
-    "breaker_cooldown_ms",
+    "errors",
 )
 
-# Fallback limits for a provider the config does not know yet (config.example.json).
-DEFAULT_LIMITS = {"rate_per_sec": 0.34, "burst": 1, "concurrency": 1}
-
-# 429 冷却对每个上游都开 (F11); windows/units 仍由人工按平台额度补。
-DEFAULT_COOLDOWN_MS = 300000
+# v1 的 limits / budget / breaker_* 已随 v2 调度删掉 (设计 §5.5.4): 生成器不再写这些键,
+# 旧配置里残留的也一律不带过去。
+DROPPED_UPSTREAM_KEYS = ("limits", "budget", "breaker_fail", "breaker_cooldown_ms")
 
 
 def load_json(path: Path):
@@ -138,10 +131,20 @@ def build_aliases(store: dict, providers: list[str], dropped: set[str]):
     return aliases, kept, removed, warnings
 
 
-def build_upstreams(store: dict, providers: list[str], existing: dict, cooldown_ms: int):
+def clean_timeouts(existing: dict) -> dict:
+    """Preserve the existing timeouts, dropping keys v2 no longer reads."""
+    timeouts = dict(existing.get("timeouts") or {
+        "connect_ms": 10000,
+        "response_header_ms": 120000,
+        "stream_idle_ms": 240000,
+    })
+    timeouts.pop("queue_wait_ms", None)  # v2 的排队上限在 gate.queue_wait_ms (设计 §5.5.4)
+    return timeouts
+
+
+def build_upstreams(store: dict, providers: list[str], existing: dict):
     """Merge store connection data into existing upstream entries, keeping settings."""
     by_id = {u["id"]: u for u in existing.get("upstreams", [])}
-    sample = next((u for u in existing.get("upstreams", []) if u.get("limits")), None)
     upstreams = []
     for provider in providers:
         entry = {"id": provider}
@@ -158,14 +161,8 @@ def build_upstreams(store: dict, providers: list[str], existing: dict, cooldown_
             entry.setdefault("key_env", f"TOLLGATE_{provider.upper()}_KEY")
         entry.setdefault("headers", {})
         entry.setdefault("include_usage", True)
-        if "limits" not in entry:
-            entry["limits"] = dict(sample["limits"]) if sample else dict(DEFAULT_LIMITS)
-        # 预算/限额口径以 store 里的 provider 条目为准 (与 api/baseUrl 同级),
-        # store 没写的键才回落到现有配置, 最后补冷却默认值。
-        budget = dict(entry.get("budget") or {})
-        budget.update(store[provider].get("budget") or {})
-        budget.setdefault("cooldown_ms", cooldown_ms)
-        entry["budget"] = budget
+        for key in DROPPED_UPSTREAM_KEYS:
+            entry.pop(key, None)
         entry["base_url"] = store[provider]["baseUrl"]
         upstreams.append(entry)
     return upstreams
@@ -289,18 +286,13 @@ def build_config(args) -> tuple[dict, list[str]]:
     config = {
         "listen": existing.get("listen", "127.0.0.1:8787"),
         "log_path": existing.get("log_path", "var/requests.jsonl"),
-        "timeouts": existing.get(
-            "timeouts",
-            {
-                "connect_ms": 10000,
-                "response_header_ms": 120000,
-                "stream_idle_ms": 240000,
-                "queue_wait_ms": 60000,
-            },
-        ),
-        "upstreams": build_upstreams(store, providers, existing, args.cooldown_ms),
+        "timeouts": clean_timeouts(existing),
+        "upstreams": build_upstreams(store, providers, existing),
         "aliases": {name: aliases[name] for name in sorted(aliases)},
     }
+
+    if existing.get("gate"):
+        config["gate"] = existing["gate"]  # 全局门控块: 有就原样保留, 没有就用内建缺省
 
     lines = []
     for provider in providers:
@@ -331,10 +323,6 @@ def main() -> int:
     parser.add_argument("--fff-dir", default=str(DEFAULT_FFF_CONFIG), help="fff config directory")
     parser.add_argument("--out", default=str(DEFAULT_OUT), help="config to write")
     parser.add_argument("--providers", default=DEFAULT_PROVIDERS, help="provider order = priority")
-    parser.add_argument(
-        "--cooldown-ms", type=int, default=DEFAULT_COOLDOWN_MS,
-        help=f"429 cooldown per upstream in ms (default {DEFAULT_COOLDOWN_MS})",
-    )
     parser.add_argument(
         "--proxy-url", default=DEFAULT_PROXY_URL,
         help="base URL agents use (default: derived from the config's listen)",
