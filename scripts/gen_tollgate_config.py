@@ -178,7 +178,10 @@ def build_proxy_provider(config: dict, store: dict, providers: list[str], proxy_
     The proxy hides upstream ids, so agents only ever see alias names. reasoning is
     inherited from whichever candidate declares it; contextWindow / maxTokens take
     the smallest value across candidates, since a request may be served by any of
-    them (kimi drops models without a usable contextWindow).
+    them (kimi drops models without a usable contextWindow). thinkingLevelMap is
+    the intersection of the candidates' maps: a level survives only when every
+    candidate declaring a map supports it, so agents never ask an upstream for an
+    effort it rejects (UNSUPPORTED_REASONING_EFFORT).
     """
     sources = {}
     for provider in providers:
@@ -187,17 +190,24 @@ def build_proxy_provider(config: dict, store: dict, providers: list[str], proxy_
     models = []
     for name in sorted(config["aliases"]):
         entry = {"id": name}
-        windows, max_tokens, reasons = [], [], False
+        windows, max_tokens, reasons, level_maps = [], [], False, []
         for _, model_id in config["aliases"][name]:
             source = sources.get(model_id, {})
             if source.get("reasoning"):
                 reasons = True
+            if isinstance(source.get("thinkingLevelMap"), dict):
+                level_maps.append(source["thinkingLevelMap"])
             if isinstance(source.get("contextWindow"), int):
                 windows.append(source["contextWindow"])
             if isinstance(source.get("maxTokens"), int):
                 max_tokens.append(source["maxTokens"])
         if reasons:
             entry["reasoning"] = True
+        if level_maps:
+            entry["thinkingLevelMap"] = {
+                level: (level_maps[0][level] if all(m.get(level) for m in level_maps) else None)
+                for level in level_maps[0]
+            }
         # 取候选里的最小值: 请求可能落到任一候选, 只有保守值才不会被上游拒绝。
         if windows:
             entry["contextWindow"] = min(windows)
