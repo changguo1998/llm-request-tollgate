@@ -7,6 +7,18 @@
     "stream_idle_ms": 240000,
     "queue_wait_ms": 60000
   },
+  "probe": {
+    "enabled": false,
+    "scope": "next",
+    "interval_sec": 900,
+    "max_tokens": 8,
+    "timeout_ms": 30000,
+    "window": 5,
+    "targets": [],
+    "target_ttfb_ms": 0,
+    "target_tps": 0,
+    "switch_margin": 0.2
+  },
   "upstreams": [
     {
       "id": "ustc",
@@ -15,8 +27,23 @@
       "key_env": "USTC_API_KEY",
       "headers": {},
       "include_usage": true,
-      "budget": { "windows": { "3h": 30, "12h": 70, "24h": 100 }, "unit": 1, "units": { "deepseek-v4.1-flash": 0.000002 }, "refresh_sec": 60 },
-      "limits": { "rate_per_sec": 0.34, "burst": 1, "concurrency": 1 }
+      "budget": {
+        "windows": {
+          "3h": 30,
+          "12h": 70,
+          "24h": 100
+        },
+        "unit": 1,
+        "units": {
+          "deepseek-v4.1-flash": 2e-06
+        },
+        "refresh_sec": 60
+      },
+      "limits": {
+        "rate_per_sec": 0.34,
+        "burst": 1,
+        "concurrency": 1
+      }
     },
     {
       "id": "group",
@@ -25,13 +52,23 @@
       "key_env": "GROUP_API_KEY",
       "headers": {},
       "include_usage": true,
-      "limits": { "rate_per_sec": 0.34, "burst": 1, "concurrency": 1 }
+      "limits": {
+        "rate_per_sec": 0.34,
+        "burst": 1,
+        "concurrency": 1
+      }
     }
   ],
   "aliases": {
     "deepseek-v4.1-flash": [
-      ["ustc", "deepseek-v4.1-flash"],
-      ["group", "deepseek-v4.1-flash"]
+      [
+        "ustc",
+        "deepseek-v4.1-flash"
+      ],
+      [
+        "group",
+        "deepseek-v4.1-flash"
+      ]
     ]
   }
 }

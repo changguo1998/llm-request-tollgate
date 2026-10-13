@@ -18,6 +18,9 @@
 //     -summary 汇总命令 (O2); -check 配置自检 + deploy/ 常驻与自检脚本 (O1)。
 //  8. 集中 fallback: 候选按序尝试, 首字节前 429/5xx/传输失败换下一个, 全败透传最后错误。
 //  9. 熔断: 连续失败达阈值短暂跳过该上游 (冷却期内不真发), 冷却后自动恢复。
+//  10. 探测与延迟观测 (D14, 只观测不接入): 真实请求被动记 ttfb_ms/tps; 开启 probe 后
+//     只主动探测 fallback 顺序里的下一个候选 (scope=next), 结果进 GET /v1/probe 与
+//     var/probe.json; 不改候选顺序、不动冷却/熔断/预算, 已建立的流不迁移。
 //
 // 配置: config.local.json (gitignored, 软链到 ~/fff/config), SIGHUP 热加载别名与上游 (F1);
 // key: 支持 key_env 字段只存环境变量名, 真 key 启动/热加载时从环境变量取, 不落盘。
@@ -92,6 +95,7 @@ type Config struct {
 	Timeouts  Timeouts               `json:"timeouts"`
 	Upstreams []UpstreamCfg          `json:"upstreams"`
 	Aliases   map[string][][2]string `json:"aliases"`
+	Probe     *ProbeCfg              `json:"probe,omitempty"`
 }
 
 // ---------- 限速: 令牌桶 + 信号量, 按上游分组 ----------
@@ -342,24 +346,26 @@ func rewriteModel(data []byte, logical string) []byte {
 // ---------- 日志 (JSONL) ----------
 
 type logRec struct {
-	Ts        string `json:"ts"`
-	Logical   string `json:"logical"`
-	Upstream  string `json:"upstream"`
-	Model     string `json:"model"`
-	Path      string `json:"path"`
-	Stream    bool   `json:"stream"`
-	Status    int    `json:"status"`
-	Usage     *Usage `json:"usage,omitempty"`
-	Missing   bool   `json:"missing_usage"`
-	Queued    bool   `json:"queued"`
-	QueueMs   int64  `json:"queue_ms"`
-	Client    string `json:"client"`
-	UA        string `json:"ua,omitempty"`
-	Source    string `json:"source,omitempty"`
-	Fallbacks int    `json:"fallbacks,omitempty"`
-	Err       string `json:"err,omitempty"`
-	BudgetHit bool   `json:"budget_hit,omitempty"`
-	CoolSkips int    `json:"cooldown_skips,omitempty"`
+	Ts        string  `json:"ts"`
+	Logical   string  `json:"logical"`
+	Upstream  string  `json:"upstream"`
+	Model     string  `json:"model"`
+	Path      string  `json:"path"`
+	Stream    bool    `json:"stream"`
+	Status    int     `json:"status"`
+	Usage     *Usage  `json:"usage,omitempty"`
+	Missing   bool    `json:"missing_usage"`
+	Queued    bool    `json:"queued"`
+	QueueMs   int64   `json:"queue_ms"`
+	Client    string  `json:"client"`
+	UA        string  `json:"ua,omitempty"`
+	Source    string  `json:"source,omitempty"`
+	Fallbacks int     `json:"fallbacks,omitempty"`
+	Err       string  `json:"err,omitempty"`
+	BudgetHit bool    `json:"budget_hit,omitempty"`
+	CoolSkips int     `json:"cooldown_skips,omitempty"`
+	TtfbMs    int64   `json:"ttfb_ms,omitempty"` // 首字节时延 (被动采样)
+	Tps       float64 `json:"tps,omitempty"`     // 解码吞吐 tokens/s (流式才有)
 }
 
 // ---------- 预算闸门 (D12): 定时从日志重建窗口累计 ----------
@@ -375,6 +381,64 @@ type BudgetCfg struct {
 	Units      map[string]float64 `json:"units,omitempty"`
 	CooldownMs int                `json:"cooldown_ms,omitempty"`
 	RefreshSec int                `json:"refresh_sec,omitempty"`
+}
+
+// ---------- 主动探测 + 被动时延采样 (D14: 只观测, 不接入路由) ----------
+
+// ProbeCfg 探测配置。默认关闭; 开启后只做两件事: ①对 fallback 顺序里的下一个候选
+// 发小请求 (scope=next), ②把真实请求的首字节时延/吞吐记成被动样本。
+// 结果只进报告 (GET /v1/probe) 与状态文件 (var/probe.json) —— 不改候选顺序,
+// 不动冷却/熔断/预算, 也不打断已建立的流 (切换只可能发生在下次请求开始时)。
+type ProbeCfg struct {
+	Enabled      bool     `json:"enabled,omitempty"`
+	Scope        string   `json:"scope,omitempty"`          // next (默认) | all
+	IntervalSec  int      `json:"interval_sec,omitempty"`   // 默认 900
+	MaxTokens    int      `json:"max_tokens,omitempty"`     // 每次探测的生成上限, 默认 8
+	TimeoutMs    int      `json:"timeout_ms,omitempty"`     // 单次探测超时, 默认 30000
+	Window       int      `json:"window,omitempty"`         // 每候选保留样本数, 默认 5
+	Targets      []string `json:"targets,omitempty"`        // 只探这些别名; 空 = 全部多候选别名
+	TargetTtfbMs int      `json:"target_ttfb_ms,omitempty"` // 标准: 首字节时延上限 (仅报告判定)
+	TargetTps    float64  `json:"target_tps,omitempty"`     // 标准: 吞吐下限 (仅报告判定)
+	SwitchMargin float64  `json:"switch_margin,omitempty"`  // 明显优势阈值 (仅报告判定)
+}
+
+// probeSample 一次采样: 主动探测 (Passive=false) 或真实请求 (Passive=true)。
+type probeSample struct {
+	Ts      string  `json:"ts"`
+	TtfbMs  int64   `json:"ttfb_ms"`
+	Tps     float64 `json:"tps,omitempty"`
+	Tokens  int     `json:"tokens,omitempty"`
+	OK      bool    `json:"ok"`
+	Err     string  `json:"err,omitempty"`
+	Passive bool    `json:"passive,omitempty"`
+}
+
+// probeStat 某 (上游, 模型) 的滚动统计: EWMA (α=0.3) + 最近 Window 个样本。
+type probeStat struct {
+	Upstream   string        `json:"upstream"`
+	Model      string        `json:"model"`
+	Samples    []probeSample `json:"samples"`
+	EwmaTtfbMs float64       `json:"ewma_ttfb_ms"`
+	EwmaTps    float64       `json:"ewma_tps"`
+	OK         int           `json:"ok"`
+	Fail       int           `json:"fail"`
+	Active     int           `json:"active"`
+	Passive    int           `json:"passive"`
+	UpdatedAt  string        `json:"updated_at"`
+}
+
+// probeState 状态文件 (与 budget-units.json 同目录, 重启不丢)。
+type probeState struct {
+	Stats     map[string]probeStat `json:"stats"`
+	UpdatedAt string               `json:"updated_at"`
+}
+
+// relayOut relayStream 的产出: 用量 + 时延 (首字节与解码段)。
+type relayOut struct {
+	Usage    *Usage
+	Missing  bool
+	TtfbMs   int64
+	DecodeMs int64
 }
 
 // budgetState 持有上次扫描重建的窗口累计: upstreamID -> 窗口key -> 已用(×unit)。
@@ -398,6 +462,10 @@ type App struct {
 	logW   *os.File
 	logger *log.Logger
 	logDay string // 当前日志文件所属的本地日期 (按天轮转用)
+
+	probeMu   sync.Mutex
+	probe     map[string]*probeStat // "上游|模型" -> 滚动统计 (主动探测 + 被动观测)
+	probePath string                // 指标状态文件 (var/probe.json)
 }
 
 // parseBudgetDur 解析 "3h"/"12h"/"90m"/"7d" 这类窗口时长。
@@ -709,6 +777,494 @@ type aliasTarget struct {
 	Model    string
 }
 
+// ---------- 探测实现 (D14) ----------
+
+// probeDefaults 填默认值: 只探 fallback 顺序的下一个候选, 间隔 900s,
+// 每次生成上限 8 token, 单次超时 30s, 样本窗 5。
+func probeDefaults(c *ProbeCfg) *ProbeCfg {
+	out := *c
+	if out.Scope == "" {
+		out.Scope = "next"
+	}
+	if out.IntervalSec <= 0 {
+		out.IntervalSec = 900
+	}
+	if out.MaxTokens <= 0 {
+		out.MaxTokens = 8
+	}
+	if out.TimeoutMs <= 0 {
+		out.TimeoutMs = 30000
+	}
+	if out.Window <= 0 {
+		out.Window = 5
+	}
+	return &out
+}
+
+func probeKey(upID, model string) string { return upID + "|" + model }
+
+// msCeil 毫秒向上取整: 亚毫秒的响应记成 1ms, 不记 0 (0 会被当成"没测到")。
+func msCeil(d time.Duration) int64 {
+	if d <= 0 {
+		return 0
+	}
+	return int64((d + time.Millisecond - 1) / time.Millisecond)
+}
+
+// probePathFor 指标状态文件与 budget-units.json 同目录 (var/)。
+func probePathFor(c *Config) string {
+	if c == nil || c.LogPath == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(c.LogPath), "probe.json")
+}
+
+// probeCfg 取当前 (已填默认值的) 探测配置; 未配置或未开启时返回 nil。
+func (a *App) probeCfg() *ProbeCfg {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.cfg == nil || a.cfg.Probe == nil {
+		return nil
+	}
+	return probeDefaults(a.cfg.Probe)
+}
+
+// recordProbeSample 追加样本并更新 EWMA (α=0.3); 只失败也记, 便于看可用率。
+func (a *App) recordProbeSample(upID, model string, s probeSample, window int) {
+	if a.probe == nil {
+		return
+	}
+	if window <= 0 {
+		window = 5
+	}
+	k := probeKey(upID, model)
+	a.probeMu.Lock()
+	defer a.probeMu.Unlock()
+	st := a.probe[k]
+	if st == nil {
+		st = &probeStat{Upstream: upID, Model: model}
+		a.probe[k] = st
+	}
+	if s.Passive {
+		st.Passive++
+	} else {
+		st.Active++
+	}
+	if s.OK {
+		st.OK++
+		if st.EwmaTtfbMs <= 0 {
+			st.EwmaTtfbMs = float64(s.TtfbMs)
+		} else {
+			st.EwmaTtfbMs = 0.7*st.EwmaTtfbMs + 0.3*float64(s.TtfbMs)
+		}
+		if s.Tps > 0 {
+			if st.EwmaTps <= 0 {
+				st.EwmaTps = s.Tps
+			} else {
+				st.EwmaTps = 0.7*st.EwmaTps + 0.3*s.Tps
+			}
+		}
+	} else {
+		st.Fail++
+	}
+	st.UpdatedAt = s.Ts
+	st.Samples = append(st.Samples, s)
+	if len(st.Samples) > window {
+		st.Samples = st.Samples[len(st.Samples)-window:]
+	}
+}
+
+func (a *App) loadProbeState() {
+	if a.probePath == "" {
+		return
+	}
+	b, err := os.ReadFile(a.probePath)
+	if err != nil {
+		return
+	}
+	var st probeState
+	if json.Unmarshal(b, &st) != nil || st.Stats == nil {
+		return
+	}
+	a.probeMu.Lock()
+	defer a.probeMu.Unlock()
+	for k := range st.Stats {
+		s := st.Stats[k]
+		a.probe[k] = &s
+	}
+	log.Printf("probe: loaded %d candidate stats from %s", len(st.Stats), a.probePath)
+}
+
+// saveProbeState 原子写 (临时文件 + rename), 与预算状态同一套路。
+func (a *App) saveProbeState() {
+	path := a.probePath
+	if path == "" {
+		return
+	}
+	a.probeMu.Lock()
+	st := probeState{Stats: map[string]probeStat{}, UpdatedAt: time.Now().Format(time.RFC3339Nano)}
+	for k, v := range a.probe {
+		st.Stats[k] = *v
+	}
+	a.probeMu.Unlock()
+
+	b, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+		log.Printf("probe state write failed: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		log.Printf("probe state rename failed: %v", err)
+	}
+}
+
+// startProbeLoop 起探测循环; 未开启时什么都不做 (默认关闭)。
+// 探测参数启动时固化, 改配置要重启 (与 limits / timeouts 一致)。
+func (a *App) startProbeLoop() {
+	c := a.probeCfg()
+	if c == nil || !c.Enabled {
+		return
+	}
+	log.Printf("probe: enabled scope=%s interval=%ds max_tokens=%d targets=%d window=%d",
+		c.Scope, c.IntervalSec, c.MaxTokens, len(c.Targets), c.Window)
+	go func() {
+		a.probeOnce(c)
+		t := time.NewTicker(time.Duration(c.IntervalSec) * time.Second)
+		defer t.Stop()
+		for range t.C {
+			a.probeOnce(c)
+		}
+	}()
+}
+
+// probeOnce 跑一轮: 对每个目标候选发一次小请求并落状态。
+func (a *App) probeOnce(c *ProbeCfg) {
+	targets := a.probeTargets(c)
+	for _, t := range targets {
+		a.probeCandidate(t.alias, t.up, t.model, c)
+	}
+	if len(targets) > 0 {
+		a.saveProbeState()
+	}
+}
+
+type probeTarget struct {
+	alias string
+	up    *UpstreamCfg
+	model string
+}
+
+// probeTargets 列出要探测的候选: scope=next 时只取 fallback 顺序里的第二个
+// (第一个候选由真实流量被动采样), 单候选别名不探。
+func (a *App) probeTargets(c *ProbeCfg) []probeTarget {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	filter := map[string]bool{}
+	for _, t := range c.Targets {
+		filter[t] = true
+	}
+	names := make([]string, 0, len(a.aliases))
+	for name := range a.aliases {
+		if len(filter) > 0 && !filter[name] {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out []probeTarget
+	for _, name := range names {
+		cands := a.aliases[name]
+		pick := cands
+		if c.Scope != "all" {
+			if len(cands) < 2 {
+				continue
+			}
+			pick = cands[1:2] // 只探下一个候选
+		}
+		for _, cand := range pick {
+			if u, ok := a.upstreams[cand.Upstream]; ok {
+				out = append(out, probeTarget{alias: name, up: u, model: cand.Model})
+			}
+		}
+	}
+	return out
+}
+
+// probeCandidate 发一次探测: 走该上游的限速闸 (不与用户流量抢队), 流式读首字节
+// 与流末 usage, 得到 ttfb_ms 与 tps; 全程不碰冷却/熔断/预算标记。
+func (a *App) probeCandidate(alias string, up *UpstreamCfg, model string, c *ProbeCfg) {
+	sample := probeSample{Ts: time.Now().Format(time.RFC3339Nano)}
+	payload := map[string]any{
+		"model":          model,
+		"messages":       []map[string]string{{"role": "user", "content": "ping"}},
+		"max_tokens":     c.MaxTokens,
+		"stream":         true,
+		"stream_options": map[string]any{"include_usage": true},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	lim := a.limiters[up.ID]
+	if lim != nil {
+		// 探测自己排队, 最多等 5s; 排不上就跳过这一轮, 绝不占用用户请求的排队预算。
+		gateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		okSem := lim.acquireSem(gateCtx)
+		okTok := okSem && lim.takeToken(gateCtx)
+		cancel()
+		if !okTok {
+			if okSem {
+				lim.releaseSem()
+			}
+			sample.Err = "limiter busy"
+			a.recordProbeSample(up.ID, model, sample, c.Window)
+			return
+		}
+		defer lim.releaseSem()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.TimeoutMs)*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, up.BaseURL+upstreamPath, bytes.NewReader(body))
+	if err != nil {
+		sample.Err = err.Error()
+		a.recordProbeSample(up.ID, model, sample, c.Window)
+		return
+	}
+	req.ContentLength = int64(len(body))
+	prepareOutboundHeaders(req.Header, http.Header{}, up)
+	resp, err := a.transport.RoundTrip(req)
+	if err != nil {
+		sample.Err = err.Error()
+		a.recordProbeSample(up.ID, model, sample, c.Window)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		sample.Err = fmt.Sprintf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		a.recordProbeSample(up.ID, model, sample, c.Window)
+		return
+	}
+
+	// 流式读: 首字节时刻 = ttfb, 流末时刻 - 首字节 = 解码段。
+	var firstAt, lastAt time.Time
+	var usage *Usage
+	acc := make([]byte, 0, 4096)
+	buf := make([]byte, 4096)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			now := time.Now()
+			if firstAt.IsZero() {
+				firstAt = now
+			}
+			lastAt = now
+			if len(acc) < 64*1024 { // 探测响应很小, 截断只为兜底
+				acc = append(acc, buf[:n]...)
+			}
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	if firstAt.IsZero() {
+		sample.Err = "no response body"
+		a.recordProbeSample(up.ID, model, sample, c.Window)
+		return
+	}
+	if u := extractUsage(acc); u != nil {
+		usage = u
+	}
+	sample.OK = true
+	sample.TtfbMs = msCeil(firstAt.Sub(start))
+	if usage != nil {
+		sample.Tokens = usage.Completion
+		if d := lastAt.Sub(firstAt); d > 0 && usage.Completion > 0 {
+			sample.Tps = float64(usage.Completion) / d.Seconds()
+		}
+	}
+	a.recordProbeSample(up.ID, model, sample, c.Window)
+	// 探测流量如实写请求日志 (source=probe): 它真的消耗配额, 预算窗口照实计入。
+	a.logReq(logRec{
+		Ts: time.Now().Format(time.RFC3339Nano), Logical: alias, Upstream: up.ID, Model: model,
+		Path: "/v1/probe", Stream: true, Status: http.StatusOK, Usage: usage,
+		Missing: usage == nil, Source: "probe", TtfbMs: sample.TtfbMs, Tps: sample.Tps,
+	})
+}
+
+// probeRow 报告里的一行: 某别名的某个候选及其指标与建议。
+type probeRow struct {
+	Alias     string  `json:"alias"`
+	Role      string  `json:"role"` // primary | next | candidate
+	Upstream  string  `json:"upstream"`
+	Model     string  `json:"model"`
+	TtfbMs    float64 `json:"ttfb_ms"`
+	Tps       float64 `json:"tps"`
+	Samples   int     `json:"samples"`
+	OK        int     `json:"ok"`
+	Fail      int     `json:"fail"`
+	Active    int     `json:"active"`
+	Passive   int     `json:"passive"`
+	Meets     bool    `json:"meets_targets"`
+	Advantage bool    `json:"advantage"`
+	UpdatedAt string  `json:"updated_at,omitempty"`
+}
+
+// probeReport 生成只读报告: 每别名按 fallback 顺序列出候选指标, 并给出
+// "是否达到标准" 与 "是否相对主候选有明显优势" 的建议值 —— 仅供决策, 不切换。
+func (a *App) probeReport() map[string]any {
+	c := a.probeCfg()
+	if c == nil {
+		c = probeDefaults(&ProbeCfg{})
+	}
+	a.mu.RLock()
+	names := make([]string, 0, len(a.aliases))
+	for name := range a.aliases {
+		names = append(names, name)
+	}
+	aliases := make(map[string][]aliasTarget, len(a.aliases))
+	for k, v := range a.aliases {
+		aliases[k] = v
+	}
+	ups := make(map[string]*UpstreamCfg, len(a.upstreams))
+	for k, v := range a.upstreams {
+		ups[k] = v
+	}
+	a.mu.RUnlock()
+	sort.Strings(names)
+
+	a.probeMu.Lock()
+	stats := make(map[string]probeStat, len(a.probe))
+	for k, v := range a.probe {
+		stats[k] = *v
+	}
+	a.probeMu.Unlock()
+
+	meets := func(st probeStat) bool {
+		if st.OK == 0 {
+			return false
+		}
+		if c.TargetTtfbMs > 0 && st.EwmaTtfbMs > float64(c.TargetTtfbMs) {
+			return false
+		}
+		if c.TargetTps > 0 && st.EwmaTps < c.TargetTps {
+			return false
+		}
+		return c.TargetTtfbMs > 0 || c.TargetTps > 0
+	}
+	out := map[string]any{
+		"generated_at": time.Now().Format(time.RFC3339Nano),
+		"standards": map[string]any{
+			"target_ttfb_ms": c.TargetTtfbMs,
+			"target_tps":     c.TargetTps,
+			"switch_margin":  c.SwitchMargin,
+		},
+		"probe": map[string]any{
+			"enabled": c.Enabled, "scope": c.Scope, "interval_sec": c.IntervalSec,
+		},
+	}
+	rows := map[string][]probeRow{}
+	for _, name := range names {
+		cands := aliases[name]
+		list := make([]probeRow, 0, len(cands))
+		for i, cand := range cands {
+			role := "candidate"
+			switch {
+			case i == 0:
+				role = "primary"
+			case i == 1:
+				role = "next"
+			}
+			row := probeRow{Alias: name, Role: role, Upstream: cand.Upstream, Model: cand.Model}
+			if st, ok := stats[probeKey(cand.Upstream, cand.Model)]; ok {
+				row.TtfbMs, row.Tps = st.EwmaTtfbMs, st.EwmaTps
+				row.Samples, row.OK, row.Fail = len(st.Samples), st.OK, st.Fail
+				row.Active, row.Passive, row.UpdatedAt = st.Active, st.Passive, st.UpdatedAt
+				row.Meets = meets(st)
+			}
+			// 建议: 下一个候选达标、且相对主候选有 margin 以上的优势 (两个标准任一即可)。
+			if row.Role == "next" && row.Meets && len(list) > 0 {
+				p := list[0]
+				if p.TtfbMs > 0 && row.TtfbMs > 0 {
+					if float64(row.TtfbMs) <= float64(p.TtfbMs)*(1-c.SwitchMargin) {
+						row.Advantage = true
+					}
+				}
+				if !row.Advantage && p.Tps > 0 && row.Tps > 0 {
+					if row.Tps >= p.Tps*(1+c.SwitchMargin) {
+						row.Advantage = true
+					}
+				}
+			}
+			list = append(list, row)
+		}
+		rows[name] = list
+	}
+	out["aliases"] = rows
+	return out
+}
+
+// serveProbe GET /v1/probe: 只读报告 (标准判定仅建议; 不改变任何路由行为)。
+func (a *App) serveProbe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(a.probeReport())
+}
+
+// runProbeReport -probe: 从配置文件与状态文件离线打印同一个报告。
+func runProbeReport(cfgPath string) {
+	cfg, err := loadConfigOpt(cfgPath, true)
+	if err != nil {
+		log.Fatalf("config invalid: %v", err)
+	}
+	a := &App{
+		upstreams: map[string]*UpstreamCfg{},
+		aliases:   map[string][]aliasTarget{},
+		limiters:  map[string]*Limiter{},
+		breakers:  map[string]*breaker{},
+		probe:     map[string]*probeStat{},
+	}
+	a.applyConfig(cfg)
+	a.probePath = probePathFor(cfg)
+	a.loadProbeState()
+	rep := a.probeReport()
+	std := rep["standards"].(map[string]any)
+	fmt.Printf("标准: ttfb<=%v ms, tps>=%v, margin=%v\n", std["target_ttfb_ms"], std["target_tps"], std["switch_margin"])
+	rows := rep["aliases"].(map[string][]probeRow)
+	names := make([]string, 0, len(rows))
+	for k := range rows {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		list := rows[name]
+		if len(list) < 2 {
+			continue
+		}
+		fmt.Printf("%s\n", name)
+		for _, row := range list {
+			flag := " "
+			if row.Advantage {
+				flag = "*" // * = 建议切换 (仅建议)
+			}
+			fmt.Printf("  %s %-8s %-6s/%-28s ttfb=%6.0fms tps=%6.1f 样本=%d(主%v/探%v) 失败=%d 达标=%v\n",
+				flag, row.Role, row.Upstream, row.Model, row.TtfbMs, row.Tps,
+				row.Samples, row.Passive, row.Active, row.Fail, row.Meets)
+		}
+	}
+}
+
 func newApp(c *Config) (*App, error) {
 	a := &App{
 		upstreams:  map[string]*UpstreamCfg{},
@@ -718,6 +1274,7 @@ func newApp(c *Config) (*App, error) {
 		budgetRaw:  map[string]map[string]float64{},
 		budgetCoef: map[string]float64{},
 		coolUntil:  map[string]time.Time{},
+		probe:      map[string]*probeStat{},
 	}
 	a.applyConfig(c)
 	if err := a.openLog(); err != nil {
@@ -729,6 +1286,10 @@ func newApp(c *Config) (*App, error) {
 	}
 	a.loadBudgetState()
 	a.startBudgetLoop()
+	// 探测状态与预算状态同目录; 未配置 probe 时 probePath 为空, 一切探测都停用。
+	a.probePath = probePathFor(c)
+	a.loadProbeState()
+	a.startProbeLoop()
 	return a, nil
 }
 
@@ -948,6 +1509,10 @@ func buildAttemptPayload(payload map[string]any, model string, includeUsage, str
 }
 
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/v1/probe" {
+		a.serveProbe(w, r)
+		return
+	}
 	if r.URL.Path == "/v1/models" {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed",
@@ -1073,6 +1638,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		failed          int
 		servedUp        *UpstreamCfg
 		servedMod       string
+		attemptStart    time.Time // 被动时延采样: 该候选开始等待的时刻
 	)
 	coolSkips := 0
 	budgetHit := false
@@ -1111,6 +1677,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		outReq.ContentLength = int64(len(body))
 		prepareOutboundHeaders(outReq.Header, r.Header, at.up)
 
+		attemptStart = time.Now()
 		resp, err = a.transport.RoundTrip(outReq)
 		if err != nil {
 			br.recordFail()
@@ -1221,12 +1788,16 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var usage *Usage
 	missing := true
 	status := resp.StatusCode
+	var ttfbMs, decodeMs int64
 	if stream {
 		w.WriteHeader(status)
 		dst.Del("Content-Length")
-		usage, missing = relayStream(w, resp.Body, logical)
+		ro := relayStream(w, resp.Body, logical, attemptStart)
+		usage, missing, ttfbMs, decodeMs = ro.Usage, ro.Missing, ro.TtfbMs, ro.DecodeMs
 	} else {
 		buf, rerr := io.ReadAll(resp.Body)
+		// 非流式: 首字节与整体等待几乎同时 (上游把响应写全才回头), tps 无从分解。
+		ttfbMs = msCeil(time.Since(attemptStart))
 		if rerr != nil {
 			status = http.StatusBadGateway
 			buf = []byte(`{"error":{"message":` + strconv.Quote(rerr.Error()) + `}}`)
@@ -1244,25 +1815,48 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write(buf)
 	}
 
+	// 被动时延采样 (D14): 真实流量本身就是主候选的观测, 不额外发探测请求。
+	// 只有流式能拆出解码段, 所以 tps 仅流式有值。
+	tps := 0.0
+	completion := 0
+	if usage != nil {
+		completion = usage.Completion
+	}
+	if stream && decodeMs > 0 && completion > 0 {
+		tps = float64(completion) / (float64(decodeMs) / 1000)
+	}
+	if ttfbMs > 0 {
+		window := 5
+		if pc := a.probeCfg(); pc != nil {
+			window = pc.Window
+		}
+		a.recordProbeSample(chosen.ID, realModel, probeSample{
+			Ts: time.Now().Format(time.RFC3339Nano), TtfbMs: ttfbMs, Tps: tps,
+			Tokens: completion, OK: status < 400, Passive: true,
+		}, window)
+	}
+
 	a.logReq(logRec{
 		Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
 		Upstream: chosen.ID, Model: realModel, Path: r.URL.Path, Stream: stream,
 		Status: status, Usage: usage, Missing: missing, Queued: queued, QueueMs: queueMs,
 		Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"), Source: r.Header.Get("X-Tollgate-Source"),
 		Fallbacks: failed, BudgetHit: budgetHit, CoolSkips: coolSkips,
+		TtfbMs: ttfbMs, Tps: tps,
 	})
 }
 
 // relayStream 按行透传 SSE, 期间提取流末 usage (设计 §4.9.2)。
 // 流未以 [DONE] 正常结束时, 发一个 SSE error 事件后关流, 不伪造正常结束 (F6)。
 // 返回提取到的 usage 与是否缺失 (配合 F7 兜底)。
-func relayStream(w http.ResponseWriter, body io.Reader, logical string) (*Usage, bool) {
+func relayStream(w http.ResponseWriter, body io.Reader, logical string, start time.Time) relayOut {
 	flusher, _ := w.(http.Flusher)
 	sc := bufio.NewScanner(body)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	var usage *Usage
 	est := 0
 	done := false
+	var firstAt, lastAt time.Time // 首字节 / 末字节时刻 (被动时延采样)
 
 	write := func(s string) {
 		if _, err := io.WriteString(w, s); err != nil {
@@ -1273,6 +1867,11 @@ func relayStream(w http.ResponseWriter, body io.Reader, logical string) (*Usage,
 		}
 	}
 	for sc.Scan() {
+		now := time.Now()
+		if firstAt.IsZero() {
+			firstAt = now
+		}
+		lastAt = now
 		line := sc.Text()
 		if strings.HasPrefix(line, "data:") {
 			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
@@ -1312,7 +1911,14 @@ func relayStream(w http.ResponseWriter, body io.Reader, logical string) (*Usage,
 	if missing {
 		usage = &Usage{Completion: est, Total: est}
 	}
-	return usage, missing
+	out := relayOut{Usage: usage, Missing: missing}
+	if !firstAt.IsZero() {
+		out.TtfbMs = msCeil(firstAt.Sub(start))
+		if !lastAt.IsZero() {
+			out.DecodeMs = msCeil(lastAt.Sub(firstAt))
+		}
+	}
+	return out
 }
 
 // keyPrefix 给出认证头里的 scheme: 显式配置优先; 缺省 Authorization 用 "Bearer ",
@@ -1384,6 +1990,12 @@ func (a *App) serveModels(w http.ResponseWriter) {
 // ---------- 入口 ----------
 
 func loadConfig(path string) (*Config, error) {
+	return loadConfigOpt(path, false)
+}
+
+// loadConfigOpt 读配置。lenient=true 时缺 key 环境变量不报错 (只给离线报告用:
+// -probe 只关心上游 id 与别名顺序, 不发请求, 所以不需要真 key)。
+func loadConfigOpt(path string, lenient bool) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -1404,6 +2016,9 @@ func loadConfig(path string) (*Config, error) {
 		if u.KeyEnv != "" {
 			v, ok := os.LookupEnv(u.KeyEnv)
 			if !ok || v == "" {
+				if lenient {
+					continue
+				}
 				return nil, fmt.Errorf("upstream %s: env %s not set", u.ID, u.KeyEnv)
 			}
 			u.Key = v
@@ -1610,7 +2225,13 @@ func main() {
 	usage := flag.String("usage", "", "list token usage by upstream/model and window, then exit")
 	windows := flag.String("windows", "3h,12h,24h", "windows for -usage, comma separated")
 	check := flag.Bool("check", false, "validate config and exit")
+	probe := flag.String("probe", "", "print the latency/probe report for a config file and exit")
 	flag.Parse()
+
+	if *probe != "" {
+		runProbeReport(*probe)
+		return
+	}
 
 	if *summary != "" {
 		runSummary(*summary)

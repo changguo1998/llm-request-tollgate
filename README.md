@@ -31,6 +31,11 @@
 11. 日志按天轮转: 跨本地日期 (或隔天启动) 时把上一段日志归档为
     `<base>-YYYY-MM-DD.jsonl` (同名不覆盖, 依次加 -1/-2); 预算聚合与 `-summary`
     都跨归档读, 归档不自动删除 (留存交给外部)。
+12. 探测与延迟观测 (D14, 默认关闭, **只观测不接入**): 真实请求被动记 `ttfb_ms`
+    (流式另记 `tps`); 开启 `probe` 后按 `interval_sec` 只主动探测 fallback 顺序里的
+    **下一个**候选 (`scope=next`, 单候选别名不探)。结果看 `GET /v1/probe` 或
+    `-probe <config>`, 状态落 `var/probe.json`。探测不改变候选顺序, 不触发冷却 /
+    熔断 / 预算标记; 已建立的流不迁移 —— 将来接入判断时, 切换也只发生在下次请求开始时。
 
 ## 快速开始
 
@@ -47,6 +52,9 @@ go build ./...
 # 汇总请求日志 (按 逻辑名+来源, 含 token 用量; 传目录则跨天归档一起汇总):
 ./llm-request-tollgate -summary var/requests.jsonl
 ./llm-request-tollgate -summary var/
+# 看探测/延迟报告 (只读; 不接线路由), 或在线取 GET /v1/probe:
+./llm-request-tollgate -probe config.local.json
+
 # 按 上游/模型 × 窗口 (3h/12h/24h/全部) 看 token 分解, 用来标定预算系数:
 ./llm-request-tollgate -usage var/
 ```
@@ -95,6 +103,11 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
   折算平台额度的系数 (模型级 `units` 优先, 其次 `unit`, 再次撞墙标定值), `cooldown_ms`
   是 429 后的冷却时长, `refresh_sec` 是定时扫日志的间隔。
 - `aliases`: 逻辑名 -> `[[上游 id, 真实模型 id], ...]`。
+- `probe` (可选, 默认关闭): `{ enabled, scope:"next"|"all", interval_sec:900, max_tokens:8,
+  timeout_ms:30000, window:5, targets:[别名...], target_ttfb_ms, target_tps, switch_margin }`。
+  `scope=next` 只探第二个候选 (第一个候选由真实流量被动观测); `targets` 为空则探所有多候选
+  别名。`target_ttfb_ms` / `target_tps` 是待定的两条标准, `switch_margin` 是"明显优势"阈值,
+  三个目前**只用于报告里给建议**, 不影响路由。探测参数启动时固化, 改配置要重启 (同 limits)。
 
 别名与上游支持 `SIGHUP` 热加载, 限速器状态按上游 id 保留不被重置。
 预算累计每次定时扫描从日志重建, 不设独立状态 (日志即账本)。
