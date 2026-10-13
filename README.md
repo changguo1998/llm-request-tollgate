@@ -112,6 +112,9 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 - `tollgate_group` / `tollgate_priority` 手工维护, 但不会被 store 更新脚本冲掉
   (`merge_models_by_id` 继承 provider API 不提供的字段)。跨上游同族不同名的模型 (如 ustc 的
   `deepseek-flash` 与 ark 的 `deepseek-v4-1-flash*`) 就靠 `tollgate_group` 并成一个别名。
+- 代理自身的模型列表 (agent 看到的) 同时继承候选的 `thinkingLevelMap` (取交集: 某等级只有所有
+  候选都支持才保留), 以及最小的 `contextWindow` / `maxTokens`; 缺等级表时 agent 会拒发
+  `reasoning_effort`, 报 `UNSUPPORTED_REASONING_EFFORT` (dsh 客户端校验)。
 - `key_env` 取 store 里 `apiKey` 的占位符名; `auth_header` 等设置从现有配置继承, 不会被覆盖。
   provider 条目上的 `budget` (windows / units / cooldown_ms) 以 store 为准, store 没写的键才
   回落现有配置 (缺失的 `budget.cooldown_ms` 补默认值, `--cooldown-ms` 可改)。
