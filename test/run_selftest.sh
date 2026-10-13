@@ -2,7 +2,7 @@
 # llm-request-tollgate 自测: 对本地假上游跑代理, 按用例断言 (设计 §4.7)。
 #
 # 用法: test/run_selftest.sh <case|all>
-#   case: alias | keyenv | fallback | breaker | budget | rotate | ratelimit | usage | usage-report | stream | logging | overhead | probe
+#   case: alias | keyenv | fallback | fallback-gate | breaker | budget | rotate | ratelimit | usage | usage-report | stream | logging | overhead | responses | hup | probe
 # 每个用例独立起一个假上游 + 一个代理 (各自端口, 互不干扰)。
 set -u
 
@@ -78,6 +78,12 @@ post() { # <proxy_port> <body> -> 打印状态码, 响应体到 $TMP/resp.txt
 post_stream() { # <proxy_port> <body> -> 打印 "starttransfer total code", 响应体到 $TMP/resp.txt
   curl -s -N -o "$TMP/resp.txt" -w '%{time_starttransfer} %{time_total} %{http_code}' \
     -X POST "http://127.0.0.1:$1/v1/chat/completions" \
+    -H 'Content-Type: application/json' -H 'Authorization: Bearer dummy' -d "$2"
+}
+
+post_resp() { # <proxy_port> <body> -> 打印状态码, 体到 $TMP/resp.txt, 头到 $TMP/hdr-resp.txt
+  curl -s -D "$TMP/hdr-resp.txt" -o "$TMP/resp.txt" -w '%{http_code}' \
+    -X POST "http://127.0.0.1:$1/v1/responses" \
     -H 'Content-Type: application/json' -H 'Authorization: Bearer dummy' -d "$2"
 }
 
@@ -167,6 +173,57 @@ EOF
   # 全部候选失败 -> 502 透传
   code=$(post 18813 '{"model":"onlydead-model","messages":[{"role":"user","content":"hi"}]}')
   [ "$code" = "502" ] && pass "全部失败 -> 502" || fail "allfail -> $code"
+}
+
+# fallback 换到另一个上游/模型后, 新候选要重新排它自己的队 (F4), 而不是拿前一个
+# 候选的槽位直接发; 同时验证前一个候选的槽位已归还 (不然两个上游会互等成死锁)。
+case_fallback_gate() {
+  say "=== fallback 换候选后重新排队 ==="
+  local LOG="$TMP/log-fbg.jsonl"
+  rm -f "$LOG"
+  cat >"$TMP/cfg-fbg.json" <<EOF
+{
+  "listen": "127.0.0.1:18816",
+  "log_path": "$LOG",
+  "timeouts": { "connect_ms": 1000, "response_header_ms": 5000, "stream_idle_ms": 3000, "queue_wait_ms": 300 },
+  "upstreams": [
+    { "id": "dead", "base_url": "http://127.0.0.1:19999/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true, "limits": { "rate_per_sec": 100, "burst": 10, "concurrency": 10 } },
+    { "id": "fu", "base_url": "http://127.0.0.1:19016/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true, "limits": { "rate_per_sec": 100, "burst": 10, "concurrency": 1 } }
+  ],
+  "aliases": { "fbg-model": [["dead", "deepseek-v4.1-flash"], ["fu", "deepseek-v4.1-flash"]] }
+}
+EOF
+  start_fake 19016 200
+  start_proxy 18816 "$TMP/cfg-fbg.json"
+
+  # A: dead 传输失败 -> 落到 fu, 占住 fu 唯一的槽位 (流式, 每块 200ms, 约 1s)
+  local apid
+  curl -s -N -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18816/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"fbg-model","messages":[{"role":"user","content":"hi"}],"stream":true}' \
+    >"$TMP/fbg-a.txt" 2>&1 &
+  apid=$!
+  sleep 0.3
+
+  # B: 同样落到 fu, 必须重新排 fu 的队; 300ms 内拿不到槽位 -> 闸门拒
+  local code gate
+  code=$(curl -s -o "$TMP/resp.txt" -w '%{http_code}' -X POST "http://127.0.0.1:18816/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"fbg-model","messages":[{"role":"user","content":"hi"}]}')
+  [ "$code" = "429" ] && pass "fallback 候选槽位占满 -> 429 (不再直接发)" || fail "fallback -> $code (want 429)"
+  gate=$(jq -r 'select(.status==429) | .gate' "$LOG" | tail -1)
+  [ "$gate" = "concurrency" ] && pass "429 日志 gate=concurrency" || fail "gate=$gate (want concurrency)"
+
+  wait "$apid" 2>/dev/null
+  [ "$(cat "$TMP/fbg-a.txt")" = "200" ] && pass "A 经 fallback 仍成功 200" || fail "A -> $(cat "$TMP/fbg-a.txt")"
+  jq -r 'select(.upstream=="fu" and .status==200) | .fallbacks' "$LOG" | tail -1 | grep -q '^1$' \
+    && pass "A 记 upstream=fu, fallbacks=1" || fail "A 的 fallback 记账不对"
+
+  # dead 的槽位必须已归还: 否则 fu 会一直等它 -> 死锁, 这里就拿不到 200
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18816/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"fbg-model","messages":[{"role":"user","content":"hi"}]}')
+  [ "$code" = "200" ] && pass "槽位已释放无死锁 -> 200" || fail "释放后 -> $code"
 }
 
 case_breaker() {
@@ -609,9 +666,36 @@ case_ratelimit_429() {
   fi
   jq -e '.error.code == "rate_limit_error"' "$TMP/resp.txt" >/dev/null 2>&1 \
     && pass "error.code=rate_limit_error" || fail "429 error 体不对"
+  # 频率闸: 该配置并发槽位空闲, 卡住的一定是令牌桶, 日志必须写明是哪个闸门。
+  local gate qms
+  gate=$(jq -r 'select(.status==429) | .gate' "$LOG" | tail -1)
+  qms=$(jq -r 'select(.status==429) | .queue_ms' "$LOG" | tail -1)
+  [ "$gate" = "rate" ] && pass "429 日志 gate=rate (频率闸)" || fail "gate=$gate (want rate)"
+  awk -v q="${qms:-0}" 'BEGIN{exit !(q>=200)}' \
+    && pass "拒绝时记下等待时长 queue_ms=${qms}ms" || fail "queue_ms=$qms (want >=200)"
   sleep 1.3
   code=$(post 18805 "$BODY")
   [ "$code" = "200" ] && pass "冷却后恢复 200" || fail "恢复失败 $code"
+
+  # 并发闸: 槽位被占满 -> 429 且 gate=concurrency (生产上踩的正是这一条)。
+  local C2="$TMP/cfg-rl429c.json" L2="$TMP/log-rl429c.jsonl"
+  rm -f "$L2"
+  gen_config1 "$C2" 18815 "$L2" 19015 rlc true 100 10 1 200 rlc-model
+  start_fake 19015 200
+  start_proxy 18815 "$C2"
+  local cpid
+  curl -s -N -o /dev/null -X POST "http://127.0.0.1:18815/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"rlc-model","messages":[{"role":"user","content":"hi"}],"stream":true}' &
+  cpid=$!
+  sleep 0.15
+  code=$(curl -s -o "$TMP/resp.txt" -w '%{http_code}' -X POST "http://127.0.0.1:18815/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"rlc-model","messages":[{"role":"user","content":"hi"}]}')
+  wait "$cpid" 2>/dev/null
+  [ "$code" = "429" ] && pass "并发槽位占满 -> 429" || fail "并发闸 -> $code"
+  gate=$(jq -r 'select(.status==429) | .gate' "$L2" | tail -1)
+  [ "$gate" = "concurrency" ] && pass "429 日志 gate=concurrency" || fail "gate=$gate (want concurrency)"
 }
 
 case_logging() {
@@ -683,7 +767,88 @@ case_overhead() {
   fi
 }
 
+case_hup() {
+  say "=== hup (SIGHUP 重载生效, limits 变更出声不静默) ==="
+  local LOG="$TMP/log-hup.jsonl" CFG="$TMP/cfg-hup.json" PLOG="$TMP/proxy-18809.log"
+  rm -f "$LOG" "$PLOG"
+  gen_config1 "$CFG" 18809 "$LOG" 19009 fu true 100 10 10 10000 test-model
+  start_fake 19009 20
+  start_proxy 18809 "$CFG"
+  local pid="${PROCS[${#PROCS[@]}-1]}"
+
+  # 无变更的重载: 正常重载, 不该报 limits 告警。
+  kill -HUP "$pid"
+  sleep 0.4
+  grep -q 'config reloaded' "$PLOG" && pass "SIGHUP 触发配置重载" || fail "未触发重载"
+  grep -q 'limits 已改' "$PLOG" && fail "无变更却报 limits 告警" || pass "无变更时不误报"
+
+  # 改 limits 后重载: 限速器状态有意保留, 但必须出声 (不能静默沿用旧值)。
+  gen_config1 "$CFG" 18809 "$LOG" 19009 fu true 100 10 4 10000 test-model
+  kill -HUP "$pid"
+  sleep 0.4
+  grep -q 'limits 已改' "$PLOG" \
+    && pass "limits 变更在重载时告警 (不再静默失效)" || fail "limits 变更未告警"
+  grep -q 'Concurrency:10' "$PLOG" && grep -q 'Concurrency:4' "$PLOG" \
+    && pass "告警含新旧值 (10 -> 4)" || fail "告警缺新旧值"
+  local code
+  code=$(post 18809 '{"model":"test-model","messages":[{"role":"user","content":"hi"}]}')
+  [ "$code" = "200" ] && pass "重载后仍正常服务 200" || fail "重载后 -> $code"
+}
+
 # ---------- 分发 ----------
+
+case_responses() {
+  say "=== responses (/v1/responses: 转发 + usage 口径归一 + 流终态 + model 改写) ==="
+  local LOG="$TMP/log-responses.jsonl"
+  rm -f "$LOG"
+  gen_config1 "$TMP/cfg-responses.json" 18808 "$LOG" 19008 fu true 100 10 10 10000 test-model
+  start_fake 19008 20
+  start_proxy 18808 "$TMP/cfg-responses.json"
+
+  # 1) 非流式: 转发成功 + 顶层 model 改回逻辑名。
+  local code m so
+  code=$(post_resp 18808 '{"model":"test-model","input":"hi"}')
+  [ "$code" = "200" ] && pass "/v1/responses 非流式 -> 200" || fail "非流式 -> $code"
+  m=$(jq -r '.model' "$TMP/resp.txt")
+  [ "$m" = "test-model" ] && pass "非流式响应 model 改回逻辑名" || fail "model=$m (want test-model)"
+  # 该接口没有 stream_options, 代理不得注入 include_usage。
+  so=$(grep -i '^x-fake-stream-options:' "$TMP/hdr-resp.txt" | tr -d '\r' | awk '{print $2}')
+  [ "$so" = "absent" ] && pass "未注入 stream_options (responses 无此字段)" || fail "stream_options=$so (want absent)"
+  # input/output_tokens 归一成 prompt/completion 后记账。
+  grep -q '"usage":{"prompt":7,"completion":42,"total":49}' "$LOG" \
+    && pass "input/output 口径归一 (7/42/49)" || fail "responses usage 未归一"
+
+  # 2) 流式: response.completed 是正常收尾, 不得当成"流意外结束"再补 error 事件。
+  curl -s -N -o "$TMP/resp.txt" \
+    -X POST "http://127.0.0.1:18808/v1/responses" \
+    -H 'Content-Type: application/json' -H 'Authorization: Bearer dummy' \
+    -d '{"model":"test-model","input":"hi","stream":true}'
+  if grep -q 'event: error' "$TMP/resp.txt"; then
+    fail "正常流被误补 error 事件 (F6 误报)"
+  else
+    pass "无 error 事件 (response.completed 认作正常收尾)"
+  fi
+  grep -q '"model":"test-model"' "$TMP/resp.txt" \
+    && pass "事件里嵌套的 response.model 改回逻辑名" || fail "事件 model 未改写"
+  grep -q 'deepseek-v4.1-flash' "$TMP/resp.txt" \
+    && fail "响应泄漏真实上游模型 id" || pass "响应不含真实上游 id (O9)"
+  grep '"path":"/v1/responses"' "$LOG" | tail -1 | grep -q '"usage":{"prompt":7,"completion":42,"total":49}' \
+    && pass "流式 usage 从 response.completed 提取并记账" || fail "流式 responses usage 未记账"
+  grep '"path":"/v1/responses"' "$LOG" | tail -1 | grep -q '"missing_usage":false' \
+    && pass "missing_usage=false (未走 F7 兜底)" || fail "missing_usage 标记不对"
+
+  # 3) 未注册模型仍走白名单 404。
+  code=$(post_resp 18808 '{"model":"nope","input":"hi"}')
+  [ "$code" = "404" ] && pass "未注册模型 -> 404" || fail "未注册模型 -> $code"
+
+  # 4) 上游中途断流 (没有终态事件) -> 仍按 F6 补 error 事件。
+  curl -s -N -o "$TMP/resp.txt" \
+    -X POST "http://127.0.0.1:18808/v1/responses" \
+    -H 'Content-Type: application/json' -H 'Authorization: Bearer dummy' -H 'X-Abort-After: 2' \
+    -d '{"model":"test-model","input":"hi","stream":true}'
+  grep -q 'event: error' "$TMP/resp.txt" \
+    && pass "无终态事件时仍补 error 事件 (F6 未被削弱)" || fail "断流未补 error 事件"
+}
 
 case_probe() {
   say "=== probe (只观测不切换: 被动采样 + 只探 fallback 的下一个候选) ==="
@@ -756,6 +921,7 @@ case_all() {
   case_alias
   case_keyenv
   case_fallback
+  case_fallback_gate
   case_breaker
   case_budget
   case_rotate
@@ -766,6 +932,8 @@ case_all() {
   case_ratelimit_429
   case_logging
   case_overhead
+  case_responses
+  case_hup
   case_probe
 }
 
@@ -775,6 +943,7 @@ main() {
     alias)         case_alias ;;
     keyenv)        case_keyenv ;;
     fallback)      case_fallback ;;
+    fallback-gate) case_fallback_gate ;;
     breaker)       case_breaker ;;
     budget)        case_budget ;;
     rotate)        case_rotate ;;
@@ -784,6 +953,8 @@ main() {
     ratelimit)     case_ratelimit_min; case_ratelimit_429 ;;
     logging)       case_logging ;;
     overhead)      case_overhead ;;
+    responses)     case_responses ;;
+    hup)           case_hup ;;
     probe)         case_probe ;;
     all)           case_all ;;
     *) say "unknown case: $1"; exit 2 ;;

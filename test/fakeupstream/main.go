@@ -146,6 +146,99 @@ func main() {
 		}
 	})
 
+	// /v1/responses: Responses API 回放 (O5)。用量用 input/output_tokens 口径; 事件流
+	// 以 response.completed 收尾且刻意不发 [DONE], 用来验证代理按语义终态判定正常结束。
+	http.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) {
+		body := make([]byte, 0, 4096)
+		buf := make([]byte, 4096)
+		for {
+			n, err := r.Body.Read(buf)
+			body = append(body, buf[:n]...)
+			if err != nil {
+				break
+			}
+		}
+		var req struct {
+			Model         string `json:"model"`
+			Stream        bool   `json:"stream"`
+			StreamOptions *struct {
+				IncludeUsage bool `json:"include_usage"`
+			} `json:"stream_options"`
+		}
+		json.Unmarshal(body, &req)
+		if req.Model == "" {
+			req.Model = "fake"
+		}
+		const inputTokens = 7
+		const outputTokens = 42
+		cachedTokens := 0
+		if v := r.Header.Get("X-Fake-Cached"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				cachedTokens = n
+			}
+		}
+		usageJSON := func() string {
+			s := `{"input_tokens":` + strconv.Itoa(inputTokens) +
+				`,"output_tokens":` + strconv.Itoa(outputTokens) +
+				`,"total_tokens":` + strconv.Itoa(inputTokens+outputTokens)
+			if cachedTokens > 0 {
+				s += `,"input_tokens_details":{"cached_tokens":` + strconv.Itoa(cachedTokens) + `}`
+			}
+			return s + `}`
+		}
+		w.Header().Set("X-Fake-Auth", r.Header.Get("Authorization"))
+		// 该接口没有 stream_options, 代理不应注入; 自测据此断言 (回显给客户端看)。
+		so := "absent"
+		if req.StreamOptions != nil {
+			so = "present"
+		}
+		w.Header().Set("X-Fake-Stream-Options", so)
+
+		if !req.Stream {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"resp_fake","object":"response","model":"` + req.Model +
+				`","output":[{"type":"message","content":[{"type":"output_text","text":"Hello world!"}]}],"usage":` + usageJSON() + `}`))
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		flusher, _ := w.(http.Flusher)
+		delay := time.Duration(*delayMs) * time.Millisecond
+
+		abortAfter := -1
+		if v := r.Header.Get("X-Abort-After"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				abortAfter = n
+			}
+		}
+		send := func(ev, data string) bool {
+			if abortAfter == 0 {
+				return false
+			}
+			if abortAfter > 0 {
+				abortAfter--
+			}
+			if _, err := w.Write([]byte("event: " + ev + "\ndata: " + data + "\n\n")); err != nil {
+				return false
+			}
+			flusher.Flush()
+			time.Sleep(delay)
+			return true
+		}
+		events := [][2]string{
+			{"response.created", `{"type":"response.created","response":{"id":"resp_fake","model":"` + req.Model + `"}}`},
+			{"response.output_text.delta", `{"type":"response.output_text.delta","delta":"Hello "}`},
+			{"response.output_text.delta", `{"type":"response.output_text.delta","delta":"world!"}`},
+			{"response.completed", `{"type":"response.completed","response":{"id":"resp_fake","model":"` + req.Model + `","usage":` + usageJSON() + `}}`},
+		}
+		for _, e := range events {
+			if !send(e[0], e[1]) {
+				return
+			}
+		}
+	})
+
 	// 供别名表与模型清单探测用。
 	http.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

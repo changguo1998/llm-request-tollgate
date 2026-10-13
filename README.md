@@ -8,10 +8,12 @@
 1. 别名白名单路由: 逻辑模型名 -> 一组 (上游, 真实模型 id), 顺序即优先级;
    未注册的模型名直接 404, 不猜上游。
 2. 按上游分组的限速: 令牌桶 (速率 + 突发, 即严格最小间隔) + 信号量 (并发),
-   桶空排队, 超 `queue_wait_ms` 返 429 带 `Retry-After`。
+   桶空排队, 超 `queue_wait_ms` 返 429 带 `Retry-After`。闸门按**当前候选**逐个过:
+   fallback 换到别的上游就重新排那个候选的队, 换之前先归还上一个候选的槽位;
+   `queue_wait_ms` 是整条请求共享的排队总预算, 不是每候选一份 (D16)。
 3. 请求转发: 密钥集中在代理 (客户端凭据一律替换), SSE 逐块原样透传不缓冲。
 4. 用量记账: 强写 `stream_options.include_usage`, 从流末 usage / 非流式响应体
-   提取 token 用量 (含缓存命中 token, 三种上游字段名都认); 缺 usage 按字符粗估 (F7)
+   提取 token 用量 (含缓存命中 token, 四种上游字段名都认); 缺 usage 按字符粗估 (F7)
    并记 `missing_usage`。`-usage` 按 上游/模型 × 窗口 列出 token 分解, 用于标定预算系数。
 5. 预算自适应 (D12/D13): 不提前拦截请求; 上游返 429 即视为限额信号 — 该上游
    (provider+key) 进冷却 (`budget.cooldown_ms`, 默认 5 分钟), 请求自动切下一个候选, 并用
@@ -35,7 +37,11 @@
     (流式另记 `tps`); 开启 `probe` 后按 `interval_sec` 只主动探测 fallback 顺序里的
     **下一个**候选 (`scope=next`, 单候选别名不探)。结果看 `GET /v1/probe` 或
     `-probe <config>`, 状态落 `var/probe.json`。探测不改变候选顺序, 不触发冷却 /
-    熔断 / 预算标记; 已建立的流不迁移 —— 将来接入判断时, 切换也只发生在下次请求开始时。
+    熔断 / 预算标记。自适应路由已决策不做 (设计 D15), 所以探测结果只进报告, 不接线路由。
+13. 双接口转发: `POST /v1/chat/completions` 与 `POST /v1/responses` (O5) 共用同一条链路
+    (白名单 / 闸门 / fallback / 记账)。`/responses` 没有 `stream_options`, 不做
+    include_usage 注入; 用量按 `input/output_tokens` 口径归一, 流以 `response.completed`
+    判正常收尾 (该接口不保证发 `[DONE]`), 事件里嵌在 `response` 下的 `model` 也改回逻辑名。
 
 ## 快速开始
 
@@ -43,7 +49,7 @@
 go build ./...
 # 填好 config.local.json (从 config.example.json 复制) 后:
 ./llm-request-tollgate -config config.local.json
-# 起假上游 + 全量自测 (91 项断言):
+# 起假上游 + 全量自测 (138 项断言):
 ./test/run_selftest.sh all
 # 常驻 (systemd 用户服务, 崩了自动拉起):
 ./deploy/install_service.sh
@@ -90,7 +96,8 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 
 - `listen` 监听地址; `log_path` JSONL 日志路径 (当前日志; 跨天自动归档到同目录
   `<base>-YYYY-MM-DD.jsonl`, 见「做什么」第 11 条)。
-- `timeouts`: 建连 / 等响应头 / 流空闲 / 排队上限。
+- `timeouts`: 建连 / 等响应头 / 流空闲 / 排队上限 (`queue_wait_ms` 是整条请求共享的
+  排队总预算, 见 D16)。
 - `upstreams`: 每个上游一条记录 (id / base_url / auth_header / key 或 key_env / headers /
   include_usage / limits / budget), 限速参数挂在记录上, 即「上游 + 凭据」分组。
   生成器给每个上游都写 `budget.cooldown_ms` (429 冷却, 默认 5 分钟); `windows` / `units`
@@ -106,10 +113,13 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 - `probe` (可选, 默认关闭): `{ enabled, scope:"next"|"all", interval_sec:900, max_tokens:8,
   timeout_ms:30000, window:5, targets:[别名...], target_ttfb_ms, target_tps, switch_margin }`。
   `scope=next` 只探第二个候选 (第一个候选由真实流量被动观测); `targets` 为空则探所有多候选
-  别名。`target_ttfb_ms` / `target_tps` 是待定的两条标准, `switch_margin` 是"明显优势"阈值,
-  三个目前**只用于报告里给建议**, 不影响路由。探测参数启动时固化, 改配置要重启 (同 limits)。
+  别名。`target_ttfb_ms` / `target_tps` 是两条标准, `switch_margin` 是"明显优势"阈值,
+  三个**只用于报告里给建议**, 不影响路由 —— 自适应路由已决策不做 (设计 D15)。
+  探测参数启动时固化, 改配置要重启 (同 limits)。
 
-别名与上游支持 `SIGHUP` 热加载, 限速器状态按上游 id 保留不被重置。
+别名与上游支持 `SIGHUP` 热加载, 限速器状态按上游 id 保留不被重置 (排队中的请求与令牌
+水位不该被 hup 清掉)。**例外**: `limits` 与 `breaker_fail` / `breaker_cooldown_ms`
+改了 `hup` 不生效 —— 日志会打印新旧值告警, 需 `restart` 才生效。
 预算累计每次定时扫描从日志重建, 不设独立状态 (日志即账本)。
 
 ### 从 fff 模型列表生成配置
@@ -160,25 +170,31 @@ node scripts/set_priority.ts
 `deepseek-flash` 输入 2.0 / 缓存命中 0.2 / 输出 2.0 (每百万 token), qwen 系 1.0/0.1/1.0,
 `glm-5.3-flash` 4.0/0.4/4.0。若平台额度就是这些价格单位, 系数即 价格/1e6。
 
-## v1 边界
+## 当前边界
 
-- 转发只做 `POST /v1/chat/completions` (D4); `GET /v1/models` 返回逻辑名清单 (O5);
-  `/responses` 一律 404。
+- 转发覆盖 `POST /v1/chat/completions` 与 `POST /v1/responses` (O5); `GET /v1/models`
+  返回逻辑名清单 (O5)。其余路径一律 404。
+- 被闸门拒的 429 在日志里带 `gate` (`concurrency` = 并发槽位, `rate` = 令牌桶) 与
+  实际等待时长 `queue_ms` (各候选排队之和), 便于区分「并发不够」和「频率不够」。
+- 不做负载均衡 (D15): 候选按列表顺序取第一个可用的, 不按权重 / 轮询 / 延迟分流;
+  闸门被拒时也不溢出到其它空闲候选。
 - 集中 fallback + 熔断只覆盖首字节前 (传输失败/429/5xx); 首字节之后不切后端。
 - 预算不提前拦截: 靠上游 429 触发冷却与系数标定; 未撞过墙时系数默认 1 (仅影响估算)。
 - 归档日志不自动清理, 也不压缩; 留存与清理交给外部 (logrotate 或手动)。
-- 接真上游前的清单见设计文档 §5.4。
+- 真上游已接入 (设计文档 §5.4 那份清单已满足); 上线前还缺切流顺序与回滚、以及「没有进程
+  绕开代理」的验证 (设计文档 §5.3 O4)。
 
 ## 目录
 
 - `main.go` 单文件代理 (含假上游自测所需的全部实现)。
 - `test/fakeupstream/` 假上游: 回放思考块 / 文本 / 工具调用 / usage 的 SSE,
   支持中途断流 (验证 F6)。
-- `test/run_selftest.sh` 自测: 13 组用例 91 项断言, 对本地假上游跑代理。
+- `test/run_selftest.sh` 自测: 16 组用例 138 项断言, 对本地假上游跑代理。
 - `test/healthcheck.sh` 自检: 二进制 / 配置 (-check) / 端口三项, 退出码 0 = 全通过。
 - `deploy/` 常驻: `tollgate.service` 模板 + `install_service.sh` (systemd 用户服务)。
 - `scripts/gen_tollgate_config.py` 由 fff 模型列表生成本项目配置 (读
   `~/fff/config/llm-models.json` + 黑名单, 按 `tollgate_group` 归并成别名; 见下)。
 - `scripts/set_priority.ts` 调优先级的 TUI (Node >= 22.6 跑 TS, 无依赖无参数): 候选顺序
   实时预览, 界面内即可保存 store / 重生成配置 / hup。
-- `tmp/` 一键验收脚本 (临时, 输出进 `tmp/*.log`, 不提交)。
+- `test/tmp/` 与 `var/` 是运行产物 (自测二进制/假上游日志; 请求日志与 `budget-units.json`
+  等状态), 都在 `.gitignore` 内。

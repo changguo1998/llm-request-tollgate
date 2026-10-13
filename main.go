@@ -53,10 +53,15 @@ import (
 )
 
 const (
-	// 客户端打在代理上的路径 (D4: 第一版只做 /v1/chat/completions)。
+	// 客户端打在代理上的路径 (D4)。
 	clientPath = "/v1/chat/completions"
 	// 上游路径: base_url 自带 /v1 前缀 (设计 §4.8), 不能再拼一次。
 	upstreamPath = "/chat/completions"
+	// /v1/responses (O5): 与 chat/completions 并列的第二条转发路径, 共用除路径外
+	// 的全部链路。该接口没有 stream_options (不需要 include_usage 注入), 用量在
+	// 响应体或 response.completed 事件里给出。
+	clientPathResponses   = "/v1/responses"
+	upstreamPathResponses = "/responses"
 )
 
 // ---------- 配置 ----------
@@ -104,23 +109,30 @@ type Limiter struct {
 	rate, burst, tokens float64
 	last                time.Time
 	sem                 chan struct{}
+	cfg                 Limits // 建桶时的配置, 供热加载比对 (改了不会自动生效)
 	mu                  sync.Mutex
 }
 
+// normLimits 按 newLimiter 的取值规则补齐参数, 供建桶与热加载比对共用。
+func normLimits(l Limits) Limits {
+	if l.Burst < 1 {
+		l.Burst = 1
+	}
+	if l.Concurrency < 1 {
+		l.Concurrency = 1
+	}
+	l.RatePerSec = math.Max(0, l.RatePerSec)
+	return l
+}
+
 func newLimiter(l Limits) *Limiter {
-	cap := l.Concurrency
-	if cap < 1 {
-		cap = 1
-	}
-	burst := l.Burst
-	if burst < 1 {
-		burst = 1
-	}
+	l = normLimits(l)
 	return &Limiter{
-		rate:   math.Max(0, l.RatePerSec),
-		burst:  burst,
-		tokens: burst,
-		sem:    make(chan struct{}, cap),
+		rate:   l.RatePerSec,
+		burst:  l.Burst,
+		tokens: l.Burst,
+		sem:    make(chan struct{}, l.Concurrency),
+		cfg:    l,
 	}
 }
 
@@ -174,13 +186,19 @@ type breaker struct {
 	cooldown time.Duration
 }
 
-func newBreaker(failTh int, cooldown time.Duration) *breaker {
+// normBreakerDur 按 newBreaker 的取值规则补齐参数, 供建熔断器与热加载比对共用。
+func normBreakerDur(failTh int, cooldown time.Duration) (int, time.Duration) {
 	if failTh < 1 {
 		failTh = 5
 	}
 	if cooldown <= 0 {
 		cooldown = 30 * time.Second
 	}
+	return failTh, cooldown
+}
+
+func newBreaker(failTh int, cooldown time.Duration) *breaker {
+	failTh, cooldown = normBreakerDur(failTh, cooldown)
 	return &breaker{failTh: failTh, cooldown: cooldown}
 }
 
@@ -234,11 +252,18 @@ type openaiUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
-	// 三种缓存口径: OpenAI/vLLM 的 prompt_tokens_details.cached_tokens,
-	// DeepSeek 的 prompt_cache_hit_tokens, Anthropic 风格的 cache_read_input_tokens。
+	// Responses API (/v1/responses) 口径: 同名语义用 input/output_tokens 表达。
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	// 四种缓存口径: OpenAI/vLLM 的 prompt_tokens_details.cached_tokens,
+	// DeepSeek 的 prompt_cache_hit_tokens, Anthropic 风格的 cache_read_input_tokens,
+	// Responses API 的 input_tokens_details.cached_tokens。
 	PromptTokensDetails *struct {
 		CachedTokens int `json:"cached_tokens"`
 	} `json:"prompt_tokens_details"`
+	InputTokensDetails *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"input_tokens_details"`
 	PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"`
 	CacheReadInputTokens int `json:"cache_read_input_tokens"`
 }
@@ -247,6 +272,15 @@ func toUsage(u *openaiUsage) *Usage {
 	if u == nil {
 		return nil
 	}
+	// chat/completions 用 prompt/completion_tokens, Responses API 用 input/output_tokens;
+	// 两者归一成同一份 Usage, 下游记账与汇总不必区分接口。
+	prompt, completion := u.PromptTokens, u.CompletionTokens
+	if prompt == 0 {
+		prompt = u.InputTokens
+	}
+	if completion == 0 {
+		completion = u.OutputTokens
+	}
 	cached := u.PromptCacheHitTokens
 	if cached == 0 {
 		cached = u.CacheReadInputTokens
@@ -254,8 +288,11 @@ func toUsage(u *openaiUsage) *Usage {
 	if u.PromptTokensDetails != nil && u.PromptTokensDetails.CachedTokens > 0 {
 		cached = u.PromptTokensDetails.CachedTokens
 	}
+	if u.InputTokensDetails != nil && u.InputTokensDetails.CachedTokens > 0 {
+		cached = u.InputTokensDetails.CachedTokens
+	}
 	return &Usage{
-		Prompt: u.PromptTokens, Completion: u.CompletionTokens,
+		Prompt: prompt, Completion: completion,
 		Total: u.TotalTokens, Cached: cached,
 	}
 }
@@ -291,6 +328,12 @@ func estimateUsageFromBody(buf []byte) int {
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		// /v1/responses: 生成文本在 output[].content[].text。
+		Output []struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
 	}
 	if err := json.Unmarshal(buf, &resp); err != nil {
 		return 0
@@ -299,28 +342,16 @@ func estimateUsageFromBody(buf []byte) int {
 	for _, c := range resp.Choices {
 		n += estimateTokens(c.Message.Content)
 	}
+	for _, o := range resp.Output {
+		for _, c := range o.Content {
+			n += estimateTokens(c.Text)
+		}
+	}
 	return n
 }
 
-// rewriteModel 把 JSON 里顶层 "model" 字段的值改成 logical, 其余字节原样保留 (O9)。
-// 仅处理值为不含量转义的简单字符串, 否则原样返回。
-func rewriteModel(data []byte, logical string) []byte {
-	if logical == "" {
-		return data
-	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(data, &m); err != nil {
-		return data
-	}
-	raw, ok := m["model"]
-	if !ok || len(raw) < 2 || raw[0] != '"' || bytes.IndexByte(raw, '\\') >= 0 {
-		return data
-	}
-	var cur string
-	if json.Unmarshal(raw, &cur) != nil || cur == logical {
-		return data
-	}
-	enc, _ := json.Marshal(logical)
+// replaceModelValue 把 data 里值为 raw 的 "model" 字段换成 enc, 其余字节原样保留。
+func replaceModelValue(data, raw, enc []byte) []byte {
 	key := []byte(`"model":`)
 	for from := 0; ; {
 		i := bytes.Index(data[from:], key)
@@ -343,6 +374,42 @@ func rewriteModel(data []byte, logical string) []byte {
 	}
 }
 
+// rewriteModel 把 JSON 里顶层 "model" 字段的值改成 logical, 其余字节原样保留 (O9)。
+// 仅处理值为不含量转义的简单字符串, 否则原样返回。
+func rewriteModel(data []byte, logical string) []byte {
+	if logical == "" {
+		return data
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return data
+	}
+	raw, ok := m["model"]
+	if !ok || len(raw) < 2 || raw[0] != '"' || bytes.IndexByte(raw, '\\') >= 0 {
+		return data
+	}
+	var cur string
+	if json.Unmarshal(raw, &cur) != nil || cur == logical {
+		return data
+	}
+	enc, _ := json.Marshal(logical)
+	return replaceModelValue(data, raw, enc)
+}
+
+// rewriteModelKnown 同 rewriteModel, 但用于 /v1/responses 事件里嵌在 response
+// 对象下的 model (顶层没有 model 字段可解析): 真实 id 由路由已知, 直接按字面量换。
+func rewriteModelKnown(data []byte, real, logical string) []byte {
+	if real == "" || logical == "" || real == logical || strings.ContainsAny(real, `\"`) {
+		return data
+	}
+	raw, err := json.Marshal(real)
+	if err != nil {
+		return data
+	}
+	enc, _ := json.Marshal(logical)
+	return replaceModelValue(data, raw, enc)
+}
+
 // ---------- 日志 (JSONL) ----------
 
 type logRec struct {
@@ -362,6 +429,7 @@ type logRec struct {
 	Source    string  `json:"source,omitempty"`
 	Fallbacks int     `json:"fallbacks,omitempty"`
 	Err       string  `json:"err,omitempty"`
+	Gate      string  `json:"gate,omitempty"` // 被代理闸门拒绝时: concurrency | rate
 	BudgetHit bool    `json:"budget_hit,omitempty"`
 	CoolSkips int     `json:"cooldown_skips,omitempty"`
 	TtfbMs    int64   `json:"ttfb_ms,omitempty"` // 首字节时延 (被动采样)
@@ -1303,12 +1371,22 @@ func (a *App) applyConfig(c *Config) {
 	for i := range c.Upstreams {
 		u := &c.Upstreams[i]
 		upstreams[u.ID] = u
-		if _, ok := a.limiters[u.ID]; !ok {
+		// 限速器与熔断器按上游 id 保留不重建: 状态有意跨热加载延续 (排队中的请求、
+		// 令牌水位、熔断计数都不该被 hup 清掉)。代价是参数改了不会自动生效, 所以
+		// 这里显式告警 —— 否则 hup 之后是静默沿用旧值。
+		if l, ok := a.limiters[u.ID]; !ok {
 			a.limiters[u.ID] = newLimiter(u.Limits)
+		} else if want := normLimits(u.Limits); want != l.cfg {
+			log.Printf("upstream %s: limits 已改 %+v -> %+v, 限速器保留旧状态, 需重启才生效",
+				u.ID, l.cfg, want)
 		}
-		if _, ok := a.breakers[u.ID]; !ok {
+		if b, ok := a.breakers[u.ID]; !ok {
 			a.breakers[u.ID] = newBreaker(u.BreakerFail,
 				time.Duration(u.BreakerCooldMs)*time.Millisecond)
+		} else if ft, cd := normBreakerDur(u.BreakerFail,
+			time.Duration(u.BreakerCooldMs)*time.Millisecond); ft != b.failTh || cd != b.cooldown {
+			log.Printf("upstream %s: breaker 参数已改 -> fail=%d cooldown=%s, 需重启才生效",
+				u.ID, ft, cd)
 		}
 	}
 	a.upstreams = upstreams
@@ -1522,10 +1600,16 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.serveModels(w)
 		return
 	}
-	if r.Method != http.MethodPost || r.URL.Path != clientPath {
+	isResponses := r.URL.Path == clientPathResponses
+	if r.Method != http.MethodPost || (!isResponses && r.URL.Path != clientPath) {
 		writeError(w, http.StatusNotFound, "not_found",
 			"unsupported path/method: "+r.Method+" "+r.URL.Path)
 		return
+	}
+	// /v1/responses 与 /v1/chat/completions 共用除路径外的全部链路 (闸门/记账/fallback)。
+	upPath := upstreamPath
+	if isResponses {
+		upPath = upstreamPathResponses
 	}
 	// 请求体整体缓冲, 才能改写 model 与 stream_options (设计 §4.9.4)。
 	body, err := io.ReadAll(r.Body)
@@ -1550,23 +1634,29 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		stream = s
 	}
 
-	// 别名解析 -> 选上游 -> 限速器 -> 排队预算, 一把 RLock 拿齐快照。
+	// 集中 fallback 的候选表: 上游 + 真实模型 + 该候选自己的限速器。一把 RLock 拿齐,
+	// 循环里不再读 a.upstreams / a.limiters (热加载会改这两张表)。
+	type attempt struct {
+		up  *UpstreamCfg
+		mod string
+		lim *Limiter
+	}
 	a.mu.RLock()
 	alias, aliasOK := a.aliases[logical]
 	var chosen *UpstreamCfg
 	realModel := ""
+	attempts := make([]attempt, 0, len(alias))
 	for _, cand := range alias {
-		if u, ok := a.upstreams[cand.Upstream]; ok {
-			chosen = u
-			realModel = cand.Model
-			break
+		u, ok := a.upstreams[cand.Upstream]
+		if !ok {
+			continue
 		}
+		if chosen == nil {
+			chosen, realModel = u, cand.Model
+		}
+		attempts = append(attempts, attempt{u, cand.Model, a.limiters[u.ID]})
 	}
-	var lim *Limiter
 	queueWait := time.Duration(a.cfg.Timeouts.QueueWaitMs) * time.Millisecond
-	if chosen != nil {
-		lim = a.limiters[chosen.ID]
-	}
 	a.mu.RUnlock()
 
 	if !aliasOK {
@@ -1581,52 +1671,24 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 预算不再提前拦截 (D13): 判定改为「上游 429 = 限额信号」, 见尝试循环里的
 	// markLimitHit (该上游进冷却 + 跨候选切换 + 反推折算系数)。
-	// 限速闸: 信号量 + 令牌桶, 共用 queue_wait 排队预算 (F3/F4)。
-	// 注意: 信号量一旦拿到就必须释放, 否则后面请求永远排队 (429 泄漏)。
+	//
+	// 限速闸 (F3/F4): 信号量 + 令牌桶由**当前候选**承担, 在尝试循环里逐个过 ——
+	// fallback 换到另一个上游/模型, 就要重新排那个候选自己的队, 不能拿着前一个候选
+	// 的槽位直接发。整条请求共用一份 queue_wait 预算, 所以换候选不会把等待上限叠成
+	// N 倍 (总时长与单候选时相同, 仍在客户端 5 分钟静默线以内, §2 第 3 条)。
+	// 关键: 换候选前必须归还上一个候选的槽位, 否则会同时占着两个上游互相等 (死锁)。
 	gateCtx, cancel := context.WithTimeout(r.Context(), queueWait)
 	defer cancel()
-	gateStart := time.Now()
-	if !lim.acquireSem(gateCtx) {
-		writeError(w, http.StatusTooManyRequests, "rate_limit_error",
-			"upstream busy: queue wait exceeded "+queueWait.String())
-		a.logReq(logRec{
-			Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
-			Upstream: chosen.ID, Model: realModel, Path: r.URL.Path, Stream: stream,
-			Status: http.StatusTooManyRequests, Missing: true, Client: r.RemoteAddr,
-			UA: r.Header.Get("User-Agent"), Source: r.Header.Get("X-Tollgate-Source"),
-			Err: "rate_limited",
-		})
-		return
-	}
-	defer lim.releaseSem()
-	if !lim.takeToken(gateCtx) {
-		w.Header().Set("Retry-After", strconv.Itoa(max(1, int(queueWait/time.Second))))
-		writeError(w, http.StatusTooManyRequests, "rate_limit_error",
-			"upstream busy: queue wait exceeded "+queueWait.String())
-		a.logReq(logRec{
-			Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
-			Upstream: chosen.ID, Model: realModel, Path: r.URL.Path, Stream: stream,
-			Status: http.StatusTooManyRequests, Missing: true, Client: r.RemoteAddr,
-			UA: r.Header.Get("User-Agent"), Source: r.Header.Get("X-Tollgate-Source"),
-			Err: "rate_limited",
-		})
-		return
-	}
-	queueMs := time.Since(gateStart).Milliseconds()
-	queued := queueMs >= 5
-
-	// 集中 fallback: 按候选顺序尝试, 只在还没给客户端写任何字节前
-	// (传输失败 / 上游 429 或 5xx) 换下一个候选; 全部失败原样透传最后错误。
-	type attempt struct {
-		up  *UpstreamCfg
-		mod string
-	}
-	attempts := make([]attempt, 0, len(alias))
-	for _, cand := range alias {
-		if u, ok := a.upstreams[cand.Upstream]; ok {
-			attempts = append(attempts, attempt{u, cand.Model})
+	var (
+		queueMs    int64    // 各候选排队时长之和
+		gateReject string   // 非空表示被闸门拒了: concurrency | rate
+		held       *Limiter // 已拿到槽位、正在服务的那个候选
+	)
+	defer func() {
+		if held != nil {
+			held.releaseSem()
 		}
-	}
+	}()
 
 	var (
 		resp            *http.Response
@@ -1642,6 +1704,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	)
 	coolSkips := 0
 	budgetHit := false
+	// 集中 fallback: 按候选顺序尝试, 只在还没给客户端写任何字节前 (传输失败 /
+	// 上游 429 或 5xx) 换下一个候选; 全部失败保留最近一次错误原样透传。
 	for _, at := range attempts {
 		if cool, left := a.cooling(at.up.ID); cool {
 			// 该上游 (provider+key) 撞过限额, 冷却期内不真发, 直接换下一个候选。
@@ -1659,7 +1723,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			failed++
 			continue
 		}
-		body, err := buildAttemptPayload(payload, at.mod, at.up.IncludeUsage, stream)
+		// /v1/responses 没有 stream_options, 不做 include_usage 注入 (用量本就在响应里)。
+		body, err := buildAttemptPayload(payload, at.mod, at.up.IncludeUsage && !isResponses, stream)
 		if err != nil {
 			lastErr = err
 			lastUpID, lastM = at.up.ID, at.mod
@@ -1667,7 +1732,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		outReq, err := http.NewRequestWithContext(r.Context(), r.Method,
-			at.up.BaseURL+upstreamPath, bytes.NewReader(body))
+			at.up.BaseURL+upPath, bytes.NewReader(body))
 		if err != nil {
 			lastErr = err
 			lastUpID, lastM = at.up.ID, at.mod
@@ -1677,9 +1742,37 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		outReq.ContentLength = int64(len(body))
 		prepareOutboundHeaders(outReq.Header, r.Header, at.up)
 
+		// 这个候选自己的闸门: 排队等它的槽位与令牌, 共用整条请求的 queue_wait 预算。
+		// 放在请求体准备之后, 这样构造失败不白占配额。
+		lim := at.lim
+		if lim == nil {
+			lastErr = fmt.Errorf("upstream %s has no limiter", at.up.ID)
+			lastUpID, lastM = at.up.ID, at.mod
+			failed++
+			continue
+		}
+		atGateStart := time.Now()
+		okSem := lim.acquireSem(gateCtx)
+		okTok := okSem && lim.takeToken(gateCtx)
+		queueMs += time.Since(atGateStart).Milliseconds() // 成功或失败都记排了多久
+		if !okSem {
+			gateReject = "concurrency"
+			lastUpID, lastM = at.up.ID, at.mod
+			failed++
+			break
+		}
+		if !okTok {
+			lim.releaseSem()
+			gateReject = "rate"
+			lastUpID, lastM = at.up.ID, at.mod
+			failed++
+			break
+		}
+
 		attemptStart = time.Now()
 		resp, err = a.transport.RoundTrip(outReq)
 		if err != nil {
+			lim.releaseSem()
 			br.recordFail()
 			lastErr = err
 			lastUpID, lastM = at.up.ID, at.mod
@@ -1687,6 +1780,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if shouldFallback(resp.StatusCode) {
+			lim.releaseSem()
 			br.recordFail()
 			b, rerr := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -1706,7 +1800,28 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		br.recordSuccess()
 		servedUp, servedMod = at.up, at.mod
+		held = lim
 		break
+	}
+	queued := queueMs >= 5
+
+	if servedUp == nil && gateReject != "" {
+		// 闸门排队超预算: 整条请求的等待额度已用尽, 不再试后面的候选 (gateCtx 已到期,
+		// 再试也只是立刻失败)。这就是 F3 的排队上限。
+		w.Header().Set("Retry-After", strconv.Itoa(max(1, int(queueWait/time.Second))))
+		writeError(w, http.StatusTooManyRequests, "rate_limit_error",
+			"upstream busy: queue wait exceeded "+queueWait.String())
+		a.logReq(logRec{
+			Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
+			Upstream: lastUpID, Model: lastM, Path: r.URL.Path, Stream: stream,
+			Status: http.StatusTooManyRequests, Missing: true,
+			Queued: queued, QueueMs: queueMs,
+			Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"),
+			Source: r.Header.Get("X-Tollgate-Source"),
+			Err:    "rate_limited", Gate: gateReject, Fallbacks: failed,
+			BudgetHit: budgetHit, CoolSkips: coolSkips,
+		})
+		return
 	}
 
 	if servedUp == nil {
@@ -1792,7 +1907,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if stream {
 		w.WriteHeader(status)
 		dst.Del("Content-Length")
-		ro := relayStream(w, resp.Body, logical, attemptStart)
+		ro := relayStream(w, resp.Body, logical, realModel, attemptStart, isResponses)
 		usage, missing, ttfbMs, decodeMs = ro.Usage, ro.Missing, ro.TtfbMs, ro.DecodeMs
 	} else {
 		buf, rerr := io.ReadAll(resp.Body)
@@ -1849,7 +1964,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // relayStream 按行透传 SSE, 期间提取流末 usage (设计 §4.9.2)。
 // 流未以 [DONE] 正常结束时, 发一个 SSE error 事件后关流, 不伪造正常结束 (F6)。
 // 返回提取到的 usage 与是否缺失 (配合 F7 兜底)。
-func relayStream(w http.ResponseWriter, body io.Reader, logical string, start time.Time) relayOut {
+func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel string, start time.Time, isResponses bool) relayOut {
 	flusher, _ := w.(http.Flusher)
 	sc := bufio.NewScanner(body)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
@@ -1879,7 +1994,13 @@ func relayStream(w http.ResponseWriter, body io.Reader, logical string, start ti
 				done = true
 			} else if data != "" {
 				var chunk struct {
-					Usage   *openaiUsage `json:"usage"`
+					Usage *openaiUsage `json:"usage"`
+					Type  string       `json:"type"`
+					// /v1/responses 的事件把 usage 与 model 都装在 response 对象里。
+					Response *struct {
+						Usage *openaiUsage `json:"usage"`
+					} `json:"response"`
+					Delta   json.RawMessage `json:"delta"`
 					Choices []struct {
 						Delta struct {
 							Content string `json:"content"`
@@ -1887,14 +2008,38 @@ func relayStream(w http.ResponseWriter, body io.Reader, logical string, start ti
 					} `json:"choices"`
 				}
 				if json.Unmarshal([]byte(data), &chunk) == nil {
-					if usage == nil && chunk.Usage != nil {
-						usage = toUsage(chunk.Usage)
+					if usage == nil {
+						switch {
+						case chunk.Usage != nil:
+							usage = toUsage(chunk.Usage)
+						case chunk.Response != nil && chunk.Response.Usage != nil:
+							usage = toUsage(chunk.Response.Usage)
+						}
+					}
+					if isResponses {
+						// Responses API 走语义事件流, 终态是 response.completed (不保证发
+						// [DONE]); failed/incomplete 是上游自己报的终态, 也算正常收尾 ——
+						// 否则每条正常流都会被补一个 error 事件 (F6 误报)。
+						switch chunk.Type {
+						case "response.completed", "response.failed", "response.incomplete":
+							done = true
+						case "response.output_text.delta":
+							var s string
+							if json.Unmarshal(chunk.Delta, &s) == nil {
+								est += estimateTokens(s)
+							}
+						}
 					}
 					for _, c := range chunk.Choices {
 						est += estimateTokens(c.Delta.Content)
 					}
 					// O9: 块内 model 改回逻辑名 (只改该字段, 其余字节原样)。
-					if data2 := rewriteModel([]byte(data), logical); string(data2) != data {
+					data2 := rewriteModel([]byte(data), logical)
+					if isResponses {
+						// 事件里的 model 嵌在 response 对象下, 顶层改写够不着。
+						data2 = rewriteModelKnown(data2, realModel, logical)
+					}
+					if string(data2) != data {
 						line = "data: " + string(data2)
 					}
 				}
