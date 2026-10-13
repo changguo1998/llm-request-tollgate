@@ -165,16 +165,21 @@ func (g GateCfg) backoff(n int) time.Duration {
 	return time.Duration(g.RetryBackoffMs[n-1]) * time.Millisecond
 }
 
-// ErrRule 是一条错误特征: 状态码命中, 或 body 里出现任一关键词, 即算命中 (OR)。
+// ErrRule 是一条错误分类规则: 状态码在 Status 里 (缺省 = 任意状态码), 且匹配文本里出现
+// Contains 里任一子串, 两者都满足才算命中 (docs/providers-api.md §1.2)。
+// 状态码只用来收敛候选集, 定类必须落到 body 的结构化字段或关键词 —— 多家的 429 是
+// 「限流与额度共用」的同一个码, 只看状态码就锁候选会误判。
 type ErrRule struct {
 	Status   []int    `json:"status,omitempty"`
-	Keywords []string `json:"keywords,omitempty"`
+	Contains []string `json:"contains,omitempty"`
 }
 
-// ErrRules 是每个上游一份的错误分类规则 (设计 §4.8)。
+// ErrRules 是每个上游一份的错误分类规则, 形状见 docs/providers-api.md §3.1。
+// 只保留两档会触发特殊动作的类: 额度 (锁候选 10min) 与并发 (锁超发试探 1h);
+// 调研文档里的可选 `rate` 档动作与通用兜底一致, 所以不单独建类 (配了也不生效)。
 type ErrRules struct {
-	Concurrency *ErrRule `json:"concurrency,omitempty"`
-	Quota       *ErrRule `json:"quota,omitempty"`
+	Quota       []ErrRule `json:"quota,omitempty"`
+	Concurrency []ErrRule `json:"concurrency,omitempty"`
 }
 
 // errClass 是三类特殊限制加一类通用兜底 (设计 §5.5.2)。
@@ -186,22 +191,53 @@ const (
 	classQuota                       // 额度限制: 锁整个候选
 )
 
-// match 判定一条规则是否命中; 规则缺失时恒不命中。
-func (r *ErrRule) match(status int, body []byte) bool {
-	if r == nil {
-		return false
+// errMatchText 拼出关键词匹配用的文本: error.type + error.code + error.message 转小写;
+// body 不是 JSON, 或没有 error 对象 (有的上游回纯文本) 时退回整段 body
+// (docs/providers-api.md §1.2 第 2/3 步 —— 不同上游的关键词落在不同字段上)。
+func errMatchText(body []byte) string {
+	if len(body) > 8*1024 {
+		body = body[:8*1024] // 只用于匹配, 截断到 8KB
 	}
-	for _, s := range r.Status {
-		if s == status {
-			return true
+	var env struct {
+		Type  string `json:"type"`
+		Error struct {
+			Message string          `json:"message"`
+			Type    string          `json:"type"`
+			Code    json.RawMessage `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err == nil &&
+		(env.Error.Message != "" || env.Error.Type != "" || len(env.Error.Code) > 0) {
+		// code 有的是字符串 ("QuotaExceeded.X"), 有的是数字; 去掉引号后当文本拼进去。
+		code := strings.Trim(string(env.Error.Code), `"`)
+		return strings.ToLower(strings.Join(
+			[]string{env.Type, env.Error.Type, code, env.Error.Message}, " "))
+	}
+	return strings.ToLower(string(body))
+}
+
+// match 判定一条规则是否命中 (status 与 contains 是与关系); 空规则恒不命中。
+func (r ErrRule) match(status int, text string) bool {
+	if len(r.Status) == 0 && len(r.Contains) == 0 {
+		return false // 空规则: 别当成"命中一切"
+	}
+	if len(r.Status) > 0 {
+		hit := false
+		for _, s := range r.Status {
+			if s == status {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			return false
 		}
 	}
-	if len(r.Keywords) == 0 {
-		return false
+	if len(r.Contains) == 0 {
+		return true // 只写状态码的规则: 语义明确, 但额度类不该这么配 (§1.3)
 	}
-	low := strings.ToLower(string(body))
-	for _, kw := range r.Keywords {
-		if kw != "" && strings.Contains(low, strings.ToLower(kw)) {
+	for _, kw := range r.Contains {
+		if kw != "" && strings.Contains(text, strings.ToLower(kw)) {
 			return true
 		}
 	}
@@ -209,16 +245,32 @@ func (r *ErrRule) match(status int, body []byte) bool {
 }
 
 // classify 按该上游自己的规则给报错归类 (设计 §5.5.2); 没配规则就是通用兜底。
+// 额度类先判: 它不可重试, 必须先于并发/限流类 (docs/providers-api.md §3.2 第 1 条)。
 func (u *UpstreamCfg) classify(status int, body []byte) errClass {
 	if u.Errors != nil {
-		if u.Errors.Concurrency.match(status, body) {
-			return classConcurrency
+		text := errMatchText(body)
+		for _, r := range u.Errors.Quota {
+			if r.match(status, text) {
+				return classQuota
+			}
 		}
-		if u.Errors.Quota.match(status, body) {
-			return classQuota
+		for _, r := range u.Errors.Concurrency {
+			if r.match(status, text) {
+				return classConcurrency
+			}
 		}
 	}
 	return classOther
+}
+
+// bodySnippet 取 body 前 n 个字符用于日志, 去掉换行与回车免得把日志行撑破。
+func bodySnippet(b []byte, n int) string {
+	s := strings.TrimSpace(string(b))
+	s = strings.NewReplacer("\n", " ", "\r", " ", "\t", " ").Replace(s)
+	if len(s) > n {
+		s = s[:n] + "..."
+	}
+	return s
 }
 
 // minSoftCap 是并发上限的起点: 每次重启从 1 重新爬 (设计 §5.5.2)。
@@ -514,6 +566,18 @@ type gateLockRec struct {
 type gateState struct {
 	UpdatedAt string                 `json:"updated_at"`
 	Locks     map[string]gateLockRec `json:"locks"`
+}
+
+// recordGenericFailure 记一次通用兜底失败: 连续错误计数 +1 并按 retry_backoff_ms 暂停该候选;
+// 到阈值就熔断 (锁 5min) 并清零计数。返回 true 表示该候选进了熔断锁, 这一笔该换下一个候选
+// (设计 §5.5.2)。
+func (a *App) recordGenericFailure(c *cand, g GateCfg) bool {
+	if !c.recordOther(g) {
+		return false
+	}
+	a.lockProvider(c, "breaker", g.breakerLock())
+	c.recordSuccess() // 熔断后重新计数, 锁到期从 0 开始
+	return true
 }
 
 // lockProvider 给候选加定时供应商锁, 并把锁状态落盘 —— 重启后仍在锁内 (设计 §5.5.3)。
@@ -1778,10 +1842,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				// 传输层失败: 没有状态码与 body 可判, 按通用兜底走 (设计 §5.5.2)。
 				at.cd.finish(kind, false)
-				if at.cd.recordOther(gate) {
-					a.lockProvider(at.cd, "breaker", gate.breakerLock())
-					at.cd.recordSuccess()
-				}
+				a.recordGenericFailure(at.cd, gate)
 				lastErr = err
 				lastUpID, lastM = at.up.ID, at.mod
 				failed++
@@ -1797,16 +1858,19 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					// 额度限制: 锁整个候选 10min, 排队的请求随之迁移 (设计 §5.5.2)。
 					a.lockProvider(at.cd, "quota", gate.quotaLock())
 				case classConcurrency:
-					// 并发限制: 锁掉超发试探 1h, 不等那 20s, 直接换下一个候选。
+					// 并发限制: 锁掉超发试探 1h (设计 §5.5.2)。试探撞上就锁完直接换下一个
+					// 候选; 普通请求锁完后本笔按普通错误走 —— 退避后重试同一候选
+					// (providers-api.md §1.2 第 5 条)。
 					at.cd.lockConcurrency("concurrency", gate.concurrencyLock())
-				default:
-					// 通用兜底: 连续计数 +1 并按序列退避; 到阈值熔断 (锁 5min)。
-					moveOn = false
-					if at.cd.recordOther(gate) {
-						a.lockProvider(at.cd, "breaker", gate.breakerLock())
-						at.cd.recordSuccess()
-						moveOn = true
+					if kind != slotProbe {
+						moveOn = a.recordGenericFailure(at.cd, gate)
 					}
+				default:
+					// 规则表没覆盖的样本: 把上游 + 状态码 + body 片段记进服务日志, 便于按
+					// 真实文案补规则 (docs/providers-api.md §1.2 / §3.2)。
+					log.Printf("unclassified upstream error: upstream=%s status=%d body=%s",
+						at.up.ID, resp.StatusCode, bodySnippet(b, 200))
+					moveOn = a.recordGenericFailure(at.cd, gate)
 				}
 				lastErr = fmt.Errorf("upstream %s returned %d", at.up.ID, resp.StatusCode)
 				lastStatus, lastHdr, lastBody = resp.StatusCode, resp.Header.Clone(), b

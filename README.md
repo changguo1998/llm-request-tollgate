@@ -20,7 +20,8 @@
 05. 限制反应 (设计 §5.5.2/§5.5.3): 每个上游可用 `errors` 规则 (状态码 + body 关键词)
     把报错分成并发 / 额度 / 其他三类; 命中额度 -> 锁该候选 `gate.quota_lock_ms` (10min),
     其他 -> 按 `gate.retry_backoff_ms` (10/20/30s) 退避、连续 4 次熔断锁
-    `gate.breaker_lock_ms` (5min)。锁内不真发, 排队的请求整队迁移到下一个候选; 锁落
+    `gate.breaker_lock_ms` (5min); 规则没覆盖到的报错会把上游 + 状态码 + body 片段写进服务
+    日志, 便于按真实文案补规则。锁内不真发, 排队的请求整队迁移到下一个候选; 锁落
     `var/gate-state.json` (重启仍生效)。服务不记账也不提前拦截, 只写日志。
 06. 响应整形: 非流 / 流式 chunk 里的 `model` 字段改回请求的逻辑名,
     对外隐藏真实上游 id。
@@ -104,9 +105,11 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
   序列 ([10000,20000,30000])。并发上限不在配置里 (起点固定 1, 每次重启重新爬)。
 - `upstreams`: 每个上游一条记录 (id / base_url / auth_header / key 或 key_env / headers /
   include_usage / errors), 调度状态按 id 分组 (一个上游一把 key, 即「上游 + 凭据」分组)。
-  `errors` 是 v2 的错误分类规则 (形状见设计文档 §4.8, 缺省空表 = 全部走通用兜底):
-  `{ "concurrency": { "status": [429], "keywords": ["concurrency limit"] }, "quota": { "status": [402], "keywords": ["insufficient balance"] } }` —— 状态码命中, 或 body 里
-  出现关键词, 即算命中 (OR); 具体规则待按各供应商 API 规范填。
+  `errors` 是错误分类规则 (逐家规则见 [docs/providers-api.md](docs/providers-api.md),
+  缺省空表 = 全部走通用兜底): 每类一个规则数组, 单条规则
+  `{ "status": [429], "contains": ["quota exceeded"] }` —— 状态码在列表内 (缺省 = 任意状态码)
+  **且** 匹配文本 (`error.type` + `error.code` + `error.message`) 里出现关键词才算命中;
+  判定顺序 `quota → concurrency → 其他`。
   `key_env` 只存环境变量名, 真 key 启动时从环境取 (密钥不落盘, 见「常驻与升级」)。
   `key_prefix` 是认证头里的 scheme: 缺省对 `Authorization` 用 `Bearer `, 其他头不带
   (ustc 与火山 ARK 实测都要 `Bearer `; 给 `""` 可强制裸 key)。
@@ -182,6 +185,8 @@ token) 与 `-usage` (上游 + 模型 × 窗口的 token 分解)。
 - `test/run_selftest.sh` 自测: 17 组用例 131 项断言, 对本地假上游跑代理。
 - `test/healthcheck.sh` 自检: 二进制 / 配置 (-check) / 端口三项, 退出码 0 = 全通过。
 - `deploy/` 常驻: `tollgate.service` 模板 + `install_service.sh` (systemd 用户服务)。
+- `docs/providers-api.md` 上游错误分类调研: 判定流水线 + 逐家实测错误清单 + 可直接落地的
+  `errors` 规则 (2026-10-13)。
 - `scripts/gen_tollgate_config.py` 由 fff 模型列表生成本项目配置 (读
   `~/fff/config/llm-models.json` + 黑名单, 按 `tollgate_group` 归并成别名; 见下)。
 - `scripts/set_priority.ts` 调优先级的 TUI (Node >= 22.6 跑 TS, 无依赖无参数): 候选顺序

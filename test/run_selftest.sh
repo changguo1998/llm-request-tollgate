@@ -401,7 +401,7 @@ PYSRV
   "gate": { "interval_ms": 20, "sem_wait_ms": 400, "queue_wait_ms": 400, "concurrency_lock_ms": 800, "quota_lock_ms": 2000, "breaker_lock_ms": 3000, "retry_backoff_ms": [10, 20, 30] },
   "upstreams": [
     { "id": "quota", "base_url": "http://127.0.0.1:19994/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true,
-      "errors": { "quota": { "status": [402], "keywords": ["insufficient balance"] } } },
+      "errors": { "quota": [ { "status": [402, 429], "contains": ["insufficient balance"] } ] } },
     { "id": "fu", "base_url": "http://127.0.0.1:19014/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true }
   ],
   "aliases": { "q-model": [["quota", "deepseek-v4.1-flash"], ["fu", "deepseek-v4.1-flash"]] }
