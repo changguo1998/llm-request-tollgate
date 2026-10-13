@@ -3,29 +3,29 @@
 // 单进程内含九件事 (设计 §4.1):
 //  1. 别名表 (白名单 + 路由): 逻辑模型名 -> [(上游, 真实模型 id), ...],
 //     未命中的模型名直接返 404, 不猜上游 (D2)。
-//  2. 按上游分组 (v1 一个上游一把 key, "上游+凭据" 等价于上游记录) 的
-//     令牌桶 (速率 + 突发) 与信号量 (并发), 桶空排队, 超 queue_wait_ms 返
-//     429 带 Retry-After (D3, F3)。
+//  2. 按上游分组的 v2 调度 (设计 §5.5, 一个上游一把 key, "上游+凭据" 等价于上游记录):
+//     每个上游一条 FIFO 队列 + 自适应并发上限 (起点 1, 试探成功 +1), 出队节拍
+//     interval_ms; 被挡下而没发出去的请求返 429 带 Retry-After (D3)。
 //  3. 手动转发: 认证头替换 (D1), 删 Accept-Encoding 让 Transport 协商并
 //     透明解压 (设计 §4.9.1), 不加 X-Forwarded-For (F9)。
 //  4. 用量提取: 强写 stream_options.include_usage, 流末 usage chunk / 非流式
 //     响应体 usage; 缺 usage 按 F7 字符口径兜底并计数。
-//  5. 预算自适应 (D12/D13): 定时扫日志重建窗口 token 累计; 不拦截请求, 而是把上游
-//     的 429 当限额信号: 该上游 (provider+key) 进冷却, 跨候选切下一个模型, 并据
-//     撞墙时的窗口累计反推折算系数 (落 var/budget-units.json)。
+//  5. 限制反应 (设计 §5.5.2): 上游报错按每个上游自己的规则分成并发 / 额度 / 其他
+//     三类; 额度锁该候选 10min, 其他按 10/20/30s 退避、连续 4 次熔断锁 5min,
+//     锁与退避状态落 var/gate-state.json (重启仍生效)。服务不记账, 只管写日志。
 //  6. 响应整形: 非流 / 流式 chunk 里的 model 字段改回请求的逻辑名 (O9)。
 //  7. 对外面: GET /v1/models 返回逻辑名清单 (O5); 日志记 source 标识 (O3);
 //     -summary 汇总命令 (O2); -check 配置自检 + deploy/ 常驻与自检脚本 (O1)。
 //  8. 集中 fallback: 候选按序尝试, 首字节前 429/5xx/传输失败换下一个, 全败透传最后错误。
-//  9. 熔断: 连续失败达阈值短暂跳过该上游 (冷却期内不真发), 冷却后自动恢复。
+//  9. 供应商锁: 锁内不真发, 排队中的请求整队迁移到下一个候选。
 //  10. 探测与延迟观测 (D14, 只观测不接入): 真实请求被动记 ttfb_ms/tps; 开启 probe 后
 //     只主动探测 fallback 顺序里的下一个候选 (scope=next), 结果进 GET /v1/probe 与
-//     var/probe.json; 不改候选顺序、不动冷却/熔断/预算, 已建立的流不迁移。
+//     var/probe.json; 不改候选顺序、不动失败计数与锁, 已建立的流不迁移。
 //
 // 配置: config.local.json (gitignored, 软链到 ~/fff/config), SIGHUP 热加载别名与上游 (F1);
 // key: 支持 key_env 字段只存环境变量名, 真 key 启动/热加载时从环境变量取, 不落盘。
 // 日志: JSONL 追加写, 逐笔明细 (F5, F8); 按本地日历天轮转, 跨天归档为
-// <base>-<YYYY-MM-DD>.jsonl, 预算聚合与 -summary 都能跨归档读。
+// <base>-<YYYY-MM-DD>.jsonl, -summary 与 -usage 都能跨归档读。
 package main
 
 import (
@@ -70,173 +70,525 @@ type Timeouts struct {
 	ConnectMs        int `json:"connect_ms"`
 	ResponseHeaderMs int `json:"response_header_ms"`
 	StreamIdleMs     int `json:"stream_idle_ms"`
-	QueueWaitMs      int `json:"queue_wait_ms"`
-}
-
-type Limits struct {
-	RatePerSec  float64 `json:"rate_per_sec"`
-	Burst       float64 `json:"burst"`
-	Concurrency int     `json:"concurrency"`
 }
 
 type UpstreamCfg struct {
-	ID             string            `json:"id"`
-	BaseURL        string            `json:"base_url"`
-	AuthHeader     string            `json:"auth_header"`
-	Key            string            `json:"key"`
-	KeyEnv         string            `json:"key_env,omitempty"`
-	KeyPrefix      *string           `json:"key_prefix,omitempty"`
-	Headers        map[string]string `json:"headers"`
-	IncludeUsage   bool              `json:"include_usage"`
-	BreakerFail    int               `json:"breaker_fail,omitempty"`
-	BreakerCooldMs int               `json:"breaker_cooldown_ms,omitempty"`
-	Limits         Limits            `json:"limits"`
-	Budget         *BudgetCfg        `json:"budget,omitempty"`
+	ID           string            `json:"id"`
+	BaseURL      string            `json:"base_url"`
+	AuthHeader   string            `json:"auth_header"`
+	Key          string            `json:"key"`
+	KeyEnv       string            `json:"key_env,omitempty"`
+	KeyPrefix    *string           `json:"key_prefix,omitempty"`
+	Headers      map[string]string `json:"headers"`
+	IncludeUsage bool              `json:"include_usage"`
+	// Errors 是 v2 的报错分类规则 (设计 §4.8): 每个上游一份「状态码 + body 关键词」,
+	// 用来把报错分成并发 / 额度 / 其他三类; 缺省空表 = 全部走通用兜底。
+	Errors *ErrRules `json:"errors,omitempty"`
 }
 
 type Config struct {
 	Listen    string                 `json:"listen"`
 	LogPath   string                 `json:"log_path"`
 	Timeouts  Timeouts               `json:"timeouts"`
+	Gate      GateCfg                `json:"gate"`
 	Upstreams []UpstreamCfg          `json:"upstreams"`
 	Aliases   map[string][][2]string `json:"aliases"`
 	Probe     *ProbeCfg              `json:"probe,omitempty"`
 }
 
-// ---------- 限速: 令牌桶 + 信号量, 按上游分组 ----------
+// ---------- v2 门控: 每上游一条队列 + 自适应并发上限 (设计 §5.5) ----------
+//
+// 这一段是 v2 的调度核心: 排队与出队节拍、自适应并发上限与超发试探、两把锁、报错归类。
+// 转发主路径的接入与 v1 限速的删除在后续轮次做, 所以现在还没有调用方。
 
-type Limiter struct {
-	rate, burst, tokens float64
-	last                time.Time
-	sem                 chan struct{}
-	cfg                 Limits // 建桶时的配置, 供热加载比对 (改了不会自动生效)
-	mu                  sync.Mutex
+// GateCfg 是所有上游共用的门控参数 (设计 §5.5.4)。
+type GateCfg struct {
+	IntervalMs        int   `json:"interval_ms"`
+	SemWaitMs         int   `json:"sem_wait_ms"`
+	QueueWaitMs       int   `json:"queue_wait_ms"`
+	ConcurrencyLockMs int   `json:"concurrency_lock_ms"`
+	QuotaLockMs       int   `json:"quota_lock_ms"`
+	BreakerLockMs     int   `json:"breaker_lock_ms"`
+	RetryBackoffMs    []int `json:"retry_backoff_ms"`
 }
 
-// normLimits 按 newLimiter 的取值规则补齐参数, 供建桶与热加载比对共用。
-func normLimits(l Limits) Limits {
-	if l.Burst < 1 {
-		l.Burst = 1
+// gateIntervalMs 是出队节拍的缺省值 (设计 §5.5.4: 固定 500ms, 不按上游配)。
+const gateIntervalMs = 500
+
+// normGate 按设计 §5.5.4 的缺省值补齐门控参数。
+func normGate(g GateCfg) GateCfg {
+	if g.IntervalMs <= 0 {
+		g.IntervalMs = gateIntervalMs
 	}
-	if l.Concurrency < 1 {
-		l.Concurrency = 1
+	if g.SemWaitMs <= 0 {
+		g.SemWaitMs = 20000
 	}
-	l.RatePerSec = math.Max(0, l.RatePerSec)
-	return l
+	if g.QueueWaitMs <= 0 {
+		g.QueueWaitMs = 10000
+	}
+	if g.ConcurrencyLockMs <= 0 {
+		g.ConcurrencyLockMs = 3600000
+	}
+	if g.QuotaLockMs <= 0 {
+		g.QuotaLockMs = 600000
+	}
+	if g.BreakerLockMs <= 0 {
+		g.BreakerLockMs = 300000
+	}
+	if len(g.RetryBackoffMs) == 0 {
+		g.RetryBackoffMs = []int{10000, 20000, 30000}
+	}
+	return g
 }
 
-func newLimiter(l Limits) *Limiter {
-	l = normLimits(l)
-	return &Limiter{
-		rate:   l.RatePerSec,
-		burst:  l.Burst,
-		tokens: l.Burst,
-		sem:    make(chan struct{}, l.Concurrency),
-		cfg:    l,
-	}
+// 配置里写的是毫秒, 调度里用 Duration。
+func (g GateCfg) interval() time.Duration { return time.Duration(g.IntervalMs) * time.Millisecond }
+func (g GateCfg) semWait() time.Duration  { return time.Duration(g.SemWaitMs) * time.Millisecond }
+func (g GateCfg) queueWait() time.Duration {
+	return time.Duration(g.QueueWaitMs) * time.Millisecond
+}
+func (g GateCfg) concurrencyLock() time.Duration {
+	return time.Duration(g.ConcurrencyLockMs) * time.Millisecond
+}
+func (g GateCfg) quotaLock() time.Duration {
+	return time.Duration(g.QuotaLockMs) * time.Millisecond
+}
+func (g GateCfg) breakerLock() time.Duration {
+	return time.Duration(g.BreakerLockMs) * time.Millisecond
 }
 
-// takeToken 在 ctx 超时内拿到一个令牌, 拿不到返回 false。
-func (l *Limiter) takeToken(ctx context.Context) bool {
-	for {
-		l.mu.Lock()
-		now := time.Now()
-		if l.last.IsZero() {
-			l.last = now
-		}
-		l.tokens = math.Min(l.burst, l.tokens+now.Sub(l.last).Seconds()*l.rate)
-		l.last = now
-		if l.tokens >= 1 {
-			l.tokens--
-			l.mu.Unlock()
-			return true
-		}
-		need := time.Duration((1 - l.tokens) / l.rate * float64(time.Second))
-		l.mu.Unlock()
-		t := time.NewTimer(need)
-		select {
-		case <-ctx.Done():
-			t.Stop()
-			return false
-		case <-t.C:
-		}
+// backoff 返回第 n 次连续失败该暂停多久; 超出序列长度返回 0 (那一次该进熔断)。
+func (g GateCfg) backoff(n int) time.Duration {
+	if n < 1 || n > len(g.RetryBackoffMs) {
+		return 0
 	}
+	return time.Duration(g.RetryBackoffMs[n-1]) * time.Millisecond
 }
 
-func (l *Limiter) acquireSem(ctx context.Context) bool {
-	select {
-	case l.sem <- struct{}{}:
-		return true
-	case <-ctx.Done():
+// ErrRule 是一条错误特征: 状态码命中, 或 body 里出现任一关键词, 即算命中 (OR)。
+type ErrRule struct {
+	Status   []int    `json:"status,omitempty"`
+	Keywords []string `json:"keywords,omitempty"`
+}
+
+// ErrRules 是每个上游一份的错误分类规则 (设计 §4.8)。
+type ErrRules struct {
+	Concurrency *ErrRule `json:"concurrency,omitempty"`
+	Quota       *ErrRule `json:"quota,omitempty"`
+}
+
+// errClass 是三类特殊限制加一类通用兜底 (设计 §5.5.2)。
+type errClass int
+
+const (
+	classOther       errClass = iota // 通用兜底: 退避与熔断
+	classConcurrency                 // 并发限制: 锁掉超发试探
+	classQuota                       // 额度限制: 锁整个候选
+)
+
+// match 判定一条规则是否命中; 规则缺失时恒不命中。
+func (r *ErrRule) match(status int, body []byte) bool {
+	if r == nil {
 		return false
 	}
-}
-
-func (l *Limiter) releaseSem() { <-l.sem }
-
-// ---------- 熔断 ----------
-
-// breaker 是按上游的熔断器: 连续失败达阈值打开, 冷却期内不再请求该上游
-// (fallback 直接跳过), 冷却期满自动恢复; 成功后复位。
-type breaker struct {
-	mu       sync.Mutex
-	fails    int
-	openAt   time.Time // 零值 = 关闭
-	failTh   int
-	cooldown time.Duration
-}
-
-// normBreakerDur 按 newBreaker 的取值规则补齐参数, 供建熔断器与热加载比对共用。
-func normBreakerDur(failTh int, cooldown time.Duration) (int, time.Duration) {
-	if failTh < 1 {
-		failTh = 5
-	}
-	if cooldown <= 0 {
-		cooldown = 30 * time.Second
-	}
-	return failTh, cooldown
-}
-
-func newBreaker(failTh int, cooldown time.Duration) *breaker {
-	failTh, cooldown = normBreakerDur(failTh, cooldown)
-	return &breaker{failTh: failTh, cooldown: cooldown}
-}
-
-// allow 返回此刻是否允许尝试该上游。打开且未过冷却期 -> 拒绝; 其余放行
-// (冷却期满即关闭, 下一次尝试当作探测)。
-func (b *breaker) allow() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if !b.openAt.IsZero() {
-		if time.Since(b.openAt) < b.cooldown {
-			return false
+	for _, s := range r.Status {
+		if s == status {
+			return true
 		}
-		b.openAt = time.Time{}
-		b.fails = 0
 	}
-	return true
+	if len(r.Keywords) == 0 {
+		return false
+	}
+	low := strings.ToLower(string(body))
+	for _, kw := range r.Keywords {
+		if kw != "" && strings.Contains(low, strings.ToLower(kw)) {
+			return true
+		}
+	}
+	return false
 }
 
-// recordFail 记一次失败; 连续失败达阈值即打开熔断。
-func (b *breaker) recordFail() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.fails++
-	if b.fails >= b.failTh {
-		b.openAt = time.Now()
-		b.fails = 0
+// classify 按该上游自己的规则给报错归类 (设计 §5.5.2); 没配规则就是通用兜底。
+func (u *UpstreamCfg) classify(status int, body []byte) errClass {
+	if u.Errors != nil {
+		if u.Errors.Concurrency.match(status, body) {
+			return classConcurrency
+		}
+		if u.Errors.Quota.match(status, body) {
+			return classQuota
+		}
+	}
+	return classOther
+}
+
+// minSoftCap 是并发上限的起点: 每次重启从 1 重新爬 (设计 §5.5.2)。
+const minSoftCap = 1
+
+// lockState 是一个到期时间戳加一个原因标记 (设计 §5.5.3)。
+type lockState struct {
+	until  time.Time
+	reason string
+}
+
+func (l lockState) active(now time.Time) bool { return now.Before(l.until) }
+
+func (l lockState) left(now time.Time) time.Duration {
+	if !l.active(now) {
+		return 0
+	}
+	return l.until.Sub(now)
+}
+
+// ticket 是候选队列里的一项; enq 记入队时刻, 用来算排队超时。
+type ticket struct {
+	c   *cand
+	enq time.Time
+}
+
+// cand 是每个上游的调度状态: 一条 FIFO 队列 + 自适应并发上限 + 两把锁 (设计 §5.5.2/§5.5.3)。
+type cand struct {
+	id string
+
+	mu       sync.Mutex
+	queue    []*ticket
+	inFlight int       // 已拿到信号量的请求数 (含还在排队的)
+	softCap  int       // 自适应并发上限: 起点 1, 不设天花板
+	probing  bool      // 是否已有试探在飞 (同一时刻只允许一笔)
+	nextSend time.Time // 下一笔最早可发送的时刻 (出队节拍)
+	// 通用兜底 (设计 §5.5.2): 退避是候选级的, 不是每笔请求各自退避; 退避期间新请求照常
+	// 进队列, 但队首在暂停结束前不会被放行 —— 排队上限只有 10s, 所以 20s/30s 的退避
+	// 基本等不到, 请求会换下一个候选。
+	pausedUntil time.Time
+	errStreak   int       // 连续错误计数, 成功清零
+	provLock    lockState // 定时供应商锁: 额度 10min / 熔断 5min
+	concLock    lockState // 并发上限锁: 只锁超发试探
+	wake        chan struct{}
+}
+
+func newCand(id string) *cand {
+	return &cand{id: id, softCap: minSoftCap, wake: make(chan struct{}, 1)}
+}
+
+// signal 唤醒一个等待者; 通道容量 1, 满了说明已经有人会醒来重查。
+func (c *cand) signal() {
+	select {
+	case c.wake <- struct{}{}:
+	default:
 	}
 }
 
-// recordSuccess 成功选型: 复位失败计数并关闭熔断。
-func (b *breaker) recordSuccess() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.fails = 0
-	b.openAt = time.Time{}
+// slotKind 说明这一笔是正常占用信号量, 还是并发满时的超发试探 (设计 §5.5.2)。
+type slotKind int
+
+const (
+	slotCapped slotKind = iota // 正常占用信号量, 结束时归还
+	slotProbe                  // 试探: 不占信号量, 失败无需释放
+)
+
+// wakeReason 是一次等待的结束原因。
+type wakeReason int
+
+const (
+	wakeNotify   wakeReason = iota // 状态可能变了, 重查
+	wakeDeadline                   // 等到了期限
+	wakeCanceled                   // ctx 结束 (客户端断开或取消)
+)
+
+// sleep 等到 deadline 或 until (谁先到) 或一次唤醒; ctx 结束直接返回。
+func (c *cand) sleep(ctx context.Context, deadline, until time.Time) wakeReason {
+	now := time.Now()
+	if !now.Before(deadline) {
+		return wakeDeadline
+	}
+	d := deadline.Sub(now)
+	if !until.IsZero() {
+		if til := until.Sub(now); til < d {
+			d = til
+		}
+	}
+	if d <= 0 {
+		d = time.Millisecond // 已经该动的情况: 短重查一次, 不空转
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return wakeCanceled
+	case <-c.wake:
+		return wakeNotify
+	case <-t.C:
+		if !time.Now().Before(deadline) {
+			return wakeDeadline
+		}
+		return wakeNotify
+	}
 }
 
-// ---------- 用量 ----------
+// acquire 按设计 §5.5.1 拿到发送资格: 先取信号量 (a), 再排队等轮到自己 (b)。
+// ok=false 时 why 说明原因 (locked / sem_timeout / queue_timeout / canceled), 上层换下一个候选;
+// semMs / queueMs 是两段等待的毫秒数, 只用于记日志。
+func (c *cand) acquire(ctx context.Context, g GateCfg) (kind slotKind, why string, semMs, queueMs int64, ok bool) {
+	start := time.Now()
+	kind, why, ok = c.acquireSlot(ctx, g)
+	semMs = time.Since(start).Milliseconds()
+	if !ok {
+		return kind, why, semMs, 0, false
+	}
+	start = time.Now()
+	if why, ok = c.waitTurn(ctx, g); !ok {
+		c.finish(kind, false) // 没轮到就退出: 归还信号量 (试探不占, 无需归还)
+		return kind, why, semMs, time.Since(start).Milliseconds(), false
+	}
+	return kind, "", semMs, time.Since(start).Milliseconds(), true
+}
+
+// acquireSlot 取信号量: 有余量直接占; 占满时先试探 (纯超发), 不允许试探才等 semWaitMs
+// (设计 §5.5.1 的 a 与 §5.5.2 的并发限制)。
+func (c *cand) acquireSlot(ctx context.Context, g GateCfg) (slotKind, string, bool) {
+	deadline := time.Now().Add(g.semWait())
+	for {
+		now := time.Now()
+		c.mu.Lock()
+		if c.provLock.active(now) {
+			c.mu.Unlock()
+			return slotCapped, "locked", false
+		}
+		if c.inFlight < c.softCap {
+			c.inFlight++
+			c.mu.Unlock()
+			return slotCapped, "", true
+		}
+		if !c.concLock.active(now) && !c.probing {
+			// 并发满, 但试探没被锁也没有别的试探在飞: 这一笔超发, 不占信号量。
+			c.probing = true
+			c.mu.Unlock()
+			return slotProbe, "", true
+		}
+		c.mu.Unlock()
+		switch c.sleep(ctx, deadline, time.Time{}) {
+		case wakeCanceled:
+			return slotCapped, "canceled", false
+		case wakeDeadline:
+			return slotCapped, "sem_timeout", false
+		}
+	}
+}
+
+// waitTurn 入队等轮到自己, 并保证出队节拍 (设计 §5.5.1 的 b / b1, §5.5.2 的流量限制)。
+func (c *cand) waitTurn(ctx context.Context, g GateCfg) (string, bool) {
+	t := &ticket{c: c, enq: time.Now()}
+	c.mu.Lock()
+	c.queue = append(c.queue, t)
+	c.mu.Unlock()
+	c.signal()
+	deadline := t.enq.Add(g.queueWait())
+	for {
+		now := time.Now()
+		c.mu.Lock()
+		if c.provLock.active(now) {
+			// 排队期间该候选被锁: 退出队列, 由上层换下一个候选 (整队迁移, §5.5.3)。
+			c.removeLocked(t)
+			c.mu.Unlock()
+			c.signal()
+			return "locked", false
+		}
+		if len(c.queue) > 0 && c.queue[0] == t &&
+			!now.Before(c.nextSend) && !now.Before(c.pausedUntil) {
+			c.queue = c.queue[1:]
+			c.nextSend = now.Add(g.interval())
+			c.mu.Unlock()
+			c.signal()
+			return "", true
+		}
+		next := c.nextSend
+		if c.pausedUntil.After(next) {
+			next = c.pausedUntil // 退避暂停: 队首也要等到暂停结束
+		}
+		c.mu.Unlock()
+		switch c.sleep(ctx, deadline, next) {
+		case wakeCanceled:
+			c.dropTicket(t)
+			return "canceled", false
+		case wakeDeadline:
+			c.dropTicket(t)
+			return "queue_timeout", false
+		}
+	}
+}
+
+// dropTicket 把一项从队列里摘掉 (客户端断开或排队超时)。
+func (c *cand) dropTicket(t *ticket) {
+	c.mu.Lock()
+	c.removeLocked(t)
+	c.mu.Unlock()
+	c.signal()
+}
+
+// removeLocked 摘队列项; 调用方持有 c.mu。
+func (c *cand) removeLocked(t *ticket) {
+	for i, x := range c.queue {
+		if x == t {
+			c.queue = append(c.queue[:i], c.queue[i+1:]...)
+			return
+		}
+	}
+}
+
+// finish 结束一笔发送: 正常占用的归还槽位, 试探按结果放宽上限 (设计 §5.5.2)。
+func (c *cand) finish(kind slotKind, ok bool) {
+	c.mu.Lock()
+	if kind == slotProbe {
+		c.probing = false
+		if ok {
+			c.softCap++ // 试探成功 → 上限 +1, 不设天花板也不落盘
+		}
+	} else {
+		c.inFlight--
+	}
+	c.mu.Unlock()
+	c.signal()
+}
+
+// lockProvider 加定时供应商锁: 额度与熔断共用这一机制, 只是时长不同, 取更晚的到期时间
+// (设计 §5.5.3); 唤醒排队者, 让它们退出队列换下一个候选。
+func (c *cand) lockProvider(reason string, dur time.Duration) {
+	until := time.Now().Add(dur)
+	c.mu.Lock()
+	if until.After(c.provLock.until) {
+		c.provLock = lockState{until: until, reason: reason}
+	}
+	c.mu.Unlock()
+	c.signal()
+}
+
+// lockConcurrency 锁掉超发试探: 候选本身照常用 (设计 §5.5.3)。
+func (c *cand) lockConcurrency(reason string, dur time.Duration) {
+	until := time.Now().Add(dur)
+	c.mu.Lock()
+	if until.After(c.concLock.until) {
+		c.concLock = lockState{until: until, reason: reason}
+	}
+	c.mu.Unlock()
+}
+
+// locked 报告该候选是否在供应商锁内, 以及还剩多久、因为什么。
+func (c *cand) locked() (bool, time.Duration, string) {
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.provLock.active(now), c.provLock.left(now), c.provLock.reason
+}
+
+// recordSuccess 清掉连续错误计数 (设计 §5.5.2 通用兜底)。
+func (c *cand) recordSuccess() {
+	c.mu.Lock()
+	c.errStreak = 0
+	c.mu.Unlock()
+}
+
+// recordOther 记一次通用兜底失败: 连续计数 +1, 并按 retry_backoff_ms 暂停该候选;
+// 计数超过退避序列长度时报告该熔断 (设计 §5.5.2)。
+func (c *cand) recordOther(g GateCfg) (breaker bool) {
+	c.mu.Lock()
+	c.errStreak++
+	n := c.errStreak
+	if pause := g.backoff(n); pause > 0 {
+		if until := time.Now().Add(pause); until.After(c.pausedUntil) {
+			c.pausedUntil = until
+		}
+	}
+	c.mu.Unlock()
+	c.signal()
+	return n > len(g.RetryBackoffMs)
+}
+
+// ---------- v2 锁状态落盘 (设计 §5.5.3) ----------
+
+// gateLockRec 是落盘的一条定时供应商锁。
+type gateLockRec struct {
+	UntilMs int64  `json:"until_unix_ms"`
+	Reason  string `json:"reason"`
+}
+
+// gateState 是 gate-state.json 的内容: 只存未到期的定时供应商锁。
+type gateState struct {
+	UpdatedAt string                 `json:"updated_at"`
+	Locks     map[string]gateLockRec `json:"locks"`
+}
+
+// lockProvider 给候选加定时供应商锁, 并把锁状态落盘 —— 重启后仍在锁内 (设计 §5.5.3)。
+func (a *App) lockProvider(c *cand, reason string, dur time.Duration) {
+	c.lockProvider(reason, dur)
+	a.saveGateState()
+}
+
+// saveGateState 把未到期的供应商锁写盘 (先写临时文件再改名, 与探测状态同一套路)。
+func (a *App) saveGateState() {
+	if a.gatePath == "" {
+		return
+	}
+	now := time.Now()
+	st := gateState{UpdatedAt: now.Format(time.RFC3339Nano), Locks: map[string]gateLockRec{}}
+	a.mu.RLock()
+	cands := make([]*cand, 0, len(a.cands))
+	for _, c := range a.cands {
+		cands = append(cands, c)
+	}
+	a.mu.RUnlock()
+	for _, c := range cands {
+		if locked, left, reason := c.locked(); locked {
+			st.Locks[c.id] = gateLockRec{UntilMs: now.Add(left).UnixMilli(), Reason: reason}
+		}
+	}
+	b, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := a.gatePath + ".tmp"
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+		log.Printf("gate state write failed: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, a.gatePath); err != nil {
+		log.Printf("gate state rename failed: %v", err)
+	}
+}
+
+// loadGateState 启动时恢复未到期的供应商锁; 已过期的直接丢掉。
+func (a *App) loadGateState() {
+	if a.gatePath == "" {
+		return
+	}
+	b, err := os.ReadFile(a.gatePath)
+	if err != nil {
+		return
+	}
+	var st gateState
+	if json.Unmarshal(b, &st) != nil || st.Locks == nil {
+		return
+	}
+	now := time.Now()
+	restored := 0
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	for id, rec := range st.Locks {
+		c, ok := a.cands[id]
+		if !ok {
+			continue
+		}
+		until := time.UnixMilli(rec.UntilMs)
+		if !until.After(now) {
+			continue
+		}
+		c.mu.Lock()
+		c.provLock = lockState{until: until, reason: rec.Reason}
+		c.mu.Unlock()
+		restored++
+	}
+	if restored > 0 {
+		log.Printf("gate: restored %d provider locks from %s", restored, a.gatePath)
+	}
+}
 
 type Usage struct {
 	Prompt     int `json:"prompt"`
@@ -424,39 +776,19 @@ type logRec struct {
 	Missing   bool    `json:"missing_usage"`
 	Queued    bool    `json:"queued"`
 	QueueMs   int64   `json:"queue_ms"`
+	SemMs     int64   `json:"sem_ms,omitempty"` // 等并发信号量的时长 (v2)
 	Client    string  `json:"client"`
 	UA        string  `json:"ua,omitempty"`
 	Source    string  `json:"source,omitempty"`
 	Fallbacks int     `json:"fallbacks,omitempty"`
 	Err       string  `json:"err,omitempty"`
-	Gate      string  `json:"gate,omitempty"` // 被代理闸门拒绝时: concurrency | rate
-	BudgetHit bool    `json:"budget_hit,omitempty"`
-	CoolSkips int     `json:"cooldown_skips,omitempty"`
+	Gate      string  `json:"gate,omitempty"` // 被闸门挡下没发出去时: locked | sem_timeout | queue_timeout | canceled
+	LockSkips int     `json:"lock_skips,omitempty"`
 	TtfbMs    int64   `json:"ttfb_ms,omitempty"` // 首字节时延 (被动采样)
 	Tps       float64 `json:"tps,omitempty"`     // 解码吞吐 tokens/s (流式才有)
 }
 
-// ---------- 预算闸门 (D12): 定时从日志重建窗口累计 ----------
-
-// BudgetCfg 预算闸门 (D12): 定时从请求日志重建各窗口累计, 满额拒新请求。
-// Windows: "3h" -> 限额, ...; Unit 是 token 折算平台额度的系数 (默认 1);
-// Units 按真实模型 id 覆盖 Unit (平台各模型扣额倍率不同, 系数用 -usage 标定);
-// CooldownMs 是撞 429 后该上游 (provider+key) 的冷却时长 (默认 5 分钟);
-// RefreshSec 是定时扫日志的间隔秒数 (默认 60)。
-type BudgetCfg struct {
-	Windows    map[string]float64 `json:"windows"`
-	Unit       float64            `json:"unit,omitempty"`
-	Units      map[string]float64 `json:"units,omitempty"`
-	CooldownMs int                `json:"cooldown_ms,omitempty"`
-	RefreshSec int                `json:"refresh_sec,omitempty"`
-}
-
-// ---------- 主动探测 + 被动时延采样 (D14: 只观测, 不接入路由) ----------
-
-// ProbeCfg 探测配置。默认关闭; 开启后只做两件事: ①对 fallback 顺序里的下一个候选
-// 发小请求 (scope=next), ②把真实请求的首字节时延/吞吐记成被动样本。
-// 结果只进报告 (GET /v1/probe) 与状态文件 (var/probe.json) —— 不改候选顺序,
-// 不动冷却/熔断/预算, 也不打断已建立的流 (切换只可能发生在下次请求开始时)。
+// 不动失败计数与锁, 也不打断已建立的流 (切换只可能发生在下次请求开始时)。
 type ProbeCfg struct {
 	Enabled      bool     `json:"enabled,omitempty"`
 	Scope        string   `json:"scope,omitempty"`          // next (默认) | all
@@ -495,7 +827,7 @@ type probeStat struct {
 	UpdatedAt  string        `json:"updated_at"`
 }
 
-// probeState 状态文件 (与 budget-units.json 同目录, 重启不丢)。
+// probeState 状态文件 (与 gate-state.json 同目录, 重启不丢)。
 type probeState struct {
 	Stats     map[string]probeStat `json:"stats"`
 	UpdatedAt string               `json:"updated_at"`
@@ -509,22 +841,18 @@ type relayOut struct {
 	DecodeMs int64
 }
 
-// budgetState 持有上次扫描重建的窗口累计: upstreamID -> 窗口key -> 已用(×unit)。
 type App struct {
 	mu        sync.RWMutex
 	cfg       *Config
 	upstreams map[string]*UpstreamCfg
 	aliases   map[string][]aliasTarget
-	limiters  map[string]*Limiter
-	breakers  map[string]*breaker
+	// v2 调度: 每个上游一份队列与自适应并发上限, 门控参数对所有上游共用。
+	cands     map[string]*cand
+	gate      GateCfg
 	transport *http.Transport
 	streamIdl time.Duration
 
-	budgetMu   sync.Mutex
-	budgetRaw  map[string]map[string]float64 // 上游 -> 窗口 -> 原始 token 累计
-	budgetCoef map[string]float64            // 上游 -> 撞墙反推的折算系数
-	coolUntil  map[string]time.Time          // 上游 -> 冷却截止时间
-	statePath  string                        // 系数/冷却状态文件 (var/budget-units.json)
+	gatePath string // v2 供应商锁状态文件 (var/gate-state.json)
 
 	logMu  sync.Mutex
 	logW   *os.File
@@ -534,310 +862,6 @@ type App struct {
 	probeMu   sync.Mutex
 	probe     map[string]*probeStat // "上游|模型" -> 滚动统计 (主动探测 + 被动观测)
 	probePath string                // 指标状态文件 (var/probe.json)
-}
-
-// parseBudgetDur 解析 "3h"/"12h"/"90m"/"7d" 这类窗口时长。
-func parseBudgetDur(s string) (time.Duration, bool) {
-	i := 0
-	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-		i++
-	}
-	if i == 0 {
-		return 0, false
-	}
-	n, err := strconv.Atoi(s[:i])
-	if err != nil || n <= 0 {
-		return 0, false
-	}
-	switch s[i:] {
-	case "s":
-		return time.Duration(n) * time.Second, true
-	case "m", "min":
-		return time.Duration(n) * time.Minute, true
-	case "h":
-		return time.Duration(n) * time.Hour, true
-	case "d":
-		return time.Duration(n) * 24 * time.Hour, true
-	}
-	return 0, false
-}
-
-// refreshBudget 扫一遍请求日志, 为每个配了预算的上游重建各窗口原始 token 累计 (D12)。
-// 只统计有 usage 的记录; 冷却已过期的条目顺手清掉。
-func (a *App) refreshBudget() {
-	a.mu.RLock()
-	targets := map[string]*BudgetCfg{}
-	for _, u := range a.upstreams {
-		if u.Budget != nil && len(u.Budget.Windows) > 0 {
-			targets[u.ID] = u.Budget
-		}
-	}
-	logPath := a.cfg.LogPath
-	a.mu.RUnlock()
-	if len(targets) == 0 {
-		return
-	}
-
-	now := time.Now()
-	raw := make(map[string]map[string]float64, len(targets))
-	maxWindow := time.Duration(0)
-	for id, b := range targets {
-		m := make(map[string]float64, len(b.Windows))
-		for w := range b.Windows {
-			m[w] = 0
-			if d, ok := parseBudgetDur(w); ok && d > maxWindow {
-				maxWindow = d
-			}
-		}
-		raw[id] = m
-	}
-
-	// 跨天时窗口会跨越归档边界, 因此当前日志与最近归档一起读。
-	for _, fp := range logFilesForScan(logPath, maxWindow) {
-		f, err := os.Open(fp)
-		if err != nil {
-			continue
-		}
-		sc := bufio.NewScanner(f)
-		for sc.Scan() {
-			var rec logRec
-			if err := json.Unmarshal(sc.Bytes(), &rec); err != nil || rec.Usage == nil {
-				continue
-			}
-			if _, ok := targets[rec.Upstream]; !ok {
-				continue
-			}
-			t, err := time.Parse(time.RFC3339Nano, rec.Ts)
-			if err != nil || t.After(now) {
-				continue
-			}
-			for w := range raw[rec.Upstream] {
-				d, ok := parseBudgetDur(w)
-				if !ok || now.Sub(t) > d {
-					continue
-				}
-				raw[rec.Upstream][w] += float64(rec.Usage.Total)
-			}
-		}
-		f.Close()
-	}
-
-	a.budgetMu.Lock()
-	a.budgetRaw = raw
-	for id, until := range a.coolUntil {
-		if now.After(until) {
-			delete(a.coolUntil, id)
-		}
-	}
-	a.budgetMu.Unlock()
-}
-
-// startBudgetLoop 按最短刷新间隔启动定时扫描; 没有任何上游配预算则不开。
-func (a *App) startBudgetLoop() {
-	refresh := 60
-	hasBudget := false
-	a.mu.RLock()
-	for _, u := range a.upstreams {
-		if u.Budget != nil && len(u.Budget.Windows) > 0 {
-			hasBudget = true
-			if u.Budget.RefreshSec > 0 && u.Budget.RefreshSec < refresh {
-				refresh = u.Budget.RefreshSec
-			}
-		}
-	}
-	a.mu.RUnlock()
-	if !hasBudget {
-		return
-	}
-	a.refreshBudget()
-	t := time.NewTicker(time.Duration(refresh) * time.Second)
-	go func() {
-		for range t.C {
-			a.refreshBudget()
-		}
-	}()
-}
-
-const defaultBudgetCooldown = 5 * time.Minute
-
-// quotaHints / rateHints 用来区分「额度撞墙」与「限流」两类 429: 只有前者才反推系数
-// (限流时的窗口累计与额度无关, 拿它标定会算出荒唐的值); 冷却两类都进。
-var (
-	quotaHints = []string{"budget", "quota", "credit", "balance", "insufficient", "额度", "余额"}
-	rateHints  = []string{"rate limit", "ratelimit", "rate_limit", "rpm", "tpm", "too many requests", "限流", "频率"}
-)
-
-func looksLikeQuotaError(body []byte) bool {
-	text := strings.ToLower(string(body))
-	for _, hint := range rateHints {
-		if strings.Contains(text, hint) {
-			return false
-		}
-	}
-	for _, hint := range quotaHints {
-		if strings.Contains(text, hint) {
-			return true
-		}
-	}
-	return false
-}
-
-// cooling 报告某上游是否在冷却, 以及剩余时长。
-func (a *App) cooling(upID string) (bool, time.Duration) {
-	a.budgetMu.Lock()
-	until, ok := a.coolUntil[upID]
-	a.budgetMu.Unlock()
-	if !ok {
-		return false, 0
-	}
-	left := time.Until(until)
-	if left <= 0 {
-		return false, 0
-	}
-	return true, left
-}
-
-// markLimitHit 处理上游的 429 (D13): 该上游 (provider+key) 进冷却;
-// body 像额度类错误时, 用撞墙时刻的窗口累计反推折算系数 (取各窗口最紧的下界:
-// 撞满的窗口给出 coefficient >= max/已用, 取最大值以免低估)。
-func (a *App) markLimitHit(u *UpstreamCfg, model string, body []byte) {
-	if u.Budget == nil {
-		return
-	}
-	cooldown := time.Duration(u.Budget.CooldownMs) * time.Millisecond
-	if cooldown <= 0 {
-		cooldown = defaultBudgetCooldown
-	}
-	quotaShaped := looksLikeQuotaError(body)
-	a.budgetMu.Lock()
-	a.coolUntil[u.ID] = time.Now().Add(cooldown)
-	coef := 0.0
-	if quotaShaped {
-		for w, max := range u.Budget.Windows {
-			used := a.budgetRaw[u.ID][w]
-			if used > 0 && max > 0 {
-				if c := max / used; c > coef {
-					coef = c
-				}
-			}
-		}
-		if coef > 0 {
-			a.budgetCoef[u.ID] = coef
-		}
-	}
-	rawCopy := map[string]float64{}
-	for w, v := range a.budgetRaw[u.ID] {
-		rawCopy[w] = v
-	}
-	a.budgetMu.Unlock()
-
-	switch {
-	case coef > 0:
-		log.Printf("budget limit hit on %s (model %s): cooldown %s, calibrated unit %.9g (raw tokens %v)",
-			u.ID, model, cooldown, coef, rawCopy)
-	case quotaShaped:
-		log.Printf("budget limit hit on %s (model %s): cooldown %s (no window data, unit kept)",
-			u.ID, model, cooldown)
-	default:
-		log.Printf("limit hit on %s (model %s): cooldown %s (not quota-shaped, unit kept)",
-			u.ID, model, cooldown)
-	}
-	a.saveBudgetState()
-}
-
-// ---------- 系数/冷却状态文件 ----------
-
-type budgetState struct {
-	Units     map[string]float64 `json:"units,omitempty"`
-	Cooldown  map[string]string  `json:"cooldown_until,omitempty"`
-	UpdatedAt string             `json:"updated_at,omitempty"`
-}
-
-// loadBudgetState 读回上次标定的系数与冷却 (进程重启不丢); 过期的冷却直接丢弃。
-func (a *App) loadBudgetState() {
-	path := a.statePath
-	if path == "" {
-		return
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	var st budgetState
-	if err := json.Unmarshal(b, &st); err != nil {
-		log.Printf("budget state %s unreadable: %v", path, err)
-		return
-	}
-	now := time.Now()
-	a.budgetMu.Lock()
-	for id, v := range st.Units {
-		if v > 0 {
-			a.budgetCoef[id] = v
-		}
-	}
-	for id, ts := range st.Cooldown {
-		if until, err := time.Parse(time.RFC3339Nano, ts); err == nil && until.After(now) {
-			a.coolUntil[id] = until
-		}
-	}
-	a.budgetMu.Unlock()
-}
-
-// saveBudgetState 原子写状态文件 (临时文件 + rename)。
-func (a *App) saveBudgetState() {
-	path := a.statePath
-	if path == "" {
-		return
-	}
-	a.budgetMu.Lock()
-	st := budgetState{
-		Units:     map[string]float64{},
-		Cooldown:  map[string]string{},
-		UpdatedAt: time.Now().Format(time.RFC3339Nano),
-	}
-	for id, v := range a.budgetCoef {
-		st.Units[id] = v
-	}
-	for id, until := range a.coolUntil {
-		if until.After(time.Now()) {
-			st.Cooldown[id] = until.Format(time.RFC3339Nano)
-		}
-	}
-	a.budgetMu.Unlock()
-
-	b, err := json.MarshalIndent(st, "", "  ")
-	if err != nil {
-		return
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
-		log.Printf("budget state write failed: %v", err)
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		log.Printf("budget state rename failed: %v", err)
-	}
-}
-
-// coefficientOf 取某模型的折算系数: 配置的 units 优先, 其次配置的 unit,
-// 再次撞墙标定值, 最后 1。
-func (a *App) coefficientOf(u *UpstreamCfg, model string) float64 {
-	if u.Budget == nil {
-		return 1
-	}
-	if v, ok := u.Budget.Units[model]; ok && v > 0 {
-		return v
-	}
-	if u.Budget.Unit > 0 {
-		return u.Budget.Unit
-	}
-	a.budgetMu.Lock()
-	c := a.budgetCoef[u.ID]
-	a.budgetMu.Unlock()
-	if c > 0 {
-		return c
-	}
-	return 1
 }
 
 type aliasTarget struct {
@@ -879,7 +903,7 @@ func msCeil(d time.Duration) int64 {
 	return int64((d + time.Millisecond - 1) / time.Millisecond)
 }
 
-// probePathFor 指标状态文件与 budget-units.json 同目录 (var/)。
+// probePathFor 指标状态文件与 gate-state.json 同目录 (var/)。
 func probePathFor(c *Config) string {
 	if c == nil || c.LogPath == "" {
 		return ""
@@ -963,7 +987,7 @@ func (a *App) loadProbeState() {
 	log.Printf("probe: loaded %d candidate stats from %s", len(st.Stats), a.probePath)
 }
 
-// saveProbeState 原子写 (临时文件 + rename), 与预算状态同一套路。
+// saveProbeState 原子写 (临时文件 + rename), 与锁状态同一套路。
 func (a *App) saveProbeState() {
 	path := a.probePath
 	if path == "" {
@@ -1063,7 +1087,7 @@ func (a *App) probeTargets(c *ProbeCfg) []probeTarget {
 }
 
 // probeCandidate 发一次探测: 走该上游的限速闸 (不与用户流量抢队), 流式读首字节
-// 与流末 usage, 得到 ttfb_ms 与 tps; 全程不碰冷却/熔断/预算标记。
+// 与流末 usage, 得到 ttfb_ms 与 tps; 全程不碰失败计数与锁。
 func (a *App) probeCandidate(alias string, up *UpstreamCfg, model string, c *ProbeCfg) {
 	sample := probeSample{Ts: time.Now().Format(time.RFC3339Nano)}
 	payload := map[string]any{
@@ -1077,23 +1101,25 @@ func (a *App) probeCandidate(alias string, up *UpstreamCfg, model string, c *Pro
 	if err != nil {
 		return
 	}
-	lim := a.limiters[up.ID]
-	if lim != nil {
-		// 探测自己排队, 最多等 5s; 排不上就跳过这一轮, 绝不占用用户请求的排队预算。
-		gateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		okSem := lim.acquireSem(gateCtx)
-		okTok := okSem && lim.takeToken(gateCtx)
-		cancel()
-		if !okTok {
-			if okSem {
-				lim.releaseSem()
-			}
-			sample.Err = "limiter busy"
-			a.recordProbeSample(up.ID, model, sample, c.Window)
-			return
-		}
-		defer lim.releaseSem()
+	a.mu.RLock()
+	cd, gate := a.cands[up.ID], a.gate
+	a.mu.RUnlock()
+	if cd == nil {
+		sample.Err = "no scheduler"
+		a.recordProbeSample(up.ID, model, sample, c.Window)
+		return
 	}
+	// 探测自己排队, 最多等 5s; 排不上就跳过这一轮, 不占用户请求的信号量与排队预算。
+	gateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	kind, why, _, _, ok := cd.acquire(gateCtx, gate)
+	cancel()
+	if !ok {
+		sample.Err = "gate busy: " + why
+		a.recordProbeSample(up.ID, model, sample, c.Window)
+		return
+	}
+	probeOK := false
+	defer func() { cd.finish(kind, probeOK) }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.TimeoutMs)*time.Millisecond)
 	defer cancel()
@@ -1150,6 +1176,7 @@ func (a *App) probeCandidate(alias string, up *UpstreamCfg, model string, c *Pro
 		usage = u
 	}
 	sample.OK = true
+	probeOK = true
 	sample.TtfbMs = msCeil(firstAt.Sub(start))
 	if usage != nil {
 		sample.Tokens = usage.Completion
@@ -1158,7 +1185,7 @@ func (a *App) probeCandidate(alias string, up *UpstreamCfg, model string, c *Pro
 		}
 	}
 	a.recordProbeSample(up.ID, model, sample, c.Window)
-	// 探测流量如实写请求日志 (source=probe): 它真的消耗配额, 预算窗口照实计入。
+	// 探测流量如实写请求日志 (source=probe): 它真的消耗配额, 用量交给外部程序分析。
 	a.logReq(logRec{
 		Ts: time.Now().Format(time.RFC3339Nano), Logical: alias, Upstream: up.ID, Model: model,
 		Path: "/v1/probe", Stream: true, Status: http.StatusOK, Usage: usage,
@@ -1299,8 +1326,6 @@ func runProbeReport(cfgPath string) {
 	a := &App{
 		upstreams: map[string]*UpstreamCfg{},
 		aliases:   map[string][]aliasTarget{},
-		limiters:  map[string]*Limiter{},
-		breakers:  map[string]*breaker{},
 		probe:     map[string]*probeStat{},
 	}
 	a.applyConfig(cfg)
@@ -1335,26 +1360,21 @@ func runProbeReport(cfgPath string) {
 
 func newApp(c *Config) (*App, error) {
 	a := &App{
-		upstreams:  map[string]*UpstreamCfg{},
-		aliases:    map[string][]aliasTarget{},
-		limiters:   map[string]*Limiter{},
-		breakers:   map[string]*breaker{},
-		budgetRaw:  map[string]map[string]float64{},
-		budgetCoef: map[string]float64{},
-		coolUntil:  map[string]time.Time{},
-		probe:      map[string]*probeStat{},
+		upstreams: map[string]*UpstreamCfg{},
+		aliases:   map[string][]aliasTarget{},
+		cands:     map[string]*cand{},
+		probe:     map[string]*probeStat{},
 	}
 	a.applyConfig(c)
 	if err := a.openLog(); err != nil {
 		return nil, err
 	}
-	// 系数与冷却状态放在日志同目录 (var/), 不进仓库。
+	// 锁状态放在日志同目录 (var/), 不进仓库。
 	if c.LogPath != "" {
-		a.statePath = filepath.Join(filepath.Dir(c.LogPath), "budget-units.json")
+		a.gatePath = filepath.Join(filepath.Dir(c.LogPath), "gate-state.json")
 	}
-	a.loadBudgetState()
-	a.startBudgetLoop()
-	// 探测状态与预算状态同目录; 未配置 probe 时 probePath 为空, 一切探测都停用。
+	a.loadGateState()
+	// 探测状态与锁状态同目录; 未配置 probe 时 probePath 为空, 一切探测都停用。
 	a.probePath = probePathFor(c)
 	a.loadProbeState()
 	a.startProbeLoop()
@@ -1367,26 +1387,21 @@ func (a *App) applyConfig(c *Config) {
 	defer a.mu.Unlock()
 	a.cfg = c
 	a.streamIdl = time.Duration(c.Timeouts.StreamIdleMs) * time.Millisecond
+	// 门控参数是全局的, 热加载直接生效; 队列与自适应上限按上游 id 保留 (爬了半天的
+	// 上限不该被 hup 清掉, 排队中的请求也不该被丢)。
+	a.gate = normGate(c.Gate)
+	// 只做报告的入口 (如 -probe) 会自己拼一个 App, 这里的表可能还没建。
+	if a.cands == nil {
+		a.cands = map[string]*cand{}
+	}
 	upstreams := map[string]*UpstreamCfg{}
 	for i := range c.Upstreams {
 		u := &c.Upstreams[i]
 		upstreams[u.ID] = u
-		// 限速器与熔断器按上游 id 保留不重建: 状态有意跨热加载延续 (排队中的请求、
-		// 令牌水位、熔断计数都不该被 hup 清掉)。代价是参数改了不会自动生效, 所以
-		// 这里显式告警 —— 否则 hup 之后是静默沿用旧值。
-		if l, ok := a.limiters[u.ID]; !ok {
-			a.limiters[u.ID] = newLimiter(u.Limits)
-		} else if want := normLimits(u.Limits); want != l.cfg {
-			log.Printf("upstream %s: limits 已改 %+v -> %+v, 限速器保留旧状态, 需重启才生效",
-				u.ID, l.cfg, want)
-		}
-		if b, ok := a.breakers[u.ID]; !ok {
-			a.breakers[u.ID] = newBreaker(u.BreakerFail,
-				time.Duration(u.BreakerCooldMs)*time.Millisecond)
-		} else if ft, cd := normBreakerDur(u.BreakerFail,
-			time.Duration(u.BreakerCooldMs)*time.Millisecond); ft != b.failTh || cd != b.cooldown {
-			log.Printf("upstream %s: breaker 参数已改 -> fail=%d cooldown=%s, 需重启才生效",
-				u.ID, ft, cd)
+		// 调度状态按上游 id 保留不重建: 队列里排着的请求、爬到的并发上限、退避与锁
+		// 都该跨热加载延续 (上限有意不落盘, 但 hup 不该把它清掉)。
+		if _, ok := a.cands[u.ID]; !ok {
+			a.cands[u.ID] = newCand(u.ID)
 		}
 	}
 	a.upstreams = upstreams
@@ -1634,29 +1649,29 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		stream = s
 	}
 
-	// 集中 fallback 的候选表: 上游 + 真实模型 + 该候选自己的限速器。一把 RLock 拿齐,
-	// 循环里不再读 a.upstreams / a.limiters (热加载会改这两张表)。
+	// 集中 fallback 的候选表: 上游 + 真实模型 + 该候选自己的 v2 调度状态。一把 RLock 拿齐,
+	// 循环里不再读 a.upstreams / a.cands (热加载会改这两张表)。
 	type attempt struct {
 		up  *UpstreamCfg
 		mod string
-		lim *Limiter
+		cd  *cand
 	}
 	a.mu.RLock()
 	alias, aliasOK := a.aliases[logical]
+	gate := a.gate
 	var chosen *UpstreamCfg
 	realModel := ""
 	attempts := make([]attempt, 0, len(alias))
-	for _, cand := range alias {
-		u, ok := a.upstreams[cand.Upstream]
+	for _, tgt := range alias {
+		u, ok := a.upstreams[tgt.Upstream]
 		if !ok {
 			continue
 		}
 		if chosen == nil {
-			chosen, realModel = u, cand.Model
+			chosen, realModel = u, tgt.Model
 		}
-		attempts = append(attempts, attempt{u, cand.Model, a.limiters[u.ID]})
+		attempts = append(attempts, attempt{u, tgt.Model, a.cands[u.ID]})
 	}
-	queueWait := time.Duration(a.cfg.Timeouts.QueueWaitMs) * time.Millisecond
 	a.mu.RUnlock()
 
 	if !aliasOK {
@@ -1669,24 +1684,20 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 预算不再提前拦截 (D13): 判定改为「上游 429 = 限额信号」, 见尝试循环里的
-	// markLimitHit (该上游进冷却 + 跨候选切换 + 反推折算系数)。
-	//
-	// 限速闸 (F3/F4): 信号量 + 令牌桶由**当前候选**承担, 在尝试循环里逐个过 ——
-	// fallback 换到另一个上游/模型, 就要重新排那个候选自己的队, 不能拿着前一个候选
-	// 的槽位直接发。整条请求共用一份 queue_wait 预算, 所以换候选不会把等待上限叠成
-	// N 倍 (总时长与单候选时相同, 仍在客户端 5 分钟静默线以内, §2 第 3 条)。
-	// 关键: 换候选前必须归还上一个候选的槽位, 否则会同时占着两个上游互相等 (死锁)。
-	gateCtx, cancel := context.WithTimeout(r.Context(), queueWait)
-	defer cancel()
+	// v2 调度 (设计 §5.5): 闸门由**当前候选**承担 —— 换候选就重新取信号量、重新排队,
+	// 每换一个候选重新给 sem_wait_ms + queue_wait_ms (没有整请求总预算)。关键: 换候选前
+	// 必须归还上一个候选的槽位, 否则会同时占着两个上游互相等 (死锁)。
 	var (
-		queueMs    int64    // 各候选排队时长之和
-		gateReject string   // 非空表示被闸门拒了: concurrency | rate
-		held       *Limiter // 已拿到槽位、正在服务的那个候选
+		semMs      int64         // 各候选等信号量时长之和
+		queueMs    int64         // 各候选排队时长之和
+		gateReject string        // 非空 = 被闸门挡下没发出去: locked | sem_timeout | queue_timeout | canceled
+		gateLeft   time.Duration // 被挡下时最长的锁剩余时间 (Retry-After 用)
+		heldCand   *cand         // 已拿到资格、正在服务的那个候选
+		heldKind   slotKind
 	)
 	defer func() {
-		if held != nil {
-			held.releaseSem()
+		if heldCand != nil {
+			heldCand.finish(heldKind, false) // 响应发完才归还槽位 (ok 只对试探有意义)
 		}
 	}()
 
@@ -1702,24 +1713,25 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		servedMod       string
 		attemptStart    time.Time // 被动时延采样: 该候选开始等待的时刻
 	)
-	coolSkips := 0
-	budgetHit := false
+	lockedSkips := 0
 	// 集中 fallback: 按候选顺序尝试, 只在还没给客户端写任何字节前 (传输失败 /
 	// 上游 429 或 5xx) 换下一个候选; 全部失败保留最近一次错误原样透传。
 	for _, at := range attempts {
-		if cool, left := a.cooling(at.up.ID); cool {
-			// 该上游 (provider+key) 撞过限额, 冷却期内不真发, 直接换下一个候选。
-			lastErr = fmt.Errorf("upstream %s cooling for %s", at.up.ID, left.Round(time.Second))
+		if at.cd == nil {
+			lastErr = fmt.Errorf("upstream %s has no scheduler", at.up.ID)
 			lastUpID, lastM = at.up.ID, at.mod
-			coolSkips++
 			failed++
 			continue
 		}
-		br := a.breakers[at.up.ID]
-		if !br.allow() {
-			// 熔断打开: 不真发, 直接视作该候选失败换下一个。
-			lastErr = fmt.Errorf("upstream %s circuit open", at.up.ID)
+		if locked, left, reason := at.cd.locked(); locked {
+			// 供应商锁内不真发 (额度 10min / 熔断 5min), 直接换下一个候选。
+			lastErr = fmt.Errorf("upstream %s locked for %s (%s)",
+				at.up.ID, left.Round(time.Second), reason)
 			lastUpID, lastM = at.up.ID, at.mod
+			if left > gateLeft {
+				gateLeft = left
+			}
+			lockedSkips++
 			failed++
 			continue
 		}
@@ -1731,95 +1743,117 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			failed++
 			continue
 		}
-		outReq, err := http.NewRequestWithContext(r.Context(), r.Method,
-			at.up.BaseURL+upPath, bytes.NewReader(body))
-		if err != nil {
-			lastErr = err
-			lastUpID, lastM = at.up.ID, at.mod
-			failed++
-			continue
-		}
-		outReq.ContentLength = int64(len(body))
-		prepareOutboundHeaders(outReq.Header, r.Header, at.up)
-
-		// 这个候选自己的闸门: 排队等它的槽位与令牌, 共用整条请求的 queue_wait 预算。
-		// 放在请求体准备之后, 这样构造失败不白占配额。
-		lim := at.lim
-		if lim == nil {
-			lastErr = fmt.Errorf("upstream %s has no limiter", at.up.ID)
-			lastUpID, lastM = at.up.ID, at.mod
-			failed++
-			continue
-		}
-		atGateStart := time.Now()
-		okSem := lim.acquireSem(gateCtx)
-		okTok := okSem && lim.takeToken(gateCtx)
-		queueMs += time.Since(atGateStart).Milliseconds() // 成功或失败都记排了多久
-		if !okSem {
-			gateReject = "concurrency"
-			lastUpID, lastM = at.up.ID, at.mod
-			failed++
+		// 候选内的重试: e2 的「退避后回到出队」就是重新排队 —— 退避 (10/20/30s) 超过
+		// 排队上限 (10s) 时自然变成 queue_timeout, 于是换下一个候选 (设计 §5.5.1/§5.5.2)。
+		for {
+			// 每轮都重建出站请求: 上一轮的 body 已经被读过, 复用同一个 Request 会带空体。
+			outReq, err := http.NewRequestWithContext(r.Context(), r.Method,
+				at.up.BaseURL+upPath, bytes.NewReader(body))
+			if err != nil {
+				lastErr = err
+				lastUpID, lastM = at.up.ID, at.mod
+				failed++
+				break
+			}
+			outReq.ContentLength = int64(len(body))
+			prepareOutboundHeaders(outReq.Header, r.Header, at.up)
+			// 取资格放在请求体准备之后, 构造失败就不白占槽位。
+			kind, why, sem, qms, ok := at.cd.acquire(r.Context(), gate)
+			semMs += sem
+			queueMs += qms
+			if !ok {
+				gateReject = why
+				lastUpID, lastM = at.up.ID, at.mod
+				failed++
+				if why == "locked" {
+					lockedSkips++
+					if _, left, _ := at.cd.locked(); left > gateLeft {
+						gateLeft = left
+					}
+				}
+				break // 换下一个候选
+			}
+			attemptStart = time.Now()
+			resp, err = a.transport.RoundTrip(outReq)
+			if err != nil {
+				// 传输层失败: 没有状态码与 body 可判, 按通用兜底走 (设计 §5.5.2)。
+				at.cd.finish(kind, false)
+				if at.cd.recordOther(gate) {
+					a.lockProvider(at.cd, "breaker", gate.breakerLock())
+					at.cd.recordSuccess()
+				}
+				lastErr = err
+				lastUpID, lastM = at.up.ID, at.mod
+				failed++
+				continue
+			}
+			if shouldFallback(resp.StatusCode) {
+				b, rerr := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				at.cd.finish(kind, false)
+				moveOn := true
+				switch at.up.classify(resp.StatusCode, b) {
+				case classQuota:
+					// 额度限制: 锁整个候选 10min, 排队的请求随之迁移 (设计 §5.5.2)。
+					a.lockProvider(at.cd, "quota", gate.quotaLock())
+				case classConcurrency:
+					// 并发限制: 锁掉超发试探 1h, 不等那 20s, 直接换下一个候选。
+					at.cd.lockConcurrency("concurrency", gate.concurrencyLock())
+				default:
+					// 通用兜底: 连续计数 +1 并按序列退避; 到阈值熔断 (锁 5min)。
+					moveOn = false
+					if at.cd.recordOther(gate) {
+						a.lockProvider(at.cd, "breaker", gate.breakerLock())
+						at.cd.recordSuccess()
+						moveOn = true
+					}
+				}
+				lastErr = fmt.Errorf("upstream %s returned %d", at.up.ID, resp.StatusCode)
+				lastStatus, lastHdr, lastBody = resp.StatusCode, resp.Header.Clone(), b
+				lastUpID, lastM = at.up.ID, at.mod
+				failed++
+				if rerr != nil {
+					lastErr = rerr
+				}
+				if !moveOn {
+					continue // e2: 退避后回到出队, 重试同一个候选
+				}
+				break
+			}
+			at.cd.recordSuccess()
+			if kind == slotProbe {
+				at.cd.finish(slotProbe, true) // 试探成功: 上限 +1 (不设天花板)
+			} else {
+				heldCand, heldKind = at.cd, kind // 响应发完才归还槽位
+			}
+			servedUp, servedMod = at.up, at.mod
 			break
 		}
-		if !okTok {
-			lim.releaseSem()
-			gateReject = "rate"
-			lastUpID, lastM = at.up.ID, at.mod
-			failed++
+		if servedUp != nil {
 			break
 		}
-
-		attemptStart = time.Now()
-		resp, err = a.transport.RoundTrip(outReq)
-		if err != nil {
-			lim.releaseSem()
-			br.recordFail()
-			lastErr = err
-			lastUpID, lastM = at.up.ID, at.mod
-			failed++
-			continue
-		}
-		if shouldFallback(resp.StatusCode) {
-			lim.releaseSem()
-			br.recordFail()
-			b, rerr := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusTooManyRequests {
-				// 上游 429: 当作限额信号处理 (冷却 + 可能的系数标定), 再切下一个候选。
-				budgetHit = true
-				a.markLimitHit(at.up, at.mod, b)
-			}
-			lastErr = fmt.Errorf("upstream %s returned %d", at.up.ID, resp.StatusCode)
-			lastStatus, lastHdr, lastBody = resp.StatusCode, resp.Header.Clone(), b
-			lastUpID, lastM = at.up.ID, at.mod
-			failed++
-			if rerr != nil {
-				lastErr = rerr
-			}
-			continue
-		}
-		br.recordSuccess()
-		servedUp, servedMod = at.up, at.mod
-		held = lim
-		break
 	}
 	queued := queueMs >= 5
 
-	if servedUp == nil && gateReject != "" {
-		// 闸门排队超预算: 整条请求的等待额度已用尽, 不再试后面的候选 (gateCtx 已到期,
-		// 再试也只是立刻失败)。这就是 F3 的排队上限。
-		w.Header().Set("Retry-After", strconv.Itoa(max(1, int(queueWait/time.Second))))
+	if servedUp == nil && gateReject != "" && lastStatus == 0 {
+		// 候选链试完仍没拿到发送资格 (被锁 / 等不到信号量 / 排队超时): 合成 429 说明原因;
+		// 请求根本没发出去, 所以不能透传上游的错误。
+		retry := gate.queueWait()
+		if gateLeft > 0 {
+			retry = gateLeft
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(retry.Seconds())))))
 		writeError(w, http.StatusTooManyRequests, "rate_limit_error",
-			"upstream busy: queue wait exceeded "+queueWait.String())
+			"upstream busy ("+gateReject+"): no candidate for "+logical+" gave a send slot")
 		a.logReq(logRec{
 			Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
 			Upstream: lastUpID, Model: lastM, Path: r.URL.Path, Stream: stream,
 			Status: http.StatusTooManyRequests, Missing: true,
-			Queued: queued, QueueMs: queueMs,
+			Queued: queued, QueueMs: queueMs, SemMs: semMs,
 			Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"),
 			Source: r.Header.Get("X-Tollgate-Source"),
 			Err:    "rate_limited", Gate: gateReject, Fallbacks: failed,
-			BudgetHit: budgetHit, CoolSkips: coolSkips,
+			LockSkips: lockedSkips,
 		})
 		return
 	}
@@ -1841,32 +1875,27 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			a.logReq(logRec{
 				Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
 				Upstream: lastUpID, Model: lastM, Path: r.URL.Path, Stream: stream,
-				Status: lastStatus, Missing: true, Queued: queued, QueueMs: queueMs,
+				Status: lastStatus, Missing: true, Queued: queued, QueueMs: queueMs, SemMs: semMs,
 				Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"),
 				Source: r.Header.Get("X-Tollgate-Source"),
-				Err:    lastErr.Error(), Fallbacks: failed, BudgetHit: budgetHit, CoolSkips: coolSkips,
+				Err:    lastErr.Error(), Fallbacks: failed, LockSkips: lockedSkips,
 			})
 			return
 		}
-		// 候选全在限额冷却里: 回 429 + Retry-After 让 agent 退避 (不是我们的闸门,
-		// 而是上游限额的传导), 比 502 更贴近真实原因。
-		if coolSkips > 0 && lastStatus == 0 {
-			left := time.Duration(0)
-			for _, at := range attempts {
-				if cool, l := a.cooling(at.up.ID); cool && l > left {
-					left = l
-				}
-			}
-			w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(left.Seconds())))))
-			writeError(w, http.StatusTooManyRequests, "upstream_cooling",
-				"all candidates for "+logical+" are cooling down after upstream limit hits")
+		// 候选全在供应商锁里: 回 429 + Retry-After 让 agent 退避 (不是我们的闸门,
+		// 而是上游限制的传导), 比 502 更贴近真实原因。
+		if lockedSkips > 0 && lastStatus == 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(gateLeft.Seconds())))))
+			writeError(w, http.StatusTooManyRequests, "upstream_locked",
+				"all candidates for "+logical+" are locked after upstream limits")
 			a.logReq(logRec{
 				Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
 				Upstream: lastUpID, Model: lastM, Path: r.URL.Path, Stream: stream,
-				Status: http.StatusTooManyRequests, Missing: true, Queued: queued, QueueMs: queueMs,
+				Status: http.StatusTooManyRequests, Missing: true,
+				Queued: queued, QueueMs: queueMs, SemMs: semMs,
 				Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"),
 				Source: r.Header.Get("X-Tollgate-Source"),
-				Err:    "upstream_cooling", Fallbacks: failed, BudgetHit: budgetHit, CoolSkips: coolSkips,
+				Err:    "upstream_locked", Fallbacks: failed, LockSkips: lockedSkips,
 			})
 			return
 		}
@@ -1878,10 +1907,10 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.logReq(logRec{
 			Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
 			Upstream: lastUpID, Model: lastM, Path: r.URL.Path, Stream: stream,
-			Status: http.StatusBadGateway, Missing: true, Queued: queued, QueueMs: queueMs,
+			Status: http.StatusBadGateway, Missing: true, Queued: queued, QueueMs: queueMs, SemMs: semMs,
 			Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"),
 			Source: r.Header.Get("X-Tollgate-Source"),
-			Err:    msg, Fallbacks: failed, BudgetHit: budgetHit, CoolSkips: coolSkips,
+			Err:    msg, Fallbacks: failed, LockSkips: lockedSkips,
 		})
 		return
 	}
@@ -1955,8 +1984,9 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
 		Upstream: chosen.ID, Model: realModel, Path: r.URL.Path, Stream: stream,
 		Status: status, Usage: usage, Missing: missing, Queued: queued, QueueMs: queueMs,
+		SemMs:  semMs,
 		Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"), Source: r.Header.Get("X-Tollgate-Source"),
-		Fallbacks: failed, BudgetHit: budgetHit, CoolSkips: coolSkips,
+		Fallbacks: failed, LockSkips: lockedSkips,
 		TtfbMs: ttfbMs, Tps: tps,
 	})
 }
@@ -2284,12 +2314,37 @@ type usageRow struct {
 	Prompt, Completion, Cached, Total int
 }
 
-// runUsage 按 上游+真实模型 列出各窗口的 token 用量, 用于标定预算折算系数:
-// 平台已用额度 / 该模型窗口内 total = 该模型的系数 (填进 budget.units)。
+// parseDur 解析 "3h" / "12h" / "90m" / "7d" 这类窗口时长 (-usage 的窗口参数用)。
+func parseDur(s string) (time.Duration, bool) {
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s[:i])
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	switch s[i:] {
+	case "s":
+		return time.Duration(n) * time.Second, true
+	case "m", "min":
+		return time.Duration(n) * time.Minute, true
+	case "h":
+		return time.Duration(n) * time.Hour, true
+	case "d":
+		return time.Duration(n) * 24 * time.Hour, true
+	}
+	return 0, false
+}
+
+// runUsage 按 上游+真实模型 列出各窗口的 token 用量 (服务只写日志, 分析在服务之外)。
 func runUsage(path string, windows []string) {
 	maxWindow := time.Duration(0)
 	for _, w := range windows {
-		if d, ok := parseBudgetDur(w); ok && d > maxWindow {
+		if d, ok := parseDur(w); ok && d > maxWindow {
 			maxWindow = d
 		}
 	}
@@ -2327,7 +2382,7 @@ func runUsage(path string, windows []string) {
 		label, span := "全部", time.Duration(0)
 		if w != "" {
 			label = w
-			span, _ = parseBudgetDur(w)
+			span, _ = parseDur(w)
 		}
 		rows := map[string]*usageRow{}
 		var order []string
@@ -2361,7 +2416,7 @@ func runUsage(path string, windows []string) {
 				r.Key, r.Reqs, r.Miss, r.Prompt, r.Completion, r.Cached, r.Total)
 		}
 	}
-	fmt.Println("提示: 折算系数 = 平台已用额度 / 该模型窗口内 total; 按真实模型 id 填进对应上游的 budget.units")
+	fmt.Println("提示: 服务只写日志, 不做预算与折算; 额度分析交给独立的分析程序 (设计 O10, 尚未实现)")
 }
 
 func main() {
