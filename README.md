@@ -68,7 +68,7 @@ go build ./...
 # 按 上游/模型 × 窗口 (3h/12h/24h/全部) 看 token 分解:
 ./llm-request-tollgate -usage var/
 
-# 实时状态台 (TUI: active 进行中的请求 / routes 路由历史 / events 事件):
+# 实时状态台 (TUI: active 进行中的请求 / routes 路由历史 / events 事件 / priority 权重):
 ./llm-request-tollgate -tui                     # 同进程起代理 + 状态台 (q 退出)
 ./llm-request-tollgate -tui -tui-state http://127.0.0.1:8787   # 只看已常驻的服务
 ```
@@ -77,18 +77,20 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 
 ## 状态台 (TUI)
 
-三个页, `1`/`2`/`3` 或 `Tab` 切, `up/down`/`PgUp/PgDn` 滚动, `r` 重读日志, `q` 退出。
+四个页, `1`-`4` 或 `Tab` 切, `up/down`/`PgUp/PgDn` 滚动, `r` 重读日志, `q` 退出。
 
 | 页 | 看什么 | 数据来源 |
 |---|---|---|
 | `active` | 进行中的请求 (编号 / 已耗时 / 逻辑名 / 上游 / 真实模型 / 流式与否 / 当前卡在哪) + 每个上游的 进行中/上限、排队数、锁与退避 | 服务的只读观测面 (同进程读内存, 另进程 `GET /v1/state`) |
 | `routes` | 按 `逻辑名 × 上游 × 真实模型` 聚合的请求数 / 错误 / 换候选次数 / token / 缓存命中 / 首字节 / 吞吐 / 最近一次, 附每分钟请求数条 | JSONL 日志 (含跨天归档, 窗口 6h) |
 | `events` | 加锁 / 熔断 / 退避 / 解锁 / 换候选 / 错误 / 慢请求, 最新的在最上面, 连续同类事件折成 `xN` | 服务事件流 + 日志还原 |
+| `priority` | 权重编辑: 左栏 provider 面板 + 模型列表 (按别名分组, 行首 `M` 模型优先级 / `P` provider 优先级), 右栏所选别名的候选顺序实时预览 | store `~/fff/config/llm-models.json` (唯一一个可写的页) |
 
 - 观测面是**只读且纯内存**的: 不落盘、不参与记账与调度, 服务重启即清空; 明细的事实来源
   仍是日志 (设计 D12)。同进程模式顺手把它写成 `var/tui-pulse.json`, 也便于别的工具读。
 - 两个进程模式随便挑: `-tui` 适合"本地起一份看", `-tui-state` 适合看 systemd 常驻那份
-  (`./deploy/tollgate.sh` 起的服务不变)。
+  (`./deploy/tollgate.sh` 起的服务不变)。`priority` 页两种模式都能改: 写本机的 store,
+  同进程模式热加载直接生效, 观察常驻服务时发 `SIGHUP`。
 - 窄终端会按优先级自动丢列 (先丢路径、来源这类), 至少保留逻辑名、上游与真实模型。
 
 ## 常驻与升级
@@ -170,12 +172,12 @@ python3 scripts/gen_tollgate_config.py --dry-run
 python3 scripts/gen_tollgate_config.py
 ```
 
-优先级用 TUI 调 (Node >= 22.6 直接跑 TS, 零依赖零构建, 无命令行参数):
-provider 面板 + 模型列表 + 候选顺序实时预览; `+/-` 调值, `=` 输入数值, `Tab` 换面板,
-`/` 过滤, `s` 存 store, `r` 重生成配置, `h` hup, `q` 退出。改完直接 `r` `h` 即可生效。
+优先级用状态台的 `priority` 页调: provider 面板 + 模型列表 + 候选顺序实时预览;
+`+/-` 调值, `=` 输入数值, `Tab` 换面板, `/` 过滤, `s` 存 store, `r` 重生成配置,
+`h` 热加载, `q` 退出。改完直接 `r` `h` 即可生效。
 
 ```bash
-node scripts/set_priority.ts
+./llm-request-tollgate -tui -tui-state http://127.0.0.1:8787   # 看常驻服务, 按 4 进 priority 页
 ```
 
 ### 用量分析 (计划中)
@@ -211,9 +213,10 @@ token) 与 `-usage` (上游 + 模型 × 窗口的 token 分解)。
   `errors` 规则 (2026-10-13)。
 - `scripts/gen_tollgate_config.py` 由 fff 模型列表生成本项目配置 (读
   `~/fff/config/llm-models.json` + 黑名单, 按 `tollgate_group` 归并成别名; 见下)。
-- `scripts/set_priority.ts` 调优先级的 TUI (Node >= 22.6 跑 TS, 无依赖无参数): 候选顺序
-  实时预览, 界面内即可保存 store / 重生成配置 / hup。
-- `gate_test.go` / `proxy_test.go` 单元与端到端测试 (`go test .`): 调度核心 (排队节拍、
-  试探放宽、两把锁、错误归类、退避熔断、锁落盘) 与经代理转发的完整链路。
+- `tui.go` / `tui_priority.go` 状态台: 前三个页读状态与日志, `priority` 页调权重 (写
+  store, 候选顺序实时预览, 界面内即可保存 / 重生成配置 / 热加载)。
+- `gate_test.go` / `proxy_test.go` / `tui_*_test.go` 单元与端到端测试 (`go test .`): 调度
+  核心 (排队节拍、试探放宽、两把锁、错误归类、退避熔断、锁落盘)、经代理转发的完整链路,
+  以及状态台版式与 priority 页存盘。
 - `test/tmp/` 与 `var/` 是运行产物 (自测二进制/假上游日志; 请求日志与 `gate-state.json`
   等状态), 都在 `.gitignore` 内。
