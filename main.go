@@ -305,7 +305,7 @@ type cand struct {
 	queue    []*ticket
 	inFlight int       // 已拿到信号量的请求数 (含还在排队的)
 	softCap  int       // 自适应并发上限: 起点 1, 不设天花板
-	probing  bool      // 是否已有试探在飞 (同一时刻只允许一笔)
+	probing  bool      // 是否已有一笔试探在进行 (同一时刻只允许一笔)
 	nextSend time.Time // 下一笔最早可发送的时刻 (出队节拍)
 	// 通用兜底 (设计 §5.5.2): 退避是候选级的, 不是每笔请求各自退避; 退避期间新请求照常
 	// 进队列, 但队首在暂停结束前不会被放行 —— 排队上限只有 10s, 所以 20s/30s 的退避
@@ -411,7 +411,7 @@ func (c *cand) acquireSlot(ctx context.Context, g GateCfg) (slotKind, string, bo
 			return slotCapped, "", true
 		}
 		if !c.concLock.active(now) && !c.probing {
-			// 并发满, 但试探没被锁也没有别的试探在飞: 这一笔超发, 不占信号量。
+			// 并发满, 但试探没被锁、也没有别的试探在进行: 这一笔超发, 不占信号量。
 			c.probing = true
 			c.mu.Unlock()
 			return slotProbe, "", true
@@ -573,6 +573,7 @@ type gateState struct {
 // (设计 §5.5.2)。
 func (a *App) recordGenericFailure(c *cand, g GateCfg) bool {
 	if !c.recordOther(g) {
+		a.evAdd("gate", "", c.id, "", "上游报错, 先退避再试")
 		return false
 	}
 	a.lockProvider(c, "breaker", g.breakerLock())
@@ -582,11 +583,16 @@ func (a *App) recordGenericFailure(c *cand, g GateCfg) bool {
 
 // lockProvider 给候选加定时供应商锁, 并把锁状态落盘 —— 重启后仍在锁内 (设计 §5.5.3)。
 func (a *App) lockProvider(c *cand, reason string, dur time.Duration) {
+	why := "额度限制"
+	if reason == "breaker" {
+		why = "连续错误到阈值, 熔断"
+	}
+	a.evAdd("lock", "", c.id, "", "加锁 "+why+" "+durStr(dur))
 	c.lockProvider(reason, dur)
 	a.saveGateState()
 }
 
-// saveGateState 把未到期的供应商锁写盘 (先写临时文件再改名, 与探测状态同一套路)。
+// saveGateState 把未到期的供应商锁落盘 (先写临时文件再改名, 与探测状态同一套路)。
 func (a *App) saveGateState() {
 	if a.gatePath == "" {
 		return
@@ -926,11 +932,424 @@ type App struct {
 	probeMu   sync.Mutex
 	probe     map[string]*probeStat // "上游|模型" -> 滚动统计 (主动探测 + 被动观测)
 	probePath string                // 指标状态文件 (var/probe.json)
+
+	// 只读观测面 (TUI): 进行中的请求、最近事件、事件序号。纯内存、不落盘、不参与记账,
+	// 服务重启即清空 —— 明细的事实来源仍是日志 (D12)。
+	flowMu   sync.Mutex
+	flows    map[uint64]*flow
+	nextFlow uint64
+	evMu     sync.Mutex
+	events   [viewEvents]viewEvent
+	evNext   uint64 // 累计事件序号 (TUI 拿它当起点, 只取新增的那部分)
 }
 
 type aliasTarget struct {
 	Upstream string
 	Model    string
+}
+
+// ---------- 只读观测面 (TUI) ----------
+//
+// 服务只暴露「此刻正在发生什么」: 进行中的请求与每个候选的队列/锁/退避。历史一律由 TUI
+// 从日志 (D12 的唯一事实来源) 里读, 服务不为 TUI 记账、不写状态文件。
+
+const (
+	viewVer     = "tollgate-state/1" // 观测面版本 (TUI 用它判断对端是不是这个接口)
+	viewEvents  = 256                // 事件环容量
+	viewActives = 512                // 进行中请求的上限 (防泄漏兜底, 正常远低于此)
+)
+
+// 请求所处阶段: 上游调度器那一侧细分到「等锁 / 排队 / 等信号量」, 见 flowStage。
+const (
+	stageParse  = iota // 已解析出逻辑名, 还没进候选链
+	stageSend          // 正对某候选发送或已发出 (upstream 已填)
+	stageFailed        // 候选链走完仍未发出去 (合成 429 / 透传错误)
+	stageDone          // 已给出响应
+)
+
+// flow 是一笔进行中的请求 (只用于展示, 不参与调度判断)。字段导出, 因为它要按原样
+// 进 /v1/state 的 JSON。
+type flow struct {
+	ID        uint64    `json:"id"`
+	Logical   string    `json:"logical"`
+	Source    string    `json:"source,omitempty"`
+	Path      string    `json:"path"`
+	Stream    bool      `json:"stream"`
+	StartTime time.Time `json:"start"`
+	Up        string    `json:"upstream,omitempty"` // 当前候选上游
+	Model     string    `json:"backend,omitempty"`  // 该候选的真实模型 id
+	Stage     int       `json:"stage"`
+	Attempt   int       `json:"attempt,omitempty"` // 已试过的候选数 (含当前)
+	Gate      string    `json:"gate,omitempty"`    // 正卡在哪: locked / backoff / pace / sent / transport
+	Queued    bool      `json:"queued"`
+	Status    int       `json:"status,omitempty"`
+	TtfbMs    int64     `json:"ttfb_ms,omitempty"`
+}
+
+// viewEvent 是事件流的一条: 调度器动作 + 每笔请求的结局 (由引擎侧发出, 不经日志回读)。
+type viewEvent struct {
+	Seq      uint64 `json:"seq"`
+	Ts       string `json:"ts"`
+	Kind     string `json:"kind"` // start | lock | unlock | fallback | gate | error | slow | ok | reload
+	Logical  string `json:"logical,omitempty"`
+	Upstream string `json:"upstream,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Msg      string `json:"msg"`
+}
+
+// candView 是某候选上游的瞬时调度状态。
+type candView struct {
+	ID       string  `json:"id"`
+	Queue    int     `json:"queue"`
+	InFlight int     `json:"in_flight"`
+	SoftCap  int     `json:"soft_cap"`
+	Probing  bool    `json:"probing"`
+	ErrStrk  int     `json:"err_streak"`
+	PausedMs int64   `json:"paused_ms"`    // > 0 = 退避中, 剩这么久
+	LockMs   int64   `json:"lock_ms"`      // > 0 = 供应商锁中, 剩这么久
+	LockWhy  string  `json:"lock_why"`     // quota | breaker
+	ConcMs   int64   `json:"conc_lock_ms"` // > 0 = 并发锁 (只锁试探)
+	NextMs   int64   `json:"next_ms"`      // 距下次出队节拍
+	LastTps  float64 `json:"-"`            // 保留: TPS 从日志读, 不在这里
+}
+
+// pulse 是 GET /v1/state (以及 -tui 时的 var/tui-pulse.json) 的载荷。
+type pulse struct {
+	Ver       string      `json:"ver"` // 观测面版本: 用来认出"对端不是这个接口" (老二进制)
+	Listen    string      `json:"listen"`
+	Now       string      `json:"now"`
+	Active    []flow      `json:"active"`
+	Cands     []candView  `json:"cands"`
+	Events    []viewEvent `json:"events"`  // 序号 > 请求里的 since 的那些
+	MaxSeq    uint64      `json:"max_seq"` // 下次轮询带它作 since
+	SlowMs    int64       `json:"slow_ms"` // 慢请求告警线 (TUI 用同一口径)
+	MissingAt string      `json:"missing_at,omitempty"`
+}
+
+// stageName 是屏幕上「当前状态」那一列的说法。
+func stageName(f flow) string {
+	if f.Gate != "" {
+		return "等待 " + f.Gate
+	}
+	switch f.Stage {
+	case stageParse:
+		return "解析中"
+	case stageSend:
+		if f.TtfbMs > 0 {
+			return "接收中"
+		}
+		return "已发出"
+	case stageFailed:
+		return "已失败"
+	}
+	return "已结束"
+}
+
+func (a *App) evAdd(kind, logical, upstream, model, msg string) {
+	e := viewEvent{
+		Ts: time.Now().Format(time.RFC3339Nano), Kind: kind, Logical: logical,
+		Upstream: upstream, Model: model, Msg: msg,
+	}
+	a.evMu.Lock()
+	a.evNext++
+	e.Seq = a.evNext
+	a.events[int(e.Seq)%viewEvents] = e
+	a.evMu.Unlock()
+}
+
+// eventsSince 取序号 > since 的事件 (最多整环), 按序号升序。
+func (a *App) eventsSince(since uint64) ([]viewEvent, uint64) {
+	a.evMu.Lock()
+	defer a.evMu.Unlock()
+	out := make([]viewEvent, 0, 16)
+	for _, e := range a.events {
+		if e.Seq > since {
+			out = append(out, e)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+	return out, a.evNext
+}
+
+func (a *App) flowStart(logical, source, path string, stream bool) uint64 {
+	now := time.Now()
+	a.flowMu.Lock()
+	a.nextFlow++
+	id := a.nextFlow
+	if len(a.flows) >= viewActives { // 兜底: 异常堆积时丢最老的, 不让它无界长
+		oldest, ok := uint64(0), false
+		for k := range a.flows {
+			if !ok || k < oldest {
+				oldest, ok = k, true
+			}
+		}
+		delete(a.flows, oldest)
+	}
+	a.flows[id] = &flow{ID: id, Logical: logical, Source: source, Path: path,
+		Stream: stream, StartTime: now, Stage: stageParse}
+	a.flowMu.Unlock()
+	return id
+}
+
+// gateWord 把调度器给的等待原因换成屏幕上的说法; 空串表示没在等。
+func gateWord(g string) string {
+	switch g {
+	case "queue":
+		return "排队中"
+	case "sem":
+		return "等并发槽位"
+	case "locked":
+		return "候选已加锁"
+	}
+	return g
+}
+
+// flowStage 更新一笔进行中请求的展示状态; up/mod 为空表示不改这两列。
+// gate 由调用方先算好 (读 cand 的锁/节拍), 这里只写展示字段, 不碰调度。
+func (a *App) flowStage(id uint64, up, mod string, stage int, gate string, attempt int) {
+	a.flowMu.Lock()
+	if f := a.flows[id]; f != nil {
+		if up != "" {
+			f.Up = up
+		}
+		if mod != "" {
+			f.Model = mod
+		}
+		f.Stage, f.Gate, f.Attempt = stage, gateWord(gate), attempt
+		if gate == "queue" || gate == "sem" {
+			f.Queued = true
+		}
+	}
+	a.flowMu.Unlock()
+}
+
+// flowObs 把一笔请求的展示状态与事件喂给观测面 (TUI)。只读地看调度器, 不改调度:
+// 它只读 cand 的锁/队列快照, 不做任何等待或记账。
+type flowObs struct {
+	a       *App
+	id      uint64
+	logical string
+
+	up      string // 当前候选 (换候选时记一条 fallback 事件)
+	model   string // 当前候选的真实模型 id (换候选时一起更新)
+	attempt int
+	slowMs  int64 // 首字节超过它就另记一条 slow (0 = 不记)
+	done    bool
+}
+
+// mark 刷新展示状态。status: 0 = 还没结论, -1 = 传输层失败, 其余为上游状态码。
+// 换到新候选时记一条 fallback 事件 (这条候选链的走向就是 TUI 要看的路由过程)。
+func (o *flowObs) mark(status int, msg string) {
+	if status != 0 {
+		o.a.evAdd("fallback", o.logical, o.up, o.model, firstLine(msg, status))
+	}
+	if status < 0 {
+		o.a.flowStage(o.id, o.up, o.model, stageFailed, "transport", o.attempt)
+		return
+	}
+	o.a.flowStage(o.id, o.up, o.model, stageSend, o.gateNow(), o.attempt)
+}
+
+// gateNow 是「这一笔现在卡在哪一步」: 供应商锁 / 退避 / 出队节拍 / 已发出。
+func (o *flowObs) gateNow() string {
+	c := o.a.candOf(o.up)
+	if c == nil {
+		return "已发出"
+	}
+	now := time.Now()
+	if locked, left, reason := c.locked(); locked {
+		why := "额度"
+		if reason == "breaker" {
+			why = "熔断"
+		}
+		return why + "锁 " + durStr(left)
+	}
+	c.mu.Lock()
+	paused, next := c.pausedUntil, c.nextSend
+	c.mu.Unlock()
+	if paused.After(now) {
+		return "退避 " + durStr(paused.Sub(now))
+	}
+	if next.After(now) {
+		return "等节拍 " + durStr(next.Sub(now))
+	}
+	return "已发出"
+}
+
+// firstLine 拼事件正文 (状态码优先, 没有就截断错误串)。
+func firstLine(msg string, status int) string {
+	if status > 0 {
+		return "状态码 " + strconv.Itoa(status)
+	}
+	if msg == "" {
+		return "连接失败"
+	}
+	return bodySnippet([]byte(msg), 120)
+}
+
+func (a *App) candOf(id string) *cand {
+	a.mu.RLock()
+	c := a.cands[id]
+	a.mu.RUnlock()
+	return c
+}
+
+// finish 是这笔请求的结局: 进事件流 (2xx 记 ok, 其余记 error; 慢请求另记一条)。
+func (o *flowObs) finish(status int, ttfbMs int64) {
+	if o.done {
+		return
+	}
+	o.done = true
+	if status == 0 {
+		status = 200 // 正常收尾 (含 4xx 透传之外的路径) 都算成功
+	}
+	if status >= 400 {
+		o.a.evAdd("error", o.logical, o.up, "", "状态码 "+strconv.Itoa(status))
+		return
+	}
+	o.a.evAdd("ok", o.logical, o.up, "", "状态码 "+strconv.Itoa(status))
+	if o.slowMs > 0 && ttfbMs >= o.slowMs {
+		o.a.evAdd("slow", o.logical, o.up, "", "首字节 "+durStr(time.Duration(ttfbMs)*time.Millisecond))
+	}
+}
+
+// durStr 把时长写成屏幕上好读的紧凑形态 (1.2s / 340ms / 2m10s)。
+func durStr(d time.Duration) string {
+	if d <= 0 {
+		return "0s"
+	}
+	switch {
+	case d < time.Second:
+		return strconv.FormatInt(d.Milliseconds(), 10) + "ms"
+	case d < time.Minute:
+		return strconv.FormatFloat(d.Seconds(), 'f', 1, 64) + "s"
+	case d < time.Hour:
+		return strconv.Itoa(int(d.Minutes())) + "m" + strconv.Itoa(int(d.Seconds())%60) + "s"
+	default:
+		return strconv.Itoa(int(d.Hours())) + "h" + strconv.Itoa(int(d.Minutes())%60) + "m"
+	}
+}
+
+func (a *App) flowEnd(id uint64, status int, ttfbMs int64) {
+	a.flowMu.Lock()
+	delete(a.flows, id)
+	a.flowMu.Unlock()
+}
+
+// flowActives 拷贝当前进行中的请求 (按开始时间升序)。
+func (a *App) flowActives() []flow {
+	a.flowMu.Lock()
+	out := make([]flow, 0, len(a.flows))
+	for _, f := range a.flows {
+		out = append(out, *f)
+	}
+	a.flowMu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].StartTime.Before(out[j].StartTime) })
+	return out
+}
+
+// candViews 读每个候选上游的瞬时调度状态 (逐个短锁, 不嵌套)。
+func (a *App) candViews() []candView {
+	a.mu.RLock()
+	cands := make([]*cand, 0, len(a.cands))
+	for _, c := range a.cands {
+		cands = append(cands, c)
+	}
+	a.mu.RUnlock()
+	now := time.Now()
+	out := make([]candView, 0, len(cands))
+	for _, c := range cands {
+		c.mu.Lock()
+		v := candView{
+			ID: c.id, Queue: len(c.queue), InFlight: c.inFlight, SoftCap: c.softCap,
+			Probing: c.probing, ErrStrk: c.errStreak,
+		}
+		if left := c.pausedUntil.Sub(now); left > 0 {
+			v.PausedMs = msCeil(left)
+		}
+		if left := c.provLock.left(now); left > 0 {
+			v.LockMs, v.LockWhy = msCeil(left), c.provLock.reason
+		}
+		if left := c.concLock.left(now); left > 0 {
+			v.ConcMs = msCeil(left)
+		}
+		if left := c.nextSend.Sub(now); left > 0 {
+			v.NextMs = msCeil(left)
+		}
+		c.mu.Unlock()
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+func (a *App) listenAddr() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.cfg == nil {
+		return ""
+	}
+	return a.cfg.Listen
+}
+
+// snapshot 组装一份观测载荷 (since = TUI 上次拿到的 MaxSeq)。
+func (a *App) snapshot(since uint64) pulse {
+	evs, max := a.eventsSince(since)
+	return pulse{
+		Ver:    viewVer,
+		Listen: a.listenAddr(), Now: time.Now().Format(time.RFC3339Nano),
+		Active: a.flowActives(), Cands: a.candViews(), Events: evs, MaxSeq: max,
+		SlowMs: 30000,
+	}
+}
+
+// serveState 是只读观测面 (GET /v1/state): 进行中的请求 + 候选调度状态 + 新增事件。
+// 与 /v1/probe 同级: 不给客户端用, 给运维面 (TUI) 看。
+func (a *App) serveState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "only GET /v1/state")
+		return
+	}
+	since, _ := strconv.ParseUint(r.URL.Query().Get("since"), 10, 64)
+	w.Header().Set("Content-Type", "application/json")
+	b, err := json.Marshal(a.snapshot(since))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	w.Write(b)
+}
+
+// startPulseLoop 每秒把观测载荷写到日志同目录的 tui-pulse.json: -tui 同进程时
+// TUI 直接读文件, 不起 HTTP 轮询。原子替换 (临时文件 + rename), 读侧永远看到完整 JSON。
+func (a *App) startPulseLoop(path string) {
+	if path == "" {
+		return
+	}
+	go func() {
+		var last uint64
+		seen := map[string]bool{} // 候选 -> 上一拍是否处于锁/退避中 (检测恢复用)
+		for {
+			p := a.snapshot(last)
+			if b, err := json.Marshal(p); err == nil {
+				tmp := path + ".tmp"
+				if os.WriteFile(tmp, b, 0o644) == nil {
+					os.Rename(tmp, path)
+				}
+			}
+			// 锁/退避到期是"没有请求也可能发生"的状态变化, 只能靠轮询发现。
+			// seen 里存的是"上一拍是否处于锁/退避中", 从有到无=恢复。
+			for _, c := range p.Cands {
+				busy := c.LockMs > 0 || c.PausedMs > 0
+				if prev, ok := seen[c.ID]; ok && prev && !busy {
+					a.evAdd("unlock", "", c.ID, "", "恢复: 锁/退避已到期")
+				}
+				seen[c.ID] = busy
+			}
+			last = p.MaxSeq
+			time.Sleep(time.Second)
+		}
+	}()
 }
 
 // ---------- 探测实现 (D14) ----------
@@ -1428,6 +1847,7 @@ func newApp(c *Config) (*App, error) {
 		aliases:   map[string][]aliasTarget{},
 		cands:     map[string]*cand{},
 		probe:     map[string]*probeStat{},
+		flows:     map[uint64]*flow{},
 	}
 	a.applyConfig(c)
 	if err := a.openLog(); err != nil {
@@ -1670,6 +2090,10 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.serveProbe(w, r)
 		return
 	}
+	if r.URL.Path == "/v1/state" {
+		a.serveState(w, r)
+		return
+	}
 	if r.URL.Path == "/v1/models" {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed",
@@ -1712,6 +2136,19 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s, ok := payload["stream"].(bool); ok {
 		stream = s
 	}
+	// 观测面 (TUI): 这笔请求进"进行中"表, 每换候选/进出闸门刷一次展示状态, 结束时出表。
+	source := r.Header.Get("X-Tollgate-Source")
+	flowID := a.flowStart(logical, source, r.URL.Path, stream)
+	obs := &flowObs{a: a, id: flowID, logical: logical, slowMs: 30000}
+	var finalStatus int
+	var finalTtfb int64
+	defer func() {
+		// 退出顺序: 先按实际结局刷新展示状态, 再把这笔从"进行中"表里摘掉。
+		obs.finish(finalStatus, finalTtfb)
+		a.flowEnd(flowID, finalStatus, finalTtfb)
+	}()
+	// 每个 return 前面都要有它: 收尾状态 (429/502/透传错误码) 靠它带出。
+	setFinal := func(status int, ttfb int64) { finalStatus, finalTtfb = status, ttfb }
 
 	// 集中 fallback 的候选表: 上游 + 真实模型 + 该候选自己的 v2 调度状态。一把 RLock 拿齐,
 	// 循环里不再读 a.upstreams / a.cands (热加载会改这两张表)。
@@ -1781,6 +2218,10 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 集中 fallback: 按候选顺序尝试, 只在还没给客户端写任何字节前 (传输失败 /
 	// 上游 429 或 5xx) 换下一个候选; 全部失败保留最近一次错误原样透传。
 	for _, at := range attempts {
+		// 进入这个候选: 展示状态跟着走 (换候选时 mark 收到失败码, 顺手记一条 fallback 事件)。
+		obs.attempt++
+		obs.up, obs.model = at.up.ID, at.mod
+		obs.mark(0, "")
 		if at.cd == nil {
 			lastErr = fmt.Errorf("upstream %s has no scheduler", at.up.ID)
 			lastUpID, lastM = at.up.ID, at.mod
@@ -1846,12 +2287,14 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				lastErr = err
 				lastUpID, lastM = at.up.ID, at.mod
 				failed++
+				obs.mark(-1, err.Error())
 				continue
 			}
 			if shouldFallback(resp.StatusCode) {
 				b, rerr := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				at.cd.finish(kind, false)
+				obs.mark(resp.StatusCode, "")
 				moveOn := true
 				switch at.up.classify(resp.StatusCode, b) {
 				case classQuota:
@@ -1891,6 +2334,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				heldCand, heldKind = at.cd, kind // 响应发完才归还槽位
 			}
 			servedUp, servedMod = at.up, at.mod
+			obs.mark(0, "")
 			break
 		}
 		if servedUp != nil {
@@ -1909,6 +2353,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(retry.Seconds())))))
 		writeError(w, http.StatusTooManyRequests, "rate_limit_error",
 			"upstream busy ("+gateReject+"): no candidate for "+logical+" gave a send slot")
+		setFinal(http.StatusTooManyRequests, 0)
 		a.logReq(logRec{
 			Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
 			Upstream: lastUpID, Model: lastM, Path: r.URL.Path, Stream: stream,
@@ -1936,6 +2381,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			w.WriteHeader(lastStatus)
 			w.Write(lastBody)
+			setFinal(lastStatus, 0)
 			a.logReq(logRec{
 				Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
 				Upstream: lastUpID, Model: lastM, Path: r.URL.Path, Stream: stream,
@@ -1952,6 +2398,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(gateLeft.Seconds())))))
 			writeError(w, http.StatusTooManyRequests, "upstream_locked",
 				"all candidates for "+logical+" are locked after upstream limits")
+			setFinal(http.StatusTooManyRequests, 0)
 			a.logReq(logRec{
 				Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
 				Upstream: lastUpID, Model: lastM, Path: r.URL.Path, Stream: stream,
@@ -1968,6 +2415,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			msg = lastErr.Error()
 		}
 		writeError(w, http.StatusBadGateway, "upstream_error", msg)
+		setFinal(http.StatusBadGateway, 0)
 		a.logReq(logRec{
 			Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
 			Upstream: lastUpID, Model: lastM, Path: r.URL.Path, Stream: stream,
@@ -2044,6 +2492,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}, window)
 	}
 
+	setFinal(status, ttfbMs)
 	a.logReq(logRec{
 		Ts: time.Now().Format(time.RFC3339Nano), Logical: logical,
 		Upstream: chosen.ID, Model: realModel, Path: r.URL.Path, Stream: stream,
@@ -2490,7 +2939,14 @@ func main() {
 	windows := flag.String("windows", "3h,12h,24h", "windows for -usage, comma separated")
 	check := flag.Bool("check", false, "validate config and exit")
 	probe := flag.String("probe", "", "print the latency/probe report for a config file and exit")
+	tui := flag.Bool("tui", false, "run the terminal dashboard on top of the proxy (q to quit)")
+	tuiState := flag.String("tui-state", "", "TUI: observe a running proxy at this base URL (default: in-process)")
 	flag.Parse()
+
+	if *tui {
+		runTUI(*cfgPath, *tuiState)
+		return
+	}
 
 	if *probe != "" {
 		runProbeReport(*probe)

@@ -44,6 +44,8 @@
     (白名单 / 闸门 / fallback / 记账)。`/responses` 没有 `stream_options`, 不做
     include_usage 注入; 用量按 `input/output_tokens` 口径归一, 流以 `response.completed`
     判正常收尾 (该接口不保证发 `[DONE]`), 事件里嵌在 `response` 下的 `model` 也改回逻辑名。
+13. 只读观测面与状态台: `GET /v1/state` 给出此刻进行中的请求, 以及每个上游的队列/并发上限/锁
+    (纯内存, 不落盘、不参与记账); `-tui` 把它连同日志聚合成三个页的实时状态台。
 
 ## 快速开始
 
@@ -65,9 +67,29 @@ go build ./...
 
 # 按 上游/模型 × 窗口 (3h/12h/24h/全部) 看 token 分解:
 ./llm-request-tollgate -usage var/
+
+# 实时状态台 (TUI: active 进行中的请求 / routes 路由历史 / events 事件):
+./llm-request-tollgate -tui                     # 同进程起代理 + 状态台 (q 退出)
+./llm-request-tollgate -tui -tui-state http://127.0.0.1:8787   # 只看已常驻的服务
 ```
 
 agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
+
+## 状态台 (TUI)
+
+三个页, `1`/`2`/`3` 或 `Tab` 切, `up/down`/`PgUp/PgDn` 滚动, `r` 重读日志, `q` 退出。
+
+| 页 | 看什么 | 数据来源 |
+|---|---|---|
+| `active` | 进行中的请求 (编号 / 已耗时 / 逻辑名 / 上游 / 真实模型 / 流式与否 / 当前卡在哪) + 每个上游的 进行中/上限、排队数、锁与退避 | 服务的只读观测面 (同进程读内存, 另进程 `GET /v1/state`) |
+| `routes` | 按 `逻辑名 × 上游 × 真实模型` 聚合的请求数 / 错误 / 换候选次数 / token / 缓存命中 / 首字节 / 吞吐 / 最近一次, 附每分钟请求数条 | JSONL 日志 (含跨天归档, 窗口 6h) |
+| `events` | 加锁 / 熔断 / 退避 / 解锁 / 换候选 / 错误 / 慢请求, 最新的在最上面, 连续同类事件折成 `xN` | 服务事件流 + 日志还原 |
+
+- 观测面是**只读且纯内存**的: 不落盘、不参与记账与调度, 服务重启即清空; 明细的事实来源
+  仍是日志 (设计 D12)。同进程模式顺手把它写成 `var/tui-pulse.json`, 也便于别的工具读。
+- 两个进程模式随便挑: `-tui` 适合"本地起一份看", `-tui-state` 适合看 systemd 常驻那份
+  (`./deploy/tollgate.sh` 起的服务不变)。
+- 窄终端会按优先级自动丢列 (先丢路径、来源这类), 至少保留逻辑名、上游与真实模型。
 
 ## 常驻与升级
 
@@ -166,7 +188,7 @@ token) 与 `-usage` (上游 + 模型 × 窗口的 token 分解)。
 ## 当前边界
 
 - 转发覆盖 `POST /v1/chat/completions` 与 `POST /v1/responses` (O5); `GET /v1/models`
-  返回逻辑名清单 (O5)。其余路径一律 404。
+  返回逻辑名清单 (O5)。只读观测面: `GET /v1/probe`、`GET /v1/state`。其余路径一律 404。
 - 被闸门挡下的 429 在日志里带 `gate` (`locked` 候选在锁里 / `sem_timeout` 等不到并发
   槽位 / `queue_timeout` 排队超时 / `canceled` 客户端断开) 与等待时长 (`sem_ms` 等信号量、
   `queue_ms` 排队, 都是各候选之和), 便于区分「并发不够」「排队超时」和「被锁」。
