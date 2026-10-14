@@ -4,8 +4,16 @@
   "timeouts": {
     "connect_ms": 10000,
     "response_header_ms": 120000,
-    "stream_idle_ms": 240000,
-    "queue_wait_ms": 60000
+    "stream_idle_ms": 240000
+  },
+  "gate": {
+    "interval_ms": 500,
+    "sem_wait_ms": 20000,
+    "queue_wait_ms": 10000,
+    "concurrency_lock_ms": 3600000,
+    "quota_lock_ms": 600000,
+    "breaker_lock_ms": 300000,
+    "retry_backoff_ms": [10000, 20000, 30000]
   },
   "probe": {
     "enabled": false,
@@ -26,24 +34,7 @@
       "auth_header": "Authorization",
       "key_env": "USTC_API_KEY",
       "headers": {},
-      "include_usage": true,
-      "budget": {
-        "windows": {
-          "3h": 30,
-          "12h": 70,
-          "24h": 100
-        },
-        "unit": 1,
-        "units": {
-          "deepseek-v4.1-flash": 2e-06
-        },
-        "refresh_sec": 60
-      },
-      "limits": {
-        "rate_per_sec": 0.34,
-        "burst": 1,
-        "concurrency": 1
-      }
+      "include_usage": true
     },
     {
       "id": "group",
@@ -51,12 +42,7 @@
       "auth_header": "Authorization",
       "key_env": "GROUP_API_KEY",
       "headers": {},
-      "include_usage": true,
-      "limits": {
-        "rate_per_sec": 0.34,
-        "burst": 1,
-        "concurrency": 1
-      }
+      "include_usage": true
     }
   ],
   "aliases": {
