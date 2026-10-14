@@ -289,10 +289,13 @@ type tuiModel struct {
 	scanned      int
 
 	tab       int
-	scroll    [3]int
+	scroll    [4]int
 	cols      int
 	rows      int
 	refreshed time.Time // 上次重读日志/取观测的时刻 (按键连发时别每次都重读)
+
+	prio     *tuiEditor   // priority 页 (权重编辑), runTUI 里装载
+	reloadFn func() error // 同进程模式的热加载回调; 空 = 走 deploy/tollgate.sh hup
 }
 
 // errf 记下最近一次取数失败 (可能来自别的 goroutine, 加锁)。
@@ -608,7 +611,7 @@ func durText(d time.Duration) string {
 
 // ---------- 渲染 ----------
 
-var tuiTabs = []string{"active", "routes", "events"}
+var tuiTabs = []string{"active", "routes", "events", "priority"}
 
 func (m *tuiModel) draw() string {
 	m.cols, m.rows = tuiSize()
@@ -629,8 +632,10 @@ func (m *tuiModel) draw() string {
 		m.drawActive(c, body)
 	case 1:
 		m.drawRoutes(c, body)
-	default:
+	case 2:
 		m.drawEvents(c, body)
+	default:
+		m.drawPriority(c, body)
 	}
 	// 补空行把键位提示压到最后一行。注意别把 countLines() 写进循环条件:
 	// 它每轮都在长, 条件会自己收紧, 循环提前结束 (屏幕上就是"提示浮在中间")。
@@ -679,7 +684,11 @@ func (c *tuiCanvas) last(s string) {
 }
 
 func (m *tuiModel) hint() string {
-	base := "  1/2/3 或 Tab 切页   up/down/PgUp/PgDn 滚动   r 重读日志   q 退出"
+	if m.tab == 3 {
+		return "  Tab 换面板   j/k 移动   +/- 调值   = 输入值   / 过滤   s 保存   r 生成   h 热加载   q 退出" +
+			"   (priority: " + m.prioHint() + ")"
+	}
+	base := "  1-4 或 Tab 切页   up/down/PgUp/PgDn 滚动   r 重读日志   q 退出"
 	switch m.tab {
 	case 0:
 		base += "   (active: 进行中的请求 + 上游队列状态)"
@@ -689,6 +698,17 @@ func (m *tuiModel) hint() string {
 		base += "   (events: 最新的在最上面)"
 	}
 	return base
+}
+
+// prioHint 是 priority 页提示行右侧那句: 改的是哪份 store。
+func (m *tuiModel) prioHint() string {
+	if m.prio == nil {
+		return "未装载"
+	}
+	if m.prio.err != "" {
+		return "store 读不到"
+	}
+	return m.prio.path
 }
 
 func (m *tuiModel) drawHeader(c *tuiCanvas) {
@@ -1175,18 +1195,23 @@ func runTUI(cfgPath, stateURL string) {
 			}
 		}()
 		app.evAdd("start", "", "", "", "tollgate 启动, 监听 "+cfg.Listen)
+		// 热加载: priority 页的 h 键与 SIGHUP 走同一条路 (同进程不需要 systemd)。
+		m.reloadFn = func() error {
+			c, err := loadConfig(cfgPath)
+			if err != nil {
+				app.evAdd("reload", "", "", "", "热加载失败: "+err.Error())
+				return err
+			}
+			app.applyConfig(c)
+			app.evAdd("reload", "", "", "", "热加载成功: "+cfgPath)
+			return nil
+		}
 		// SIGHUP 热加载别名与上游 (与常驻模式同一语义)。
 		go func() {
 			ch := make(chan os.Signal, 1)
 			signal.Notify(ch, syscall.SIGHUP)
 			for range ch {
-				c, err := loadConfig(cfgPath)
-				if err != nil {
-					app.evAdd("reload", "", "", "", "热加载失败: "+err.Error())
-					continue
-				}
-				app.applyConfig(c)
-				app.evAdd("reload", "", "", "", "热加载成功: "+cfgPath)
+				_ = m.reloadFn()
 			}
 		}()
 	}
@@ -1267,7 +1292,16 @@ func runTUI(cfgPath, stateURL string) {
 }
 
 // handleKey 处理一个输入字节; 返回 true = 退出。
+//
+// priority 页把编辑键留给自己 (h = 热加载, r = 生成配置, Tab = 换面板), 状态页的
+// h/l 仍是切页; 切页统一走 1-4 / 左右方向键 / l (priority 页的 h 被编辑键占了)。
 func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
+	e := m.prio
+	if m.tab == 3 && e != nil && e.prompt != nil {
+		*pending = nil // 输入态: 整字节喂给输入框, 别把 Esc 当转义序列攒
+		e.promptKey(b)
+		return false
+	}
 	*pending = append(*pending, b)
 	p := *pending
 	if p[0] == 0x1b {
@@ -1282,36 +1316,62 @@ func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 			code += 32 // '5'->'U'(上翻页), '6'->'V'(下翻页); 下面按语义处理
 		}
 		*pending = nil
+		var d int
 		switch code {
 		case 'A', 'U':
-			m.move(-1)
+			d = -1
 		case 'B', 'V':
-			m.move(1)
+			d = 1
 		case 'C':
-			m.tab = (m.tab + 1) % len(tuiTabs)
+			m.switchTab(1)
+			return false
 		case 'D':
-			m.tab = (m.tab + len(tuiTabs) - 1) % len(tuiTabs)
+			m.switchTab(-1)
+			return false
 		}
 		if code == 'U' {
-			m.move(-10)
+			d -= 10
 		}
 		if code == 'V' {
-			m.move(10)
+			d += 10
+		}
+		if m.tab == 3 && e != nil {
+			e.moveFocus(d)
+		} else {
+			m.move(d)
 		}
 		return false
 	}
 	*pending = nil
+	if m.tab == 3 && e != nil {
+		if quit, handled := e.key(b); handled {
+			return quit
+		}
+		switch b {
+		case 's':
+			e.saveStore()
+		case 'r':
+			e.regenerate()
+		case 'h':
+			m.prioHup()
+		case 'l':
+			m.switchTab(1)
+		case '1', '2', '3', '4':
+			m.switchTabTo(int(b - '1'))
+		}
+		return false
+	}
 	switch b {
 	case 'q', 0x03, 0x04: // q / Ctrl-C / Ctrl-D
 		return true
-	case '1', '2', '3':
-		m.tab = int(b - '1')
+	case '1', '2', '3', '4':
+		m.switchTabTo(int(b - '1'))
 	case 'h', 0x1b:
-		m.tab = (m.tab + len(tuiTabs) - 1) % len(tuiTabs)
+		m.switchTab(-1)
 	case 'l':
-		m.tab = (m.tab + 1) % len(tuiTabs)
+		m.switchTab(1)
 	case '\t':
-		m.tab = (m.tab + 1) % len(tuiTabs)
+		m.switchTab(1)
 	case 'j':
 		m.move(1)
 	case 'k':
@@ -1330,6 +1390,22 @@ func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 		m.move(m.rows - 6)
 	}
 	return false
+}
+
+// switchTab 左右切页 (方向键 / h / l / Tab)。
+func (m *tuiModel) switchTab(dir int) {
+	m.switchTabTo((m.tab + dir + len(tuiTabs)) % len(tuiTabs))
+}
+
+// switchTabTo 跳到第 i 个页签; 首次进 priority 页才去读 store (那是 ~/fff 下的真文件)。
+func (m *tuiModel) switchTabTo(i int) {
+	if i < 0 || i >= len(tuiTabs) {
+		return
+	}
+	m.tab = i
+	if m.tab == 3 && m.prio == nil {
+		m.prio = newTuiEditor(m.cfgPath)
+	}
 }
 
 // move 滚动当前 tab; 上限在下一次 draw 里按实际行数夹紧。
