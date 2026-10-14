@@ -674,7 +674,7 @@ func (e *tuiEditor) visibleRows() int {
 func (m *tuiModel) drawPriority(c *tuiCanvas, body int) {
 	e := m.prio
 	if e == nil {
-		c.line(tuiYell + " priority 页未装载" + tuiReset)
+		c.line(tuiIndent + tuiYell + "priority 页未装载" + tuiReset)
 		return
 	}
 	leftW := m.cols / 2
@@ -715,7 +715,7 @@ func (m *tuiModel) drawPriority(c *tuiCanvas, body int) {
 		if e.focus == 1 && i == e.provSel {
 			attr = tuiRev
 		}
-		left = append(left, attr+tuiPad(" "+name+"  priority="+strconv.Itoa(prioOf(e.provEntry(name))), leftW)+tuiReset)
+		left = append(left, attr+tuiPad(tuiIndent+name+"  priority="+strconv.Itoa(prioOf(e.provEntry(name))), leftW)+tuiReset)
 	}
 	for len(left) < provH {
 		left = append(left, strings.Repeat(" ", leftW))
@@ -728,7 +728,7 @@ func (m *tuiModel) drawPriority(c *tuiCanvas, body int) {
 		if e.focus == 0 && i == e.modelSel {
 			attr = tuiRev
 		}
-		text := " M" + strconv.Itoa(prioOf(row.model)) + " P" + strconv.Itoa(prioOf(row.entry)) +
+		text := tuiIndent + "M" + strconv.Itoa(prioOf(row.model)) + " P" + strconv.Itoa(prioOf(row.entry)) +
 			" " + row.provider + "/" + modelID(row.model)
 		left = append(left, attr+tuiPad(text, leftW)+tuiReset)
 	}
@@ -737,16 +737,16 @@ func (m *tuiModel) drawPriority(c *tuiCanvas, body int) {
 	}
 
 	right := make([]string, 0, body)
-	right = append(right, tuiBold+tuiPad(" 候选顺序预览", rightW)+tuiReset)
+	right = append(right, tuiBold+tuiPad(tuiIndent+"候选顺序预览", rightW)+tuiReset)
 	if row := e.selected(); row != nil {
 		cands := e.candsFor(row.alias)
-		right = append(right, tuiBold+tuiPad(" "+row.alias+" ("+strconv.Itoa(len(cands))+" 候选)", rightW)+tuiReset)
+		right = append(right, tuiBold+tuiPad(tuiIndent+row.alias+" ("+strconv.Itoa(len(cands))+" 候选)", rightW)+tuiReset)
 		for i, cand := range cands {
 			attr := ""
 			if cand.provider == row.provider && cand.modelID == modelID(row.model) {
 				attr = tuiRev
 			}
-			text := " " + strconv.Itoa(i+1) + ". " + cand.provider + "/" + cand.modelID +
+			text := tuiIndent + strconv.Itoa(i+1) + ". " + cand.provider + "/" + cand.modelID +
 				"  M" + strconv.Itoa(cand.modelPrio) + " P" + strconv.Itoa(cand.provPrio)
 			right = append(right, attr+tuiPad(text, rightW)+tuiReset)
 		}
@@ -766,7 +766,7 @@ func (e *tuiEditor) provTitle() string {
 	if e.focus == 1 {
 		focus = " (焦点)"
 	}
-	return " Providers" + focus
+	return tuiIndent + "Providers" + focus
 }
 
 func (e *tuiEditor) listTitle(shown, hidden int) string {
@@ -778,7 +778,7 @@ func (e *tuiEditor) listTitle(shown, hidden int) string {
 	if filter == "" {
 		filter = "-"
 	}
-	return " 模型 (过滤: " + filter + ", " + strconv.Itoa(shown) + " 个, 黑名单剔除 " +
+	return tuiIndent + "模型 (过滤: " + filter + ", " + strconv.Itoa(shown) + " 个, 黑名单剔除 " +
 		strconv.Itoa(hidden) + ")" + focus
 }
 
@@ -794,5 +794,5 @@ func (m *tuiModel) prioMessage(e *tuiEditor) string {
 	if e.err != "" {
 		text = "store 读不到: " + e.err
 	}
-	return tuiRev + tuiPad(" "+text+" ", m.cols-1) + tuiReset
+	return tuiRev + tuiPad(tuiIndent+text+" ", m.cols-1) + tuiReset
 }

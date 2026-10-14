@@ -230,6 +230,10 @@ const (
 	tuiCyan  = "\x1b[36m"
 )
 
+// tuiIndent 是所有行的左边界缩进: 标题、状态、上游状态、页签、表格与键位提示都从同一列
+// 起, 各行不再参差不齐。
+const tuiIndent = "  "
+
 // tuiBuckets 是路由表右侧"每分钟请求数"小方条的分钟数; tuiBlocks 是它的 9 档灰度。
 // tuiWindow 是默认回看窗口: 聚合只算这么久以内的日志 (与 -summary 的窗口口径一致)。
 const (
@@ -619,11 +623,11 @@ func (m *tuiModel) draw() string {
 		m.cols = 60
 	}
 	c := &tuiCanvas{cols: m.cols}
-	// 版式: 标题 / 状态 / 空行 / 页签 / 空行 / 内容 / ... / 键位 (贴底)。
-	// 固定占 7 行 (标题、状态、3 个空行、页签、键位), 其余全给内容。
+	// 版式: 标题 / 状态 / 空行 / 上游状态 / 页签 / 空行 / 内容 / ... / 键位 (贴底)。
+	// 固定占 8 行 (标题、状态、3 个空行、上游状态、页签、键位), 其余全给内容。
 	m.drawHeader(c)
 	m.drawTabs(c)
-	body := m.rows - 7
+	body := m.rows - 8
 	if body < 3 {
 		body = 3
 	}
@@ -642,7 +646,7 @@ func (m *tuiModel) draw() string {
 	for c.countLines() < m.rows-1 {
 		c.line("")
 	}
-	c.last(tuiDim + m.hint() + tuiReset)
+	c.last(m.hint())
 	// 万一体内容本身高过终端 (极小的窗口), 按行裁掉尾部, 别让提示被顶出屏幕。
 	return "\x1b[H" + c.clip(m.rows)
 }
@@ -720,7 +724,7 @@ func (m *tuiModel) drawHeader(c *tuiCanvas) {
 	if !m.live {
 		live = tuiRed + "no-state" + tuiReset
 	}
-	c.line(tuiBold + "tollgate tui" + tuiReset + "  " + tuiDim + "观测 " + src +
+	c.line(tuiIndent + tuiBold + "tollgate tui" + tuiReset + "  " + tuiDim + "观测 " + src +
 		"   监听 " + m.listen + "   日志 " + m.logPath + tuiReset)
 	c.line("")
 	act := len(m.pulse.Active)
@@ -729,13 +733,16 @@ func (m *tuiModel) drawHeader(c *tuiCanvas) {
 	if e := m.lastError(); e != "" {
 		line += "   " + tuiYell + e + tuiReset
 	}
-	c.line(line)
-	c.line("") // 标题、状态与页签之间各留一行
+	c.line(tuiIndent + line)
 }
 
+// drawTabs 画两行: 上面是每个上游的状态, 下面是页签。分两行是因为上游状态随上游数量
+// 变长, 挤在页签行里会把页签顶掉 (窄终端尤其明显)。
 func (m *tuiModel) drawTabs(c *tuiCanvas) {
+	c.line(m.providerLine())
+	c.line("") // 上游状态与页签之间留一行 (状态行与它之间不留)
 	var b strings.Builder
-	b.WriteString(" ")
+	b.WriteString(tuiIndent)
 	for i, name := range tuiTabs {
 		if i == m.tab {
 			b.WriteString(tuiRev + tuiBold + " " + name + " " + tuiReset)
@@ -744,18 +751,28 @@ func (m *tuiModel) drawTabs(c *tuiCanvas) {
 		}
 		b.WriteString(" ")
 	}
-	// 每个上游一句话: 队列 / 上限 / 锁
-	for _, cand := range m.pulse.Cands {
+	c.line(b.String())
+	c.line("") // 页签与内容之间留一行
+}
+
+// providerLine 是每个上游一句话: 进行中/自适应上限、排队数、锁与退避状态。
+// 行首不加竖线 (左边没有东西可分隔), 竖线只做上游之间的分隔。
+func (m *tuiModel) providerLine() string {
+	var b strings.Builder
+	b.WriteString(tuiIndent)
+	for i, cand := range m.pulse.Cands {
+		if i > 0 {
+			b.WriteString(tuiDim + " | " + tuiReset)
+		}
 		state := tuiGreen + "正常" + tuiReset
 		if s := candState(cand, m.gates[cand.ID]); s != "" {
 			state = tuiRed + s + tuiReset
 		}
-		b.WriteString(tuiDim + "| " + tuiReset + cand.ID + " " +
+		b.WriteString(cand.ID + " " +
 			strconv.Itoa(cand.InFlight) + "/" + strconv.Itoa(cand.SoftCap) +
-			" 排队" + strconv.Itoa(cand.Queue) + " " + state + " ")
+			" 排队" + strconv.Itoa(cand.Queue) + " " + state)
 	}
-	c.line(b.String())
-	c.line("") // 页签与内容之间留一行
+	return b.String()
 }
 
 // candState 拼候选的异常状态; 正常时返回空串。
@@ -800,7 +817,7 @@ func drawTable(c *tuiCanvas, cols []tuiCol, rows [][]string, scroll, limit int) 
 	for i, col := range cols {
 		head[i] = tuiTrunc(col.title, col.w)
 	}
-	c.line(tuiBold + tuiReset + " " + strings.Join(alignRow(cols, head, vis), "  ") + tuiReset)
+	c.line(tuiIndent + tuiBold + strings.Join(alignRow(cols, head, vis), "  ") + tuiReset)
 	if len(rows) == 0 {
 		c.line(tuiDim + "  (空)" + tuiReset)
 		return
@@ -810,7 +827,7 @@ func drawTable(c *tuiCanvas, cols []tuiCol, rows [][]string, scroll, limit int) 
 		end = len(rows)
 	}
 	for i := scroll; i < end; i++ {
-		c.line(" " + strings.Join(alignRow(cols, rows[i], vis), "  "))
+		c.line(tuiIndent + strings.Join(alignRow(cols, rows[i], vis), "  "))
 	}
 	if len(rows) > limit {
 		c.line(tuiDim + "  ... 共 " + strconv.Itoa(len(rows)) + " 行, 当前 " +
@@ -825,7 +842,7 @@ func fitCols(cols []tuiCol, width int) []bool {
 		vis[i] = true
 	}
 	total := func() int {
-		n, shown := 1, 0
+		n, shown := len(tuiIndent), 0
 		for i, col := range cols {
 			if !vis[i] {
 				continue
@@ -903,7 +920,7 @@ func (m *tuiModel) drawActive(c *tuiCanvas, body int) {
 	}, rows, m.scroll[0], half)
 
 	c.line("")
-	c.line(tuiBold + " 上游队列 (进行中/并发上限, 排队, 状态)" + tuiReset)
+	c.line(tuiIndent + tuiBold + "上游队列 (进行中/并发上限, 排队, 状态)" + tuiReset)
 	crows := make([][]string, 0, len(m.pulse.Cands))
 	for _, cand := range m.pulse.Cands {
 		state := tuiGreen + "正常" + tuiReset
@@ -932,8 +949,8 @@ func (m *tuiModel) drawActive(c *tuiCanvas, body int) {
 // drawRoutes: 路由聚合表 + 顶部窗口汇总。
 func (m *tuiModel) drawRoutes(c *tuiCanvas, body int) {
 	rows := m.routeRows()
-	c.line(tuiDim + " " + m.routeSummary(rows) + tuiReset)
-	c.line(tuiDim + " " + m.sparkline() + tuiReset)
+	c.line(tuiDim + tuiIndent + m.routeSummary(rows) + tuiReset)
+	c.line(tuiDim + tuiIndent + m.sparkline() + tuiReset)
 	c.line("")
 	cells := make([][]string, 0, len(rows))
 	for _, r := range rows {
