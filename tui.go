@@ -542,10 +542,25 @@ func (m *tuiModel) gateLocks() {
 	}
 	now := time.Now()
 	out := map[string]string{}
-	for id, l := range st.Locks {
-		if left := time.UnixMilli(l.UntilMs).Sub(now); left > 0 {
-			out[id] = lockReason(l.Reason) + " " + durStr(left)
+	for key, l := range st.Locks {
+		left := time.UnixMilli(l.UntilMs).Sub(now)
+		if left <= 0 {
+			continue
 		}
+		// 记录里带上游与模型; 老版本的文件只有 map 键 "<上游>" / "<上游>/<模型>"。
+		up, model := l.Upstream, l.Model
+		if up == "" {
+			parts := strings.SplitN(key, "/", 2)
+			up = parts[0]
+			if len(parts) == 2 && parts[1] != lockAll {
+				model = parts[1]
+			}
+		}
+		v := lockReason(l.Reason) + " " + durStr(left)
+		if model != "" {
+			v += " " + model // 熔断锁: 标明是哪个模型, 不是整家
+		}
+		out[up] = v
 	}
 	m.gates = out
 }
@@ -764,17 +779,17 @@ func (m *tuiModel) providerLine() string {
 	return b.String()
 }
 
-// candState 拼候选的异常状态; 正常时返回空串。
+// candState 拼候选的异常状态; 正常时返回空串。整家锁 (额度) 与模型级锁 (熔断) 分开说:
+// 后者带模型名, 免得看成整个上游都不可用。
 func candState(c candView, gateLock string) string {
 	var parts []string
 	if c.LockMs > 0 {
-		why := "额度锁"
-		if c.LockWhy == "breaker" {
-			why = "熔断锁"
-		}
-		parts = append(parts, why+" "+durStr(time.Duration(c.LockMs)*time.Millisecond))
+		parts = append(parts, "额度锁 "+durStr(time.Duration(c.LockMs)*time.Millisecond))
 	} else if gateLock != "" {
 		parts = append(parts, "锁 "+gateLock)
+	}
+	for _, ml := range c.Models {
+		parts = append(parts, "熔断锁 "+durStr(time.Duration(ml.LeftMs)*time.Millisecond)+" "+ml.Model)
 	}
 	if c.PausedMs > 0 {
 		parts = append(parts, "退避 "+durStr(time.Duration(c.PausedMs)*time.Millisecond))
@@ -1131,7 +1146,7 @@ func sameEvent(a, b routeEvent) bool {
 var tuiEventKinds = map[string]string{
 	"start": "启动", "reload": "重载", "ok": "正常", "error": "错误",
 	"fallback": "换候选", "gate": "闸门", "queue": "排队", "slow": "慢",
-	"lock": "加锁", "unlock": "解锁",
+	"lock": "加锁", "unlock": "解锁", "breaker": "熔断",
 }
 
 // tuiEventTag 给事件类型上色; 窄终端不依赖颜色也能读。
@@ -1141,7 +1156,7 @@ func tuiEventTag(kind string) string {
 		name = kind
 	}
 	switch kind {
-	case "error", "gate", "lock":
+	case "error", "gate", "lock", "breaker":
 		return tuiRed + name + tuiReset
 	case "fallback", "slow", "queue":
 		return tuiYell + name + tuiReset

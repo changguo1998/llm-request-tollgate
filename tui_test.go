@@ -74,7 +74,7 @@ func TestCandViewSnapshot(t *testing.T) {
 	if c == nil {
 		t.Fatal("上游没有调度器")
 	}
-	c.lockProvider("quota", 10*time.Minute)
+	c.lock(lockAll, "quota", 10*time.Minute)
 	c.mu.Lock()
 	c.inFlight, c.softCap = 2, 3
 	c.queue = append(c.queue, &ticket{})
@@ -89,7 +89,7 @@ func TestCandViewSnapshot(t *testing.T) {
 		t.Errorf("候选计数不对: %+v", v)
 	}
 	if v.LockMs <= 0 || v.LockWhy != "quota" {
-		t.Errorf("供应商锁没被看到: %+v", v)
+		t.Errorf("整家锁没被看到: %+v", v)
 	}
 }
 

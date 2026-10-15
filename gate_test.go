@@ -54,7 +54,7 @@ func TestQueueFIFOAndPacing(t *testing.T) {
 	for n := 1; n <= 3; n++ {
 		go func(n int) {
 			time.Sleep(time.Duration(n) * 15 * time.Millisecond) // 错开入队, 让顺序确定
-			_, why, _, _, ok := c.acquire(context.Background(), g)
+			_, why, _, _, ok := c.acquire(context.Background(), g, "m1")
 			ch <- res{n, time.Now(), ok, why}
 		}(n)
 	}
@@ -90,21 +90,21 @@ func TestSoftCapStartProbeAndGrow(t *testing.T) {
 	if c.softCap != 1 {
 		t.Fatalf("并发上限起点应为 1, 实为 %d", c.softCap)
 	}
-	if _, why, _, _, ok := c.acquire(context.Background(), g); !ok {
+	if _, why, _, _, ok := c.acquire(context.Background(), g, "m1"); !ok {
 		t.Fatalf("第一笔应拿到槽位: %s", why)
 	}
-	kind, why, _, _, ok := c.acquire(context.Background(), g)
+	kind, why, _, _, ok := c.acquire(context.Background(), g, "m1")
 	if !ok || kind != slotProbe {
 		t.Fatalf("并发满时应试探: kind=%v ok=%v why=%s", kind, ok, why)
 	}
-	if _, why3, _, _, ok3 := c.acquire(context.Background(), g); ok3 || why3 != "sem_timeout" {
+	if _, why3, _, _, ok3 := c.acquire(context.Background(), g, "m1"); ok3 || why3 != "sem_timeout" {
 		t.Fatalf("试探在飞时不该再试探, 应等信号量: ok=%v why=%s", ok3, why3)
 	}
 	c.finish(slotProbe, true) // 试探成功
 	if c.softCap != 2 {
 		t.Fatalf("试探成功后上限应为 2, 实为 %d", c.softCap)
 	}
-	kind, why, _, _, ok = c.acquire(context.Background(), g)
+	kind, why, _, _, ok = c.acquire(context.Background(), g, "m1")
 	if !ok || kind != slotCapped {
 		t.Fatalf("上限放宽后应能正常拿到槽位: kind=%v ok=%v why=%s", kind, ok, why)
 	}
@@ -114,11 +114,11 @@ func TestSoftCapStartProbeAndGrow(t *testing.T) {
 func TestConcurrencyLockBlocksProbe(t *testing.T) {
 	c := newCand("u1")
 	g := testGate()
-	if _, _, _, _, ok := c.acquire(context.Background(), g); !ok {
+	if _, _, _, _, ok := c.acquire(context.Background(), g, "m1"); !ok {
 		t.Fatal("第一笔应拿到槽位")
 	}
 	c.lockConcurrency("concurrency", 500*time.Millisecond)
-	if _, why, _, _, ok := c.acquire(context.Background(), g); ok || why != "sem_timeout" {
+	if _, why, _, _, ok := c.acquire(context.Background(), g, "m1"); ok || why != "sem_timeout" {
 		t.Fatalf("并发锁生效时不该试探: ok=%v why=%s", ok, why)
 	}
 	if lock, left, _ := func() (bool, time.Duration, string) {
@@ -260,19 +260,58 @@ func TestClassifyProviderRules(t *testing.T) {
 	}
 }
 
-// TestProviderLockKeepsLaterExpiry 核对额度与熔断先后触发时取更晚的到期时间。
-func TestProviderLockKeepsLaterExpiry(t *testing.T) {
+// TestLockKeepsLaterExpiry 核对同一个作用域里先后加锁时取更晚的到期时间, 以及整家锁
+// (额度) 与模型级锁 (熔断) 落在不同作用域, 互不覆盖。
+func TestLockKeepsLaterExpiry(t *testing.T) {
 	c := newCand("u1")
-	c.lockProvider("quota", 300*time.Millisecond)
-	c.lockProvider("breaker", 50*time.Millisecond)
-	locked, left, reason := c.locked()
-	if !locked || reason != "quota" || left <= 200*time.Millisecond {
-		t.Fatalf("应保留更晚的到期时间与原因: locked=%v left=%s reason=%s", locked, left, reason)
+	c.lock(lockAll, "quota", 300*time.Millisecond)
+	c.lock("m2", "breaker", 50*time.Millisecond)
+	if locked, _, reason := c.locked("m1"); !locked || reason != "quota" {
+		t.Fatalf("整家锁该管住所有模型: locked=%v reason=%s", locked, reason)
 	}
-	c.lockProvider("breaker", time.Second)
-	locked, left, reason = c.locked()
+	c.lock(lockAll, "quota", 300*time.Millisecond) // 整家锁
+	c.lock("m2", "breaker", 400*time.Millisecond)  // 只锁 m2 的熔断锁
+	locked, left, reason := c.locked("m1")
+	if !locked || reason != "quota" || left <= 200*time.Millisecond {
+		t.Fatalf("整家锁该管住没被单独锁的模型: locked=%v left=%s reason=%s", locked, left, reason)
+	}
+	locked, left, reason = c.locked("m2")
+	if !locked || reason != "breaker" || left <= 300*time.Millisecond {
+		t.Fatalf("两把锁同时在时以模型锁为准: locked=%v left=%s reason=%s", locked, left, reason)
+	}
+	c.lock("m2", "breaker", time.Second)
+	locked, left, reason = c.locked("m2")
 	if !locked || reason != "breaker" || left <= 900*time.Millisecond {
-		t.Fatalf("更晚的锁应生效: locked=%v left=%s reason=%s", locked, left, reason)
+		t.Fatalf("同作用域内更晚的锁应生效: locked=%v left=%s reason=%s", locked, left, reason)
+	}
+}
+
+// TestModelLocksAreIsolated 核对熔断按 upstream/model 粒度: 一个模型连错 4 次只锁它自己,
+// 同家别的模型照常发送, 且别的模型的成功不会把它的计数洗掉。
+func TestModelLocksAreIsolated(t *testing.T) {
+	c := newCand("u1")
+	g := testGate()
+	for n := 1; n <= 4; n++ {
+		if breaker := c.recordOther("m1", g); breaker != (n == 4) {
+			t.Fatalf("第 %d 次连续失败: 熔断=%v, 期望 %v", n, breaker, n == 4)
+		}
+	}
+	c.recordSuccess("m2") // 同家另一个模型成功
+	c.mu.Lock()
+	fails := c.gate("m1").fails
+	c.mu.Unlock()
+	if fails != 4 {
+		t.Fatalf("别的模型的成功不该清掉 m1 的计数, 实为 %d", fails)
+	}
+	if locked, _, _ := c.locked("m2"); locked {
+		t.Fatal("m1 的熔断不该锁住 m2")
+	}
+	c.lock("m1", "breaker", time.Minute)
+	if locked, _, reason := c.locked("m1"); !locked || reason != "breaker" {
+		t.Fatalf("m1 该在熔断锁内: locked=%v reason=%s", locked, reason)
+	}
+	if locked, _, _ := c.locked("m2"); locked {
+		t.Fatal("m1 的熔断锁不该传导给 m2")
 	}
 }
 
@@ -280,12 +319,12 @@ func TestProviderLockKeepsLaterExpiry(t *testing.T) {
 func TestProviderLockReleasesQueued(t *testing.T) {
 	c := newCand("u1")
 	g := normGate(GateCfg{IntervalMs: 500, SemWaitMs: 300, QueueWaitMs: 2000})
-	if _, _, _, _, ok := c.acquire(context.Background(), g); !ok {
+	if _, _, _, _, ok := c.acquire(context.Background(), g, "m1"); !ok {
 		t.Fatal("第一笔应拿到槽位")
 	}
 	done := make(chan string, 1)
 	go func() {
-		_, why, _, _, ok := c.acquire(context.Background(), g)
+		_, why, _, _, ok := c.acquire(context.Background(), g, "m1")
 		if ok {
 			done <- "ok"
 			return
@@ -294,7 +333,7 @@ func TestProviderLockReleasesQueued(t *testing.T) {
 	}()
 	time.Sleep(30 * time.Millisecond) // 让它进队列并卡在节拍上
 	start := time.Now()
-	c.lockProvider("quota", 200*time.Millisecond)
+	c.lock(lockAll, "quota", 200*time.Millisecond)
 	select {
 	case why := <-done:
 		if why != "locked" {
@@ -314,11 +353,11 @@ func TestBackoffSequence(t *testing.T) {
 	g := testGate() // retry_backoff_ms 未给, 走缺省 [10000, 20000, 30000]
 	prev := time.Duration(0)
 	for n := 1; n <= 3; n++ {
-		if breaker := c.recordOther(g); breaker {
+		if breaker := c.recordOther("m1", g); breaker {
 			t.Fatalf("第 %d 次连续失败不该进熔断", n)
 		}
 		c.mu.Lock()
-		pause := time.Until(c.pausedUntil)
+		pause := time.Until(c.pauseOf("m1"))
 		c.mu.Unlock()
 		if want := g.backoff(n); pause < want-100*time.Millisecond || pause > want {
 			t.Fatalf("第 %d 次失败的暂停 %s 与配置 %s 不符", n, pause, want)
@@ -328,20 +367,25 @@ func TestBackoffSequence(t *testing.T) {
 		}
 		prev = pause
 	}
-	if !c.recordOther(g) {
+	if !c.recordOther("m1", g) {
 		t.Fatal("第 4 次连续失败应进熔断")
 	}
-	c.recordSuccess()
-	if c.errStreak != 0 {
-		t.Fatalf("成功后连续错误计数应清零, 实为 %d", c.errStreak)
+	c.recordSuccess("m1")
+	c.mu.Lock()
+	fails := c.gate("m1").fails
+	c.mu.Unlock()
+	if fails != 0 {
+		t.Fatalf("成功后连续错误计数应清零, 实为 %d", fails)
 	}
 }
 
-// TestGateStateRoundTrip 核对供应商锁落盘后能在重启时恢复, 过期或未知上游的不恢复。
+// TestGateStateRoundTrip 核对定时锁落盘后能在重启时恢复 (整家锁与模型锁都算), 过期或
+// 未知上游的不恢复。
 func TestGateStateRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "gate-state.json")
 	a := &App{cands: map[string]*cand{"u1": newCand("u1")}, gatePath: path}
-	a.cands["u1"].lockProvider("quota", 10*time.Minute)
+	a.cands["u1"].lock(lockAll, "quota", 10*time.Minute)
+	a.cands["u1"].lock("m2", "breaker", 5*time.Minute)
 	a.saveGateState()
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("锁状态没有落盘: %v", err)
@@ -349,25 +393,59 @@ func TestGateStateRoundTrip(t *testing.T) {
 
 	restarted := &App{cands: map[string]*cand{"u1": newCand("u1")}, gatePath: path}
 	restarted.loadGateState()
-	locked, left, reason := restarted.cands["u1"].locked()
+	locked, left, reason := restarted.cands["u1"].locked("m1")
 	if !locked || reason != "quota" || left < 9*time.Minute {
-		t.Fatalf("重启后应恢复未到期的锁: locked=%v left=%s reason=%s", locked, left, reason)
+		t.Fatalf("重启后应恢复未到期的整家锁: locked=%v left=%s reason=%s", locked, left, reason)
+	}
+	if locked, left, reason := restarted.cands["u1"].locked("m2"); !locked || reason != "breaker" || left < 4*time.Minute {
+		t.Fatalf("两把锁同时在时该报模型锁: locked=%v left=%s reason=%s", locked, left, reason)
 	}
 
-	stale := gateState{Locks: map[string]gateLockRec{
-		"u1":    {UntilMs: time.Now().Add(-time.Minute).UnixMilli(), Reason: "breaker"},
+	// 过期记录不恢复; 只有模型锁时也不该传导给同家别的模型。
+	modelOnly := filepath.Join(t.TempDir(), "gate-state.json")
+	state := gateState{Locks: map[string]gateLockRec{
+		"u1/m1": {UntilMs: time.Now().Add(-time.Minute).UnixMilli(), Reason: "breaker"},
+		"u1/m2": {UntilMs: time.Now().Add(time.Hour).UnixMilli(), Reason: "breaker"},
 		"ghost": {UntilMs: time.Now().Add(time.Hour).UnixMilli(), Reason: "quota"},
 	}}
-	b, err := json.Marshal(stale)
+	b, err := json.Marshal(state)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, b, 0o644); err != nil {
+	if err := os.WriteFile(modelOnly, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	again := &App{cands: map[string]*cand{"u1": newCand("u1")}, gatePath: path}
+	again := &App{cands: map[string]*cand{"u1": newCand("u1")}, gatePath: modelOnly}
 	again.loadGateState()
-	if locked, _, _ := again.cands["u1"].locked(); locked {
+	if locked, _, _ := again.cands["u1"].locked("m1"); locked {
 		t.Fatal("已过期的锁不该恢复")
+	}
+	if locked, left, reason := again.cands["u1"].locked("m2"); !locked || reason != "breaker" || left < 50*time.Minute {
+		t.Fatalf("按键解析该恢复 u1/m2 的锁: locked=%v left=%s reason=%s", locked, left, reason)
+	}
+	if locked, _, _ := again.cands["u1"].locked("m3"); locked {
+		t.Fatal("恢复的熔断锁只该管住同一个模型")
+	}
+
+	// 兼容老格式: 记录里没有 upstream / model 字段, 键是 "<上游>" 或 "<上游>/<模型>"。
+	legacyPath := filepath.Join(t.TempDir(), "gate-state.json")
+	legacy := gateState{Locks: map[string]gateLockRec{
+		"u1":    {UntilMs: time.Now().Add(time.Hour).UnixMilli(), Reason: "quota"},
+		"u1/m9": {UntilMs: time.Now().Add(2 * time.Hour).UnixMilli(), Reason: "breaker"},
+	}}
+	b, err = json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := &App{cands: map[string]*cand{"u1": newCand("u1")}, gatePath: legacyPath}
+	old.loadGateState()
+	if locked, _, reason := old.cands["u1"].locked("m3"); !locked || reason != "quota" {
+		t.Fatalf("旧格式的键 \"u1\" 该当成整家锁恢复: locked=%v reason=%s", locked, reason)
+	}
+	if locked, left, reason := old.cands["u1"].locked("m9"); !locked || reason != "breaker" || left < 90*time.Minute {
+		t.Fatalf("旧格式的键 \"u1/m9\" 该按模型锁恢复: locked=%v left=%s reason=%s", locked, left, reason)
 	}
 }

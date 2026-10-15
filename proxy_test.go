@@ -257,9 +257,9 @@ func TestProxyQuotaRuleLocksCandidate(t *testing.T) {
 	if status != http.StatusTooManyRequests || !strings.Contains(string(body), "insufficient balance") {
 		t.Fatalf("上游 429 应原样透传, 实为 %d %s", status, body)
 	}
-	locked, _, reason := app.cands["u1"].locked()
+	locked, _, reason := app.cands["u1"].locked("real-1")
 	if !locked || reason != "quota" {
-		t.Fatalf("命中额度规则后该候选应被锁: locked=%v reason=%s", locked, reason)
+		t.Fatalf("命中额度规则后该上游应被锁: locked=%v reason=%s", locked, reason)
 	}
 
 	// 第二笔不再真发: 候选全被锁 → 429 说明是锁而不是上游错误。
@@ -304,9 +304,9 @@ func TestProxyBreakerAfterRepeatedFailures(t *testing.T) {
 	n := calls
 	mu.Unlock()
 	app.mu.RLock()
-	streak := app.cands["u1"].errStreak
+	streak := app.cands["u1"].gate("real-1").fails
 	app.mu.RUnlock()
-	locked, _, reason := app.cands["u1"].locked()
+	locked, _, reason := app.cands["u1"].locked("real-1")
 	if !locked || reason != "breaker" {
 		t.Fatalf("连续 4 次失败后应熔断: locked=%v reason=%s calls=%d streak=%d", locked, reason, n, streak)
 	}
@@ -445,5 +445,70 @@ func TestUnclassifiedErrorIsLogged(t *testing.T) {
 		!strings.Contains(out, "upstream=u1") ||
 		!strings.Contains(out, "engine overloaded") {
 		t.Fatalf("未分类样本没写进服务日志: %s", out)
+	}
+}
+
+// TestProxyBreakerIsPerModel 覆盖熔断的粒度: 同一个上游下 m1 的模型连错熔断后, 只跳过 m1,
+// m2 (另一个真实模型) 照常真发并成功。
+func TestProxyBreakerIsPerModel(t *testing.T) {
+	var mu sync.Mutex
+	var sent []string // 每次真发带上请求里的 model, 用来核对谁被发过
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var req struct {
+			Model string `json:"model"`
+		}
+		_ = json.Unmarshal(b, &req)
+		mu.Lock()
+		sent = append(sent, req.Model)
+		mu.Unlock()
+		if req.Model == "bad-1" {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":{"message":"boom"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"hi"}}],"usage":{"total_tokens":1}}`)
+	}))
+	defer up.Close()
+
+	cfg := &Config{
+		Gate:      GateCfg{IntervalMs: 5, SemWaitMs: 50, QueueWaitMs: 200, RetryBackoffMs: []int{5, 10, 15}},
+		Upstreams: []UpstreamCfg{{ID: "u1", BaseURL: up.URL, AuthHeader: "Authorization", Key: "k"}},
+		Aliases:   map[string][][2]string{"m1": {{"u1", "bad-1"}}, "m2": {{"u1", "good-1"}}},
+	}
+	app := newTestAppCfg(t, cfg)
+	proxy := httptest.NewServer(app)
+	defer proxy.Close()
+	url := proxy.URL + "/v1/chat/completions"
+
+	// m1: 一笔内重试 4 次全败 -> 熔断只锁 bad-1。
+	if status, body := postJSON(t, url, `{"model":"m1","messages":[]}`); status != http.StatusInternalServerError {
+		t.Fatalf("应透传上游 500, 实为 %d %s", status, body)
+	}
+	if locked, _, reason := app.cands["u1"].locked("bad-1"); !locked || reason != "breaker" {
+		t.Fatalf("bad-1 连错 4 次后该熔断: locked=%v reason=%s", locked, reason)
+	}
+	if locked, _, _ := app.cands["u1"].locked("good-1"); locked {
+		t.Fatal("同家另一个模型不该被锁")
+	}
+
+	// m2 照常真发 (上游里出现 good-1 的请求), 并拿到 200。
+	status, body := postJSON(t, url, `{"model":"m2","messages":[]}`)
+	if status != http.StatusOK {
+		t.Fatalf("同家健康模型该照常成功, 实为 %d %s", status, body)
+	}
+	// m1 再打一次: 锁内不真发, 给带原因的 429。
+	status, body = postJSON(t, url, `{"model":"m1","messages":[]}`)
+	if status != http.StatusTooManyRequests || !strings.Contains(string(body), "locked") {
+		t.Fatalf("熔断后该给带原因的 429, 实为 %d %s", status, body)
+	}
+	mu.Lock()
+	got := strings.Join(sent, ",")
+	mu.Unlock()
+	if !strings.Contains(got, "good-1") {
+		t.Fatalf("健康模型应真发出去, 实际发过: %s", got)
+	}
+	if strings.Count(got, "bad-1") != 4 {
+		t.Fatalf("熔断前应只重试 4 次, 之后不再真发, 实际发过: %s", got)
 	}
 }
