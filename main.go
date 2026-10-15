@@ -964,7 +964,6 @@ const (
 	stageParse  = iota // 已解析出逻辑名, 还没进候选链
 	stageSend          // 正对某候选发送或已发出 (upstream 已填)
 	stageFailed        // 候选链走完仍未发出去 (合成 429 / 透传错误)
-	stageDone          // 已给出响应
 )
 
 // flow 是一笔进行中的请求 (只用于展示, 不参与调度判断)。字段导出, 因为它要按原样
@@ -980,10 +979,7 @@ type flow struct {
 	Model     string    `json:"backend,omitempty"`  // 该候选的真实模型 id
 	Stage     int       `json:"stage"`
 	Attempt   int       `json:"attempt,omitempty"` // 已试过的候选数 (含当前)
-	Gate      string    `json:"gate,omitempty"`    // 正卡在哪: locked / backoff / pace / sent / transport
-	Queued    bool      `json:"queued"`
-	Status    int       `json:"status,omitempty"`
-	TtfbMs    int64     `json:"ttfb_ms,omitempty"`
+	Gate      string    `json:"gate,omitempty"`    // 在等什么 (屏幕上那句话): 已发出 / 等节拍 … / 退避 … / 额度锁 …
 }
 
 // viewEvent 是事件流的一条: 调度器动作 + 每笔请求的结局 (由引擎侧发出, 不经日志回读)。
@@ -1026,23 +1022,19 @@ type pulse struct {
 	MissingAt string      `json:"missing_at,omitempty"`
 }
 
-// stageName 是屏幕上「当前状态」那一列的说法。
+// stageName 是屏幕上「状态」那一列: 只写变化的部分 (在等什么 / 卡在哪一步)。
+// 不加"等待"前缀 —— 表里每行都在等, 前缀只是噪音。
 func stageName(f flow) string {
-	if f.Gate != "" {
-		return "等待 " + f.Gate
-	}
 	switch f.Stage {
 	case stageParse:
 		return "解析中"
-	case stageSend:
-		if f.TtfbMs > 0 {
-			return "接收中"
-		}
-		return "已发出"
 	case stageFailed:
 		return "已失败"
 	}
-	return "已结束"
+	if f.Gate != "" {
+		return f.Gate
+	}
+	return "已发出"
 }
 
 func (a *App) evAdd(kind, logical, upstream, model, msg string) {
@@ -1091,19 +1083,6 @@ func (a *App) flowStart(logical, source, path string, stream bool) uint64 {
 	return id
 }
 
-// gateWord 把调度器给的等待原因换成屏幕上的说法; 空串表示没在等。
-func gateWord(g string) string {
-	switch g {
-	case "queue":
-		return "排队中"
-	case "sem":
-		return "等并发槽位"
-	case "locked":
-		return "候选已加锁"
-	}
-	return g
-}
-
 // flowStage 更新一笔进行中请求的展示状态; up/mod 为空表示不改这两列。
 // gate 由调用方先算好 (读 cand 的锁/节拍), 这里只写展示字段, 不碰调度。
 func (a *App) flowStage(id uint64, up, mod string, stage int, gate string, attempt int) {
@@ -1115,10 +1094,7 @@ func (a *App) flowStage(id uint64, up, mod string, stage int, gate string, attem
 		if mod != "" {
 			f.Model = mod
 		}
-		f.Stage, f.Gate, f.Attempt = stage, gateWord(gate), attempt
-		if gate == "queue" || gate == "sem" {
-			f.Queued = true
-		}
+		f.Stage, f.Gate, f.Attempt = stage, gate, attempt
 	}
 	a.flowMu.Unlock()
 }
@@ -1144,7 +1120,7 @@ func (o *flowObs) mark(status int, msg string) {
 		o.a.evAdd("fallback", o.logical, o.up, o.model, firstLine(msg, status))
 	}
 	if status < 0 {
-		o.a.flowStage(o.id, o.up, o.model, stageFailed, "transport", o.attempt)
+		o.a.flowStage(o.id, o.up, o.model, stageFailed, "", o.attempt)
 		return
 	}
 	o.a.flowStage(o.id, o.up, o.model, stageSend, o.gateNow(), o.attempt)
@@ -1213,24 +1189,26 @@ func (o *flowObs) finish(status int, ttfbMs int64) {
 	}
 }
 
-// durStr 把时长写成屏幕上好读的紧凑形态 (1.2s / 340ms / 2m10s)。
+// durStr 把时长写成屏幕上好读的形态 (时间段, 不是时刻): 前导的零段省掉 ——
+// 有小时写 hh:mm:ss, 只有分秒写 mm:ss, 只有秒写 12s / 0.8s (带单位, 不然看不出是秒)。
 func durStr(d time.Duration) string {
 	if d <= 0 {
 		return "0s"
 	}
-	switch {
-	case d < time.Second:
-		return strconv.FormatInt(d.Milliseconds(), 10) + "ms"
-	case d < time.Minute:
+	if d < time.Second {
 		return strconv.FormatFloat(d.Seconds(), 'f', 1, 64) + "s"
-	case d < time.Hour:
-		return strconv.Itoa(int(d.Minutes())) + "m" + strconv.Itoa(int(d.Seconds())%60) + "s"
-	default:
-		return strconv.Itoa(int(d.Hours())) + "h" + strconv.Itoa(int(d.Minutes())%60) + "m"
 	}
+	h, m, s := int(d.Hours()), int(d.Minutes())%60, int(d.Seconds())%60
+	switch {
+	case h > 0:
+		return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+	case m > 0:
+		return fmt.Sprintf("%02d:%02d", m, s)
+	}
+	return strconv.Itoa(s) + "s"
 }
 
-func (a *App) flowEnd(id uint64, status int, ttfbMs int64) {
+func (a *App) flowEnd(id uint64) {
 	a.flowMu.Lock()
 	delete(a.flows, id)
 	a.flowMu.Unlock()
@@ -2145,7 +2123,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		// 退出顺序: 先按实际结局刷新展示状态, 再把这笔从"进行中"表里摘掉。
 		obs.finish(finalStatus, finalTtfb)
-		a.flowEnd(flowID, finalStatus, finalTtfb)
+		a.flowEnd(flowID)
 	}()
 	// 每个 return 前面都要有它: 收尾状态 (429/502/透传错误码) 靠它带出。
 	setFinal := func(status int, ttfb int64) { finalStatus, finalTtfb = status, ttfb }

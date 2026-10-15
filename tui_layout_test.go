@@ -50,7 +50,7 @@ func TestDrawFillsTerminalHeight(t *testing.T) {
 		ioctlCall(m.Fd(), syscall.TIOCSWINSZ, unsafe.Pointer(&tuiWinsize{Row: uint16(rows), Col: 120}))
 		mo := newTUIModel("cfg")
 		mo.pulse.Cands = []candView{{ID: "ustc", SoftCap: 1}}
-		for _, tab := range []int{0, 1, 2, 3} {
+		for _, tab := range []int{0, 1, 2} {
 			mo.tab = tab
 			out := mo.draw()
 			got := strings.Count(out, "\r\n")
@@ -106,4 +106,50 @@ func stripANSI(s string) string {
 
 func ioctlCall(fd uintptr, req uintptr, arg unsafe.Pointer) {
 	syscall.Syscall(syscall.SYS_IOCTL, fd, req, uintptr(arg))
+}
+
+// autoCols 的分配规则: 列宽按内容涨 (夹在 [w, max]), 余量先补齐差得少的列;
+// 余量不够时是内容被截断, 而不是整列消失。
+func TestAutoColsAllocatesByContent(t *testing.T) {
+	cols := []tuiCol{
+		{"编号", 4, 6, true, 1},
+		{"逻辑名", 10, 28, false, 0},
+		{"路径", 12, 30, false, 3},
+	}
+	rows := [][]string{{"12345", "claude-sonnet-4", "/v1/chat/completions"}}
+	// 基准宽合计 32, 内容宽合计 46 (编号 5 / 逻辑名 15 / 路径 20)。
+	cases := []struct {
+		width int
+		want  [3]int
+		why   string
+	}{
+		{200, [3]int{5, 15, 20}, "宽终端: 各列涨到内容宽"},
+		{38, [3]int{5, 15, 12}, "余量 6: 先补齐编号 (差 1), 再喂逻辑名 (差 5), 路径停在基准宽"},
+		{33, [3]int{5, 10, 12}, "余量 1: 只够补编号 (差得最少)"},
+		{20, [3]int{4, 10, 12}, "连基准宽都放不下: 原样返回, 交给 fitCols 丢列"},
+	}
+	for _, c := range cases {
+		got := autoCols(cols, rows, c.width)
+		if got[0].w != c.want[0] || got[1].w != c.want[1] || got[2].w != c.want[2] {
+			t.Errorf("width=%d (%s): 期望 %v, 实际 %d/%d/%d",
+				c.width, c.why, c.want, got[0].w, got[1].w, got[2].w)
+		}
+	}
+}
+
+// active 页主表在 120 列终端上不该再丢列: 用截断次要列换全部 8 列可见。
+func TestActiveTableKeepsAllColsAt120(t *testing.T) {
+	rows := [][]string{{
+		"12345", "1m02s", "claude-3-5-sonnet", "group/claude-sonnet-4-5-20250929",
+		"是", "额度锁 09:12", "claude-code", "/v1/messages",
+	}}
+	cols := autoCols(activeCols, rows, 120)
+	if w := tableWidth(cols); w > 120 {
+		t.Errorf("按内容分配后仍超出终端: %d > 120", w)
+	}
+	for i, ok := range fitCols(cols, 120) {
+		if !ok {
+			t.Errorf("120 列终端下 %q 列不该被丢", activeCols[i].title)
+		}
+	}
 }

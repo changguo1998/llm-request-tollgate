@@ -30,7 +30,7 @@ func TestViewFlowAndEvents(t *testing.T) {
 	if f.ID != id || f.Logical != "m1" || f.Source != "agent-x" || !f.Stream {
 		t.Errorf("进行中请求的字段不对: %+v", f)
 	}
-	if f.Up != "up1" || f.Model != "real-m1" || f.Attempt != 2 || stageName(f) != "等待 退避 3s" {
+	if f.Up != "up1" || f.Model != "real-m1" || f.Attempt != 2 || stageName(f) != "退避 3s" {
 		t.Errorf("候选状态不对: %+v (stage=%q)", f, stageName(f))
 	}
 
@@ -50,7 +50,7 @@ func TestViewFlowAndEvents(t *testing.T) {
 	}
 
 	// 结束即出表, 事件流不受影响。
-	a.flowEnd(id, 200, 12)
+	a.flowEnd(id)
 	if got := len(a.flowActives()); got != 0 {
 		t.Fatalf("结束后进行中应为 0, 得到 %d", got)
 	}

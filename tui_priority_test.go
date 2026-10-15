@@ -220,7 +220,7 @@ func TestPrioKeys(t *testing.T) {
 	_, cfg := prioFixture(t)
 	m := newTUIModel(cfg)
 	m.prio = newTuiEditor(cfg)
-	m.tab = 3
+	m.tab = 2
 	pending := []byte{}
 	key := func(b byte) bool {
 		quit := m.handleKey(b, &pending)
@@ -294,14 +294,14 @@ func TestPrioTabScopedKeys(t *testing.T) {
 	_, cfg := prioFixture(t)
 	m := newTUIModel(cfg)
 	pending := []byte{}
-	m.handleKey('4', &pending)
-	if m.tab != 3 || m.prio == nil {
-		t.Fatalf("4 应进 priority 页并装载编辑器 (tab=%d)", m.tab)
+	m.handleKey('3', &pending)
+	if m.tab != 2 || m.prio == nil {
+		t.Fatalf("3 应进 priority 页并装载编辑器 (tab=%d)", m.tab)
 	}
 	// 把 root 指到空目录: h 会去跑不存在的 deploy/tollgate.sh, 只该报错。
 	m.prio.root = t.TempDir()
 	m.handleKey('h', &pending)
-	if m.tab != 3 {
+	if m.tab != 2 {
 		t.Fatalf("priority 页的 h 是热加载, 不该切页 (tab=%d)", m.tab)
 	}
 	if !strings.Contains(m.prio.message, "hup 失败") {
@@ -315,7 +315,7 @@ func TestPrioTabScopedKeys(t *testing.T) {
 		t.Errorf("状态页的 r 应重读日志")
 	}
 	m.handleKey('h', &pending)
-	if m.tab != 3 {
+	if m.tab != 2 {
 		t.Errorf("active 页按 h 应回绕到 priority, 得到 %d", m.tab)
 	}
 }
@@ -325,7 +325,7 @@ func TestPrioDraw(t *testing.T) {
 	_, cfg := prioFixture(t)
 	m := newTUIModel(cfg)
 	m.prio = newTuiEditor(cfg)
-	m.tab = 3
+	m.tab = 2
 	m.prio.adjust(1)
 	frame := m.draw()
 	lines := strings.Split(strings.TrimRight(frame, "\n"), "\n")
