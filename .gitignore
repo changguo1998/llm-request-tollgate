@@ -4,3 +4,5 @@ config.local.json
 /test/tmp/
 /var/
 /tmp/
+__pycache__/
+*.pyc
