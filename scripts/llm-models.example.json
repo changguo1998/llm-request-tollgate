@@ -1,0 +1,36 @@
+{
+  "providers": {
+    "ustc": {
+      "baseUrl": "https://litellm.example.com/v1",
+      "apiKey": "$USTC_API_KEY",
+      "tollgate_priority": 5,
+      "models": [
+        {
+          "id": "deepseek-v4.1-flash",
+          "tollgate_group": "deepseek-v4.1-flash",
+          "tollgate_priority": 10
+        },
+        {
+          "id": "qwen2.5-chat",
+          "tollgate_priority": 0
+        }
+      ]
+    },
+    "group": {
+      "baseUrl": "https://cli-proxy.example.com/v1",
+      "apiKey": "$GROUP_API_KEY",
+      "tollgate_priority": 3,
+      "models": [
+        {
+          "id": "deepseek-v4.1-flash",
+          "tollgate_group": "deepseek-v4.1-flash",
+          "tollgate_priority": 20
+        },
+        {
+          "id": "glm-5-lite",
+          "tollgate_priority": 0
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,38 @@
+# llm-request-tollgate systemd 用户服务模板 (公开示例版, 不依赖 fff dotfiles 生态)。
+#
+# 本机实际用的 deploy/tollgate.service 会在 ExecStart 里 source ~/fff/config 并跑
+# `aikey all` 自动加载 ~/.fff/keys/*.ai (见 docs/operations.md §3); 那份模板在本机
+# dotfiles 里维护, 不进公开仓库。这个示例版把密钥加载留给使用方自选。
+#
+# 安装方式与安装脚本兼容:
+#   bash deploy/install_service.sh   # 把 __ROOT__ 替换为仓库绝对路径, 装到
+#                                    # ~/.config/systemd/user/tollgate.service
+# 没装模板 (deploy/tollgate.service 不存在) 时会提示先复制本文件:
+#   cp deploy/tollgate.service.example deploy/tollgate.service
+[Unit]
+Description=llm-request-tollgate (LLM request proxy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__ROOT__
+# 需要配置的环境变量: config.local.json 里各 upstream 的 key_env 字段 (服务只从进程
+# 环境读, 不落盘)。示例配置涉及的键: USTC_API_KEY / GROUP_API_KEY / ARKCP_API_KEY /
+# ARKAP_API_KEY (以实际 config.local.json 为准)。缺了对应密钥, -check 直接报错,
+# 运行时代理也无法给该上游鉴权 (401)。三种加载方式任选其一:
+#   1) 会话里已 export 时, 一次性导入到 systemd 用户管理器:
+#        systemctl --user import-environment USTC_API_KEY GROUP_API_KEY ARKCP_API_KEY ARKAP_API_KEY
+#   2) 直接写进 systemd 环境 (重启后仍要重设):
+#        systemctl --user set-environment USTC_API_KEY=...
+#   3) 用 EnvironmentFile 指向一个 0600 的 key 文件 (-- 前缀 = 文件不存在不报错),
+#      一行一个: USTC_API_KEY=...:
+# EnvironmentFile=-/home/USER/.config/tollgate.env
+# 三种方式都是改 env, 不用动本文件。
+ExecStart=__ROOT__/llm-request-tollgate -config __ROOT__/config.local.json
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

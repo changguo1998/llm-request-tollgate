@@ -6,3 +6,7 @@ config.local.json
 /tmp/
 __pycache__/
 *.pyc
+# 依赖 fff dotfiles 生态的本机脚本: 公开仓库只跟踪示例版 (deploy/tollgate.service.example 等)
+/deploy/tollgate.service
+/scripts/gen_tollgate_config.py
+/test/healthcheck.sh

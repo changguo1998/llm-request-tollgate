@@ -11,6 +11,10 @@ fi
 if [ ! -f "$ROOT/config.local.json" ]; then
   echo "缺少 config.local.json: 从 config.example.json 复制并填写后再装"; exit 1
 fi
+if [ ! -f "$ROOT/deploy/tollgate.service" ]; then
+  echo "缺少 deploy/tollgate.service: 公开仓库只跟踪示例版, 先复制:"
+  echo "  cp deploy/tollgate.service.example deploy/tollgate.service"; exit 1
+fi
 [ "$ROOT" = "/" ] && { echo "仓库根目录不应为 /"; exit 1; }
 
 mkdir -p "$HOME/.config/systemd/user"

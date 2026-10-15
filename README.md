@@ -1,7 +1,8 @@
 # llm-request-tollgate
 
 本机模型请求的统一闸口: 自研单文件 Go 代理 (无第三方依赖), 各 agent 把 base URL
-指向它, 由它统一做模型路由、调度与用量记账。设计文档见 [docs/design.md](docs/design.md)。
+指向它, 由它统一做模型路由、调度与用量记账。设计见 [docs/design.md](docs/design.md),
+接口见 [docs/api.md](docs/api.md), 运维见 [docs/operations.md](docs/operations.md)。
 
 ## 做什么
 
@@ -27,7 +28,7 @@
 06. 响应整形: 非流 / 流式 chunk 里的 `model` 字段改回请求的逻辑名,
     对外隐藏真实上游 id。
 07. 运维面: `GET /v1/models` 返回逻辑名清单; 请求头 `X-Tollgate-Source`
-    记入日志 `source` 字段; `-summary` 汇总请求日志; `deploy/` + `test/healthcheck.sh`
+    记入日志 `source` 字段; `-summary` 汇总请求日志; `deploy/` + `test/healthcheck.example.sh`
     常驻与自检。
 08. 集中 fallback: 候选按序尝试, 仅首字节前 (传输失败 / 上游 429 / 5xx) 自动切换
     下一个; 全部失败保留最近一次错误 (状态码/头/体) 原样透传; 其余 4xx 不重试。
@@ -57,10 +58,12 @@ go build ./...
 ./llm-request-tollgate -config config.local.json
 # 起假上游 + 全量自测 (17 组用例 131 项断言):
 ./test/run_selftest.sh all
-# 常驻 (systemd 用户服务, 崩了自动拉起):
+# 常驻 (systemd 用户服务, 崩了自动拉起). 部署模板示例在
+# deploy/tollgate.service.example (仓库不跟踪本机版 tollgate.service:
+#   cp deploy/tollgate.service.example deploy/tollgate.service
 ./deploy/install_service.sh
-# 自检 (二进制 / 配置 / 端口):
-./test/healthcheck.sh
+# 自检 (二进制 / 配置 / 端口; 公开仓库是示例版, 密钥要自己 export):
+./test/healthcheck.example.sh
 # 汇总请求日志 (按 逻辑名+来源, 含 token 用量; 传目录则跨天归档一起汇总):
 ./llm-request-tollgate -summary var/requests.jsonl
 ./llm-request-tollgate -summary var/
@@ -107,9 +110,11 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
   - `restart` 更新代码后用它: 先 `go build -o llm-request-tollgate .`
     再 `./deploy/tollgate.sh restart` (二进制被替换不会自动重启, 需手动 restart)。
   - `hup` 改 `config.local.json` 别名/上游后热加载, 不用重启。
-- 自检: `./test/healthcheck.sh`。
-- **密钥来源**: 服务只从进程环境读 (`key_env`), 不落盘。unit 的 `ExecStart` 包了一层
-  shell, 先 source `~/fff/config/shellrc.sh`, 再加载 fff 的 `aliases.d/{25-env,10-ai}.sh`,
+- 自检: `./test/healthcheck.example.sh` (公开仓库的示例版, 密钥要自己 export; 本机版
+  `healthcheck.sh` 在 dotfiles, 会自动加载 fff 密钥)。
+- **密钥来源**: 服务只从进程环境读 (`key_env`), 不落盘。本机 dotfiles 维护的 unit
+  的 `ExecStart` 包了一层 shell, 先 source `~/fff/config/shellrc.sh`, 再加载 fff 的
+  `aliases.d/{25-env,10-ai}.sh`,
   最后跑 `aikey all` (遍历 `~/.fff/keys/*.ai`) 才 exec 代理本体 — 所以重启后不需要任何手工
   导入。加载情况看 `./deploy/tollgate.sh logs` (会打印 `Loaded ustc.ai` 等)。
   排查: `ps -o cmd= -p $(systemctl --user show -p MainPID --value tollgate.service)`。
@@ -156,7 +161,12 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 
 ### 从 fff 模型列表生成配置
 
-`scripts/gen_tollgate_config.py` 读 `~/fff/config/llm-models.json` (provider -> baseUrl/models,
+本机版 `scripts/gen_tollgate_config.py` (直接读本机 fff store, 在 dotfiles 里维护,
+不进公开仓库) 的行为如下; 公开仓库提供不依赖 fff 的示例:
+`scripts/gen_tollgate_config.example.py` + 模型列表示例 `scripts/llm-models.example.json`
+(`python3 scripts/gen_tollgate_config.example.py`), 输入形状与规则与本机版一致。
+
+本机版读 `~/fff/config/llm-models.json` (provider -> baseUrl/models,
 由 fff 的 `fff-update-*-llm-list.py` 维护) 与 `llm-models-droplist.json` (精确匹配黑名单),
 生成 `upstreams` 与 `aliases`:
 
@@ -175,8 +185,11 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
   `--providers` 改上游与优先级。
 
 ```bash
+# 本机版 (dotfiles 维护, 依赖本机 fff store):
 python3 scripts/gen_tollgate_config.py --dry-run
 python3 scripts/gen_tollgate_config.py
+# 公开仓库示例 (不依赖 fff, 读 scripts/llm-models.example.json):
+python3 scripts/gen_tollgate_config.example.py
 ```
 
 优先级用状态台的 `priority` 页调: provider 面板 + 模型列表 + 候选顺序实时预览;
@@ -214,12 +227,17 @@ token) 与 `-usage` (上游 + 模型 × 窗口的 token 分解)。
 - `test/fakeupstream/` 假上游: 回放思考块 / 文本 / 工具调用 / usage 的 SSE,
   支持中途断流 (验证 F6)。
 - `test/run_selftest.sh` 自测: 17 组用例 131 项断言, 对本地假上游跑代理。
-- `test/healthcheck.sh` 自检: 二进制 / 配置 (-check) / 端口三项, 退出码 0 = 全通过。
-- `deploy/` 常驻: `tollgate.service` 模板 + `install_service.sh` (systemd 用户服务)。
+- `test/healthcheck.example.sh` 自检示例: 二进制 / 配置 (-check) / 端口三项, 退出码
+  0 = 全通过 (本机版 `healthcheck.sh` 在 dotfiles, 多一项 fff 密钥自动加载)。
+- `deploy/` 常驻: `tollgate.service.example` 模板 (公开示例, 本机版 `tollgate.service`
+  在 dotfiles) + `install_service.sh` (systemd 用户服务)。
+- `docs/api.md` HTTP 接口参考: 端点 / 认证替换 / 合成错误 / 只读观测面 / 日志字段。
+- `docs/operations.md` 部署运维 runbook: systemd 常驻 / 密钥 / 升级回滚 / 排障 / 清理。
 - `docs/providers-api.md` 上游错误分类调研: 判定流水线 + 逐家实测错误清单 + 可直接落地的
   `errors` 规则 (2026-10-13)。
-- `scripts/gen_tollgate_config.py` 由 fff 模型列表生成本项目配置 (读
-  `~/fff/config/llm-models.json` + 黑名单, 按 `tollgate_group` 归并成别名; 见下)。
+- `scripts/gen_tollgate_config.example.py` 由模型列表生成本项目配置 (示例版, 不依赖
+  fff; 输入与规则见上) + `llm-models.example.json` 模型列表示例 (本机版
+  `gen_tollgate_config.py` 在 dotfiles)。
 - `tui.go` / `tui_priority.go` 状态台: 前三个页读状态与日志, `priority` 页调权重 (写
   store, 候选顺序实时预览, 界面内即可保存 / 重生成配置 / 热加载)。
 - `gate_test.go` / `proxy_test.go` / `tui_*_test.go` 单元与端到端测试 (`go test .`): 调度
