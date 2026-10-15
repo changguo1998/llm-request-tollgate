@@ -293,7 +293,7 @@ type tuiModel struct {
 	scanned      int
 
 	tab       int
-	scroll    [4]int
+	scroll    [3]int // 每页各自的滚动位置: m.scroll[m.tab]
 	cols      int
 	rows      int
 	refreshed time.Time // 上次重读日志/取观测的时刻 (按键连发时别每次都重读)
@@ -611,6 +611,13 @@ func (m *tuiModel) mergeEvents(evs []viewEvent) {
 
 // ---------- 渲染 ----------
 
+// 页号与页签一一对应 (tuiTabs 的次序); 比较 m.tab 时用这几个名字, 别写裸数字。
+const (
+	tabLive   = 0 // active+routes
+	tabEvents = 1
+	tabPrio   = 2
+)
+
 // 时长一律走 durStr (12s / 02:03 / 01:02:03), 屏幕上不再出现"分 / 秒 / 小时"这类汉字写法。
 var tuiTabs = []string{"active+routes", "events", "priority"}
 
@@ -687,8 +694,9 @@ func (c *tuiCanvas) last(s string) {
 }
 
 func (m *tuiModel) hint() string {
-	if m.tab == 2 {
-		return "  Tab 换面板   j/k 移动   +/- 调值   = 输入值   / 过滤   s 保存   r 生成   h 热加载   q 退出" +
+	if m.tab == tabPrio {
+		return "  m/p 切模型/provider (Tab 也行)   j/k 移动   +/- 调值   = 输入值   / 过滤" +
+			"   s 保存   r 生成   h 热加载   q 退出" +
 			"   (priority: " + m.prioHint() + ")"
 	}
 	base := "  1-3 或 Tab 切页   up/down/PgUp/PgDn 滚动   r 重读日志   q 退出"
@@ -819,12 +827,16 @@ type tuiCol struct {
 }
 
 // drawTable 画一张表; units 非空时在表下一行标出各列单位 (灰字)。
-func drawTable(c *tuiCanvas, cols []tuiCol, rows [][]string, scroll, limit int, units string) {
+// drawTable 画一张表: 标题行 + 表头 + 行 + 滚动位置 + 单位行 (标题与单位是灰字, 空表也画)。
+func drawTable(c *tuiCanvas, title string, cols []tuiCol, rows [][]string, scroll, limit int, units string) {
 	cols = autoCols(cols, rows, c.cols)
 	vis := fitCols(cols, c.cols)
 	head := make([]string, len(cols))
 	for i, col := range cols {
 		head[i] = tuiTrunc(col.title, col.w)
+	}
+	if title != "" {
+		c.line(tuiDim + tuiIndent + title + tuiReset)
 	}
 	c.line(tuiIndent + tuiBold + strings.Join(alignRow(cols, head, vis), "  ") + tuiReset)
 	if len(rows) == 0 {
@@ -834,20 +846,35 @@ func drawTable(c *tuiCanvas, cols []tuiCol, rows [][]string, scroll, limit int, 
 		}
 		return
 	}
-	end := scroll + limit
-	if end > len(rows) {
-		end = len(rows)
-	}
-	for i := scroll; i < end; i++ {
-		c.line(tuiIndent + strings.Join(alignRow(cols, rows[i], vis), "  "))
-	}
+	top := clampScroll(scroll, len(rows), limit)
+	end := min(top+limit, len(rows))
+	// 位置行画在行之前: 内容高过屏幕时画布会裁尾部, 放最后就会被裁掉 (行比位置重要,
+	// 所以裁的是行, 不是它)。
 	if len(rows) > limit {
-		c.line(tuiDim + "  ... 共 " + strconv.Itoa(len(rows)) + " 行, 当前 " +
-			strconv.Itoa(scroll+1) + "-" + strconv.Itoa(end) + tuiReset)
+		c.line(tuiDim + "  " + strconv.Itoa(len(rows)) + " 行, 当前 " +
+			strconv.Itoa(top+1) + "-" + strconv.Itoa(end) + tuiReset)
+	}
+	for i := top; i < end; i++ {
+		c.line(tuiIndent + strings.Join(alignRow(cols, rows[i], vis), "  "))
 	}
 	if units != "" {
 		c.line(tuiDim + tuiIndent + units + tuiReset)
 	}
+}
+
+// clampScroll 把滚动位置夹进 [0, rows-limit]: 空表与 G 键 (设成很大) 都靠它兜底,
+// 否则会画出一片空白。整页滚动与逐表滚动共用这一处口径。
+func clampScroll(top, rows, limit int) int {
+	if limit < 1 {
+		limit = 1
+	}
+	if maxTop := rows - limit; top > maxTop {
+		top = maxTop
+	}
+	if top < 0 {
+		top = 0
+	}
+	return top
 }
 
 // fitCols 在窄终端上按 hide 档位丢列 (0 = 最后丢, 4 = 永不丢), 至少留 3 列。
@@ -981,7 +1008,7 @@ var activeCols = []tuiCol{
 }
 
 // drawLive: active 与 routes 合成一页 —— 进行中的请求 + 上游队列 + 路由聚合。
-// 整页一起滚动: 先把全量画进临时画布, 再按 m.scroll[0] 取窗口贴上去。表头会跟着内容一起
+// 整页一起滚动: 先把全量画进临时画布, 再按滚动位置取窗口贴上去。表头会跟着内容一起
 // 滚走, 所以当前窗口写在键位提示行里 (本页 N 行, 当前 a-b)。
 func (m *tuiModel) drawLive(c *tuiCanvas, body int) {
 	full := &tuiCanvas{cols: c.cols}
@@ -990,17 +1017,19 @@ func (m *tuiModel) drawLive(c *tuiCanvas, body int) {
 	m.drawRoutes(full)
 	lines := full.splitLines()
 	m.pageTotal = len(lines)
-	top := m.scroll[0]
-	if limit := len(lines) - body; top > limit {
-		top = limit
-	}
-	if top < 0 {
-		top = 0
-	}
+	top := m.scrollWindow(len(lines), body)
 	m.pageTop = top
 	for _, ln := range lines[top:min(top+body, len(lines))] {
 		c.raw(ln)
 	}
+}
+
+// scrollWindow 把该页的滚动位置夹进实际行数, 返回窗口第一行 —— 空表与 G 键 (设成很大)
+// 都靠它兜底, 免得画出一片空白。
+func (m *tuiModel) scrollWindow(rows, limit int) int {
+	top := clampScroll(m.scroll[m.tab], rows, limit)
+	m.scroll[m.tab] = top
+	return top
 }
 
 // raw 贴一行已经画好的内容 (整页滚动取窗口用): 行尾的清除序列由内容自己带着。
@@ -1037,10 +1066,9 @@ func (m *tuiModel) drawActive(c *tuiCanvas) {
 			f.Path,
 		})
 	}
-	drawTable(c, activeCols, rows, 0, len(rows), "单位: 已耗时 = 12s / 02:03 / 01:02:03")
+	drawTable(c, "进行中的请求", activeCols, rows, 0, len(rows), "单位: 已耗时 = 12s / 02:03 / 01:02:03")
 
 	c.line("")
-	c.line(tuiIndent + tuiBold + "上游队列 (进行中/并发上限, 排队, 状态)" + tuiReset)
 	crows := make([][]string, 0, len(m.pulse.Cands))
 	for _, cand := range m.pulse.Cands {
 		state := tuiGreen + "正常" + tuiReset
@@ -1060,9 +1088,9 @@ func (m *tuiModel) drawActive(c *tuiCanvas) {
 			state,
 		})
 	}
-	drawTable(c, []tuiCol{
+	drawTable(c, "上游队列 (进行中/并发上限, 排队, 状态)", []tuiCol{
 		{"上游", 10, 0, false, 0}, {"进行中/上限", 11, 0, true, 1}, {"排队", 4, 0, true, 0},
-		{"下次出队", 8, 0, true, 2}, {"连续错误", 8, 0, true, 2}, {"状态", 30, 0, false, 0},
+		{"下次出队", 8, 0, true, 2}, {"连续错误", 8, 0, true, 2}, {"状态", 30, 40, false, 0},
 	}, crows, 0, len(crows),
 		"单位: 进行中/上限、排队、连续错误 = 个; 下次出队 = 12s / 02:03 / 01:02:03")
 }
@@ -1087,14 +1115,14 @@ func (m *tuiModel) drawRoutes(c *tuiCanvas) {
 			tps = ftoa(r.TpsSum/float64(r.TpsN), 1)
 		}
 		cells = append(cells, []string{
-			r.Logical, r.Upstream, r.Model,
+			r.Logical, upModel(r.Upstream, r.Model),
 			strconv.Itoa(r.Reqs), errs, strconv.Itoa(r.Fallbacks),
 			humanTokens(r.Total), humanTokens(r.Cached),
 			ttfb, tps, mages(r.Last), bucketBar(r.bucket),
 		})
 	}
-	drawTable(c, []tuiCol{
-		{"逻辑名", 22, 0, false, 0}, {"上游", 8, 0, false, 0}, {"真实模型", 24, 0, false, 1},
+	drawTable(c, "路由聚合 (窗口内, 按最近一次请求时间降序)", []tuiCol{
+		{"逻辑名", 22, 28, false, 0}, {"上游/模型", 24, 44, false, 1},
 		{"请求", 6, 0, true, 0}, {"错误", 4, 0, true, 0}, {"换候选", 7, 0, true, 1},
 		{"总 token", 9, 0, true, 1}, {"缓存命中", 8, 0, true, 3}, {"首字节", 8, 0, true, 2},
 		{"吞吐", 7, 0, true, 2}, {"最近一次", 9, 0, true, 2},
@@ -1124,16 +1152,27 @@ func (m *tuiModel) drawEvents(c *tuiCanvas, body int) {
 			e.Ts.Format("15:04:05"),
 			tuiEventTag(e.Kind),
 			e.Logical,
-			e.Upstream,
-			e.Model,
+			upModel(e.Upstream, e.Model),
 			msg,
 		})
 		i += reps
 	}
-	drawTable(c, []tuiCol{
-		{"时间", 8, 0, false, 0}, {"类型", 10, 0, false, 0}, {"逻辑名", 20, 0, false, 1},
-		{"上游", 8, 0, false, 1}, {"真实模型", 22, 0, false, 2}, {"说明", 60, 0, false, 0},
-	}, rows, m.scroll[1], body-1, "单位: 时间 = hh:mm:ss (时刻)")
+	drawTable(c, "事件流 (最新在前)", []tuiCol{
+		{"时间", 8, 0, false, 0}, {"类型", 10, 0, false, 0}, {"逻辑名", 20, 28, false, 1},
+		{"上游/模型", 30, 46, false, 2}, {"说明", 60, 80, false, 0},
+	}, rows, m.scrollWindow(len(rows), body-3), body-3, "单位: 时间 = hh:mm:ss (时刻)")
+}
+
+// upModel 把上游与真实模型拼成一格 (`上游/模型`, 与活跃连接表和路由表同一写法);
+// 有一边为空时不留那个斜杠。
+func upModel(up, model string) string {
+	switch {
+	case up == "":
+		return model
+	case model == "":
+		return up
+	}
+	return up + "/" + model
 }
 
 // sameEvent 判断两条事件能不能折叠成一行 (同类 + 同路由 + 同文案)。
@@ -1166,17 +1205,17 @@ func tuiEventTag(kind string) string {
 	return tuiDim + name + tuiReset
 }
 
-// routeRows 按请求数降序 (最近有流量的排前面)。
+// routeRows 按最后使用时间降序 (最近用过的排最上面); 同一时刻的按请求数兜底。
 func (m *tuiModel) routeRows() []*routeRow {
 	out := make([]*routeRow, 0, len(m.routes))
 	for _, r := range m.routes {
 		out = append(out, r)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].Reqs != out[j].Reqs {
-			return out[i].Reqs > out[j].Reqs
+		if !out[i].Last.Equal(out[j].Last) {
+			return out[i].Last.After(out[j].Last)
 		}
-		return out[i].Last.After(out[j].Last)
+		return out[i].Reqs > out[j].Reqs
 	})
 	return out
 }
@@ -1432,7 +1471,7 @@ func runTUI(cfgPath, stateURL string) {
 // h/l 仍是切页; 切页统一走 1-4 / 左右方向键 / l (priority 页的 h 被编辑键占了)。
 func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 	e := m.prio
-	if m.tab == 2 && e != nil && e.prompt != nil {
+	if m.tab == tabPrio && e != nil && e.prompt != nil {
 		*pending = nil // 输入态: 整字节喂给输入框, 别把 Esc 当转义序列攒
 		e.promptKey(b)
 		return false
@@ -1470,7 +1509,7 @@ func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 		if code == 'V' {
 			d += 10
 		}
-		if m.tab == 2 && e != nil {
+		if m.tab == tabPrio && e != nil {
 			e.moveFocus(d)
 		} else {
 			m.move(d)
@@ -1478,7 +1517,7 @@ func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 		return false
 	}
 	*pending = nil
-	if m.tab == 2 && e != nil {
+	if m.tab == tabPrio && e != nil {
 		if quit, handled := e.key(b); handled {
 			return quit
 		}
@@ -1538,7 +1577,7 @@ func (m *tuiModel) switchTabTo(i int) {
 		return
 	}
 	m.tab = i
-	if m.tab == 2 && m.prio == nil {
+	if m.tab == tabPrio && m.prio == nil {
 		m.prio = newTuiEditor(m.cfgPath)
 	}
 }

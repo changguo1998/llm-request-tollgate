@@ -220,7 +220,7 @@ func TestPrioKeys(t *testing.T) {
 	_, cfg := prioFixture(t)
 	m := newTUIModel(cfg)
 	m.prio = newTuiEditor(cfg)
-	m.tab = 2
+	m.tab = tabPrio
 	pending := []byte{}
 	key := func(b byte) bool {
 		quit := m.handleKey(b, &pending)
@@ -295,13 +295,13 @@ func TestPrioTabScopedKeys(t *testing.T) {
 	m := newTUIModel(cfg)
 	pending := []byte{}
 	m.handleKey('3', &pending)
-	if m.tab != 2 || m.prio == nil {
+	if m.tab != tabPrio || m.prio == nil {
 		t.Fatalf("3 应进 priority 页并装载编辑器 (tab=%d)", m.tab)
 	}
 	// 把 root 指到空目录: h 会去跑不存在的 deploy/tollgate.sh, 只该报错。
 	m.prio.root = t.TempDir()
 	m.handleKey('h', &pending)
-	if m.tab != 2 {
+	if m.tab != tabPrio {
 		t.Fatalf("priority 页的 h 是热加载, 不该切页 (tab=%d)", m.tab)
 	}
 	if !strings.Contains(m.prio.message, "hup 失败") {
@@ -315,7 +315,7 @@ func TestPrioTabScopedKeys(t *testing.T) {
 		t.Errorf("状态页的 r 应重读日志")
 	}
 	m.handleKey('h', &pending)
-	if m.tab != 2 {
+	if m.tab != tabPrio {
 		t.Errorf("active 页按 h 应回绕到 priority, 得到 %d", m.tab)
 	}
 }
@@ -325,7 +325,7 @@ func TestPrioDraw(t *testing.T) {
 	_, cfg := prioFixture(t)
 	m := newTUIModel(cfg)
 	m.prio = newTuiEditor(cfg)
-	m.tab = 2
+	m.tab = tabPrio
 	m.prio.adjust(1)
 	frame := m.draw()
 	lines := strings.Split(strings.TrimRight(frame, "\n"), "\n")
@@ -358,5 +358,40 @@ func TestPrioDraw(t *testing.T) {
 	}
 	if !strings.Contains(bad.draw(), "store 读不到") {
 		t.Errorf("画面应说明 store 读不到")
+	}
+}
+
+// 焦点切换: m 切到模型面板, p 切到 provider 面板 (Tab 仍可来回切)。
+func TestPrioFocusKeys(t *testing.T) {
+	_, cfg := prioFixture(t)
+	m := newTUIModel(cfg)
+	m.prio = newTuiEditor(cfg)
+	m.tab = tabPrio
+	pending := []byte{}
+	send := func(b byte) {
+		if quit := m.handleKey(b, &pending); quit {
+			t.Fatal("不该退出")
+		}
+	}
+	if m.prio.focus != 0 {
+		t.Fatalf("初始焦点应在模型面板, 得到 %d", m.prio.focus)
+	}
+	send('p')
+	if m.prio.focus != 1 {
+		t.Fatalf("p 应切到 provider 面板, 得到 %d", m.prio.focus)
+	}
+	send('m')
+	if m.prio.focus != 0 {
+		t.Fatalf("m 应切回模型面板, 得到 %d", m.prio.focus)
+	}
+	send('\t')
+	if m.prio.focus != 1 {
+		t.Fatalf("Tab 仍应能切换, 得到 %d", m.prio.focus)
+	}
+	// 切到 provider 后 +/- 改的是 provider 优先级, 不是模型优先级。
+	before := prioOf(m.prio.selected().model)
+	send('+')
+	if got := prioOf(m.prio.selected().model); got != before {
+		t.Fatalf("provider 面板下 + 不该改模型优先级: %d -> %d", before, got)
 	}
 }

@@ -593,6 +593,12 @@ func (e *tuiEditor) key(b byte) (quit bool, handled bool) {
 	case '\t':
 		e.focus = 1 - e.focus
 		return false, true
+	case 'm':
+		e.focus = 0 // m = 切到模型 (改模型优先级)
+		return false, true
+	case 'p':
+		e.focus = 1 // p = 切到 provider (改 provider 优先级)
+		return false, true
 	case 'j':
 		e.moveFocus(1)
 	case 'k':

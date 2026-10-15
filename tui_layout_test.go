@@ -6,6 +6,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -151,5 +152,104 @@ func TestActiveTableKeepsAllColsAt120(t *testing.T) {
 		if !ok {
 			t.Errorf("120 列终端下 %q 列不该被丢", activeCols[i].title)
 		}
+	}
+}
+
+// 路由表按最后使用时间降序 (最近用过的排最上面), 同一时刻按请求数兜底。
+func TestRouteRowsSortByLastUse(t *testing.T) {
+	now := time.Now()
+	m := newTUIModel("cfg")
+	m.routes = map[string]*routeRow{
+		"old":  {Logical: "a", Upstream: "u1", Model: "m-old", Reqs: 99, Last: now.Add(-2 * time.Hour)},
+		"new":  {Logical: "b", Upstream: "u2", Model: "m-new", Reqs: 1, Last: now.Add(-time.Minute)},
+		"mid":  {Logical: "c", Upstream: "u3", Model: "m-mid", Reqs: 5, Last: now.Add(-30 * time.Minute)},
+		"same": {Logical: "d", Upstream: "u4", Model: "m-same", Reqs: 7, Last: now.Add(-time.Minute)},
+	}
+	got := m.routeRows()
+	want := []string{"m-same", "m-new", "m-mid", "m-old"} // 同一时刻: 请求数 7 > 1
+	for i, w := range want {
+		if got[i].Model != w {
+			t.Fatalf("第 %d 行应为 %s, 实际顺序 %v", i+1, w, []string{
+				got[0].Model, got[1].Model, got[2].Model, got[3].Model})
+		}
+	}
+}
+
+// 上游与真实模型合成一格: 两边都在写 上游/模型, 缺一边不留斜杠 (锁 / 闸门事件没有模型)。
+func TestUpModelJoin(t *testing.T) {
+	cases := []struct{ up, model, want string }{
+		{"ustc", "gpt-5-codex", "ustc/gpt-5-codex"},
+		{"", "gpt-5-codex", "gpt-5-codex"},
+		{"ustc", "", "ustc"},
+		{"", "", ""},
+	}
+	for _, c := range cases {
+		if got := upModel(c.up, c.model); got != c.want {
+			t.Errorf("upModel(%q, %q) = %q, 期望 %q", c.up, c.model, got, c.want)
+		}
+	}
+}
+
+// 每张表都有标题行 (标题在表头之上); events 页滚动到底不再画成空白 (G 键把滚动设成很大)。
+func TestTableTitlesAndEventsScroll(t *testing.T) {
+	f, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
+	if err != nil {
+		t.Skip("no /dev/ptmx")
+	}
+	defer f.Close()
+	var n uint32
+	ioctlCall(f.Fd(), syscall.TIOCGPTN, unsafe.Pointer(&n))
+	var zero int32
+	ioctlCall(f.Fd(), syscall.TIOCSPTLCK, unsafe.Pointer(&zero))
+	sl, err := os.OpenFile("/dev/pts/"+itoa(int(n)), os.O_RDWR, 0)
+	if err != nil {
+		t.Skipf("open pts: %v", err)
+	}
+	defer sl.Close()
+	old := os.Stdout
+	os.Stdout = sl
+	defer func() { os.Stdout = old }()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 1<<16)
+		for {
+			if _, err := f.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	ioctlCall(f.Fd(), syscall.TIOCSWINSZ, unsafe.Pointer(&tuiWinsize{Row: 40, Col: 140}))
+	m := newTUIModel("cfg")
+	m.pulse.Cands = []candView{{ID: "ustc", SoftCap: 1}}
+	m.tab = 0
+	out := m.draw()
+	for _, title := range []string{"进行中的请求", "上游队列", "路由聚合"} {
+		if !strings.Contains(stripANSI(out), title) {
+			t.Errorf("active+routes 页缺少标题 %q", title)
+		}
+	}
+
+	// 事件多于窗口, 再把滚动位置设成 G 键那种大数: 必须显出最后一屏, 不能空白。
+	m.tab = 1
+	for i := 0; i < 200; i++ {
+		m.events = append(m.events, routeEvent{
+			Ts: time.Now().Add(-time.Duration(i) * time.Second), Kind: "ok",
+			Logical: "m1", Upstream: "ustc", Model: "real-m1",
+			Msg: "状态码 200 #" + itoa(i), // 各不相同, 别被折成一行 xN
+		})
+	}
+	m.scroll[tabEvents] = 1 << 30
+	out = stripANSI(m.draw())
+	if !strings.Contains(out, "事件流") {
+		t.Error("events 页缺少标题")
+	}
+	if !strings.Contains(out, "状态码 200 #") {
+		t.Error("滚动到底应显出最后几行事件, 实际画成空白")
+	}
+	if !strings.Contains(out, "200 行, 当前 ") {
+		t.Error("事件多于窗口时应显示当前窗口位置")
 	}
 }
