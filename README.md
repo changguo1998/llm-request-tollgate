@@ -21,9 +21,9 @@
     把报错分成并发 / 额度 / 其他三类; 命中额度 -> 锁整个上游 `gate.quota_lock_ms` (10min,
     额度是 key 级共享的), 其他 -> 按 `gate.retry_backoff_ms` (10/20/30s) 退避、连续 4 次
     熔断锁 `gate.breaker_lock_ms` (5min)。**熔断按 `上游/模型` 粒度**: 只锁出错的那个真实
-    模型, 同家别的模型照常发送 (退避与连续错误计数也一样按模型分开记)。锁内不真发, 排队的
-    请求整队迁移到下一个候选; 锁落 `var/gate-state.json` (重启仍生效)。服务不记账也不提前
-    拦截, 只写日志。
+    模型, 同家别的模型照常发送 (退避与连续错误计数也一样按模型分开记; 选候选时看到某模型
+    正在退避就直接跳过, 不让请求在它的队列里白等)。锁内不真发, 排队的请求整队迁移到下一个
+    候选; 锁落 `var/gate-state.json` (重启仍生效)。服务不记账也不提前拦截, 只写日志。
 06. 响应整形: 非流 / 流式 chunk 里的 `model` 字段改回请求的逻辑名,
     对外隐藏真实上游 id。
 07. 运维面: `GET /v1/models` 返回逻辑名清单; 请求头 `X-Tollgate-Source`
@@ -131,7 +131,7 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
   `<base>-YYYY-MM-DD.jsonl`, 见「做什么」第 10 条)。
 - `timeouts`: 建连 / 等响应头 / 流空闲 (等待上限已经收进 `gate`)。
 - `gate` (v2, 所有上游共用): `interval_ms` 出队节拍 (缺省 500ms), `sem_wait_ms` 等信号量
-  上限 (20s), `queue_wait_ms` 排队上限 (10s), `concurrency_lock_ms` / `quota_lock_ms` /
+  上限 (5s), `queue_wait_ms` 排队上限 (10s), `concurrency_lock_ms` / `quota_lock_ms` /
   `breaker_lock_ms` 两把锁的时长 (1h / 10min / 5min), `retry_backoff_ms` 通用兜底的退避
   序列 ([10000,20000,30000])。并发上限不在配置里 (起点固定 1, 每次重启重新爬)。
 - `upstreams`: 每个上游一条记录 (id / base_url / auth_header / key 或 key_env / headers /

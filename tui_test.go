@@ -77,7 +77,9 @@ func TestCandViewSnapshot(t *testing.T) {
 	c.lock(lockAll, "quota", 10*time.Minute)
 	c.mu.Lock()
 	c.inFlight, c.softCap = 2, 3
-	c.queue = append(c.queue, &ticket{})
+	// 两层队列各放一笔: 观测面的 Queue 是两段之和。
+	c.enqueueLocked(&ticket{c: c, model: "real-m1"}, queueFlow)
+	c.enqueueLocked(&ticket{c: c, model: "real-m1"}, queueModel)
 	c.mu.Unlock()
 
 	vs := a.candViews()
@@ -85,7 +87,7 @@ func TestCandViewSnapshot(t *testing.T) {
 		t.Fatalf("应有 1 个候选, 得到 %d", len(vs))
 	}
 	v := vs[0]
-	if v.ID != "up1" || v.InFlight != 2 || v.SoftCap != 3 || v.Queue != 1 {
+	if v.ID != "up1" || v.InFlight != 2 || v.SoftCap != 3 || v.Queue != 2 {
 		t.Errorf("候选计数不对: %+v", v)
 	}
 	if v.LockMs <= 0 || v.LockWhy != "quota" {

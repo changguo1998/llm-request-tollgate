@@ -480,13 +480,16 @@ func (m *tuiModel) absorb(line []byte) {
 		if r.LockSkips > 0 {
 			msg += " (跳过锁 " + strconv.Itoa(r.LockSkips) + " 次)"
 		}
+		if r.BackoffSkips > 0 {
+			msg += " (跳过退避 " + strconv.Itoa(r.BackoffSkips) + " 次)"
+		}
 		m.addEvent(routeEvent{Ts: ts, Kind: "error", Logical: r.Logical, Upstream: r.Upstream,
 			Model: r.Model, Status: r.Status, Msg: msg})
 	case r.Fallbacks > 0:
 		m.addEvent(routeEvent{Ts: ts, Kind: "fallback", Logical: r.Logical, Upstream: r.Upstream,
 			Model: r.Model, Status: r.Status,
 			Msg: "换了 " + strconv.Itoa(r.Fallbacks) + " 次候选, 最后落到 " + r.Upstream +
-				lockNote(r.LockSkips)})
+				lockNote(r.LockSkips) + backoffNote(r.BackoffSkips)})
 	case r.Queued:
 		m.addEvent(routeEvent{Ts: ts, Kind: "queue", Logical: r.Logical, Upstream: r.Upstream,
 			Model: r.Model, Status: r.Status, Msg: "排队 " + itoa64(r.QueueMs) + "ms"})
@@ -498,11 +501,19 @@ func (m *tuiModel) absorb(line []byte) {
 	}
 }
 
+// lockNote 拼"跳过几个已加锁的上游"这句; 退避跳过的模型另说一句 (两种跳过原因不同)。
 func lockNote(n int) string {
 	if n == 0 {
 		return ""
 	}
 	return " (跳过 " + strconv.Itoa(n) + " 个已加锁的上游)"
+}
+
+func backoffNote(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return " (跳过 " + strconv.Itoa(n) + " 个正在退避的模型)"
 }
 
 // gateReason 把日志里的 gate 值换成中文短语。
@@ -514,6 +525,8 @@ func gateReason(g string) string {
 		return "等并发槽位超时"
 	case "queue_timeout":
 		return "排队超时"
+	case "backoff_timeout":
+		return "等退避结束超时"
 	case "canceled":
 		return "客户端断开"
 	}

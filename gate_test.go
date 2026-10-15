@@ -449,3 +449,32 @@ func TestGateStateRoundTrip(t *testing.T) {
 		t.Fatalf("旧格式的键 \"u1/m9\" 该按模型锁恢复: locked=%v left=%s reason=%s", locked, left, reason)
 	}
 }
+
+// 两层队列: 一个模型退避时, 另一个模型的请求照常拿到发送资格 —— 旧实现里整条队列被
+// pausedUntil 压住, 这一笔会一直等到排队超时。
+func TestModelQueueNotBlockedBySiblingBackoff(t *testing.T) {
+	c := newCand("u1")
+	g := testGate() // 退避缺省 10s, 远大于这里的排队预算 300ms
+	c.softCap = 8
+	ctx := context.Background()
+
+	// 让 m2 进入退避。
+	if c.recordOther("m2", g) {
+		t.Fatal("第 1 次失败不该熔断")
+	}
+	if paused, left := c.paused("m2"); !paused || left < 9*time.Second {
+		t.Fatalf("m2 应在退避: paused=%v left=%s", paused, left)
+	}
+
+	// 同一候选上的 m1: 拿到槽位后应先过流量队列、再过模型队列, 立刻放行。
+	start := time.Now()
+	kind, why, _, _, ok := c.acquire(ctx, g, "m1")
+	el := time.Since(start)
+	if !ok {
+		t.Fatalf("同家另一个模型不该被退避挡住: why=%s", why)
+	}
+	if el > 200*time.Millisecond {
+		t.Fatalf("健康模型不该为别家模型的退避多等, 实耗 %s", el)
+	}
+	c.finish(kind, true)
+}

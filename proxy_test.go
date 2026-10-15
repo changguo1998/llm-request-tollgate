@@ -327,15 +327,21 @@ func TestProxyBreakerAfterRepeatedFailures(t *testing.T) {
 	}
 }
 
-// TestProxyBackoffBlocksQueuedRequest 覆盖退避期间的排队超时: 候选还在退避, 新请求
-// 排不到队就换候选, 候选链试完给带原因的 429 (设计 §5.5.2)。
-func TestProxyBackoffBlocksQueuedRequest(t *testing.T) {
+// TestProxyBackoffSkipsModel 覆盖退避期间的候选选择: 该模型还在退避时新请求不再进它的
+// 模型队列白等 (退避 10/20/30s 比排队预算长), 直接跳过 —— 单候选别名跳过之后没有可发的
+// 候选, 于是透传/合成错误, 且不再真发上游 (设计 §5.5.1/§5.5.2)。
+func TestProxyBackoffSkipsModel(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = io.WriteString(w, `{"error":{"message":"boom"}}`)
 	}))
 	defer up.Close()
-	// 退避 10s 远大于排队上限 50ms: 第一笔自己会透传 500, 第二笔只能排队超时。
+	// 退避 10s 远大于排队上限 50ms: 第一笔自己会透传 500 并留下退避。
 	app := newTestApp(t, up.URL, GateCfg{SemWaitMs: 50, QueueWaitMs: 50}, nil)
 	proxy := httptest.NewServer(app)
 	defer proxy.Close()
@@ -344,12 +350,25 @@ func TestProxyBackoffBlocksQueuedRequest(t *testing.T) {
 	if status, _ := postJSON(t, url, `{"model":"m1","messages":[]}`); status != http.StatusInternalServerError {
 		t.Fatalf("第一笔应透传上游 500, 实为 %d", status)
 	}
+	mu.Lock()
+	before := calls
+	mu.Unlock()
+
 	status, body := postJSON(t, url, `{"model":"m1","messages":[]}`)
-	if status != http.StatusTooManyRequests || !strings.Contains(string(body), "queue_timeout") {
-		t.Fatalf("退避期间应给排队超时的 429, 实为 %d %s", status, body)
+	if status == http.StatusOK {
+		t.Fatalf("退避期间不该当成功, 实为 %d %s", status, body)
 	}
-	if rec := lastLogRec(t, app); rec.Gate != "queue_timeout" || rec.Fallbacks == 0 {
-		t.Fatalf("日志应记下被挡下的原因: %+v", rec)
+	if !strings.Contains(string(body), "backing off") {
+		t.Fatalf("应说明是退避跳过, 实为 %d %s", status, body)
+	}
+	mu.Lock()
+	after := calls
+	mu.Unlock()
+	if after != before {
+		t.Fatalf("退避期间不该再真发上游: 之前 %d 次, 之后 %d 次", before, after)
+	}
+	if rec := lastLogRec(t, app); rec.Fallbacks == 0 {
+		t.Fatalf("日志应记下跳过 (fallbacks): %+v", rec)
 	}
 }
 
@@ -510,5 +529,54 @@ func TestProxyBreakerIsPerModel(t *testing.T) {
 	}
 	if strings.Count(got, "bad-1") != 4 {
 		t.Fatalf("熔断前应只重试 4 次, 之后不再真发, 实际发过: %s", got)
+	}
+}
+
+// TestProxyModelQueueDoesNotBlockSiblings 覆盖两层队列的核心目的: 同家一个模型退避时,
+// 另一个模型的请求照常发出去, 不为它多等 (旧实现里整条队列会被 pausedUntil 压住)。
+func TestProxyModelQueueDoesNotBlockSiblings(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var req struct {
+			Model string `json:"model"`
+		}
+		_ = json.Unmarshal(b, &req)
+		if req.Model == "bad-1" {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":{"message":"boom"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"hi"}}]}`)
+	}))
+	defer up.Close()
+
+	cfg := &Config{
+		// 退避 10s (缺省序列第一档) 远大于这里的排队预算: 若第二笔仍被退避压住, 必然超时。
+		Gate:      GateCfg{IntervalMs: 5, SemWaitMs: 50, QueueWaitMs: 200},
+		Upstreams: []UpstreamCfg{{ID: "u1", BaseURL: up.URL, AuthHeader: "Authorization", Key: "k"}},
+		Aliases:   map[string][][2]string{"a-bad": {{"u1", "bad-1"}}, "b-good": {{"u1", "good-1"}}},
+	}
+	app := newTestAppCfg(t, cfg)
+	proxy := httptest.NewServer(app)
+	defer proxy.Close()
+	url := proxy.URL + "/v1/chat/completions"
+
+	// 第一笔把 bad-1 打进退避 (一笔内重试多次, 第 1 次失败就暂停 10s)。
+	if status, _ := postJSON(t, url, `{"model":"a-bad","messages":[]}`); status != http.StatusInternalServerError {
+		t.Fatalf("第一笔应透传上游 500, 实为 %d", status)
+	}
+	if paused, left := app.cands["u1"].paused("bad-1"); !paused || left < 5*time.Second {
+		t.Fatalf("bad-1 应进入退避: paused=%v left=%s", paused, left)
+	}
+
+	// 第二笔打同家的好模型: 必须立刻成功 (退避不可见)。
+	start := time.Now()
+	status, body := postJSON(t, url, `{"model":"b-good","messages":[]}`)
+	el := time.Since(start)
+	if status != http.StatusOK {
+		t.Fatalf("同家健康模型应照常成功, 实为 %d %s", status, body)
+	}
+	if el > 150*time.Millisecond {
+		t.Fatalf("健康模型不该为别家的退避多等, 实耗 %s", el)
 	}
 }

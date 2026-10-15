@@ -4,8 +4,9 @@
 //  1. 别名表 (白名单 + 路由): 逻辑模型名 -> [(上游, 真实模型 id), ...],
 //     未命中的模型名直接返 404, 不猜上游 (D2)。
 //  2. 按上游分组的 v2 调度 (设计 §5.5, 一个上游一把 key, "上游+凭据" 等价于上游记录):
-//     每个上游一条 FIFO 队列 + 自适应并发上限 (起点 1, 试探成功 +1), 出队节拍
-//     interval_ms; 被挡下而没发出去的请求返 429 带 Retry-After (D3)。
+//     每个上游一条流量队列 (FIFO, 只保证出队节拍) + 自适应并发上限 (起点 1, 试探成功
+//     +1), 出队后进目标模型的队列 (不等节拍, 只在熔断锁 / 退避时才等); 被挡下而没
+//     发出去的请求返 429 带 Retry-After (D3)。
 //  3. 手动转发: 认证头替换 (D1), 删 Accept-Encoding 让 Transport 协商并
 //     透明解压 (设计 §4.9.1), 不加 X-Forwarded-For (F9)。
 //  4. 用量提取: 强写 stream_options.include_usage, 流末 usage chunk / 非流式
@@ -297,23 +298,35 @@ func (l lockState) left(now time.Time) time.Duration {
 	return l.until.Sub(now)
 }
 
-// ticket 是候选队列里的一项; enq 记入队时刻, 用来算排队超时。
+// ticket 是排队里的一项; enq 记入队时刻, 用来算各段的等待预算。
 type ticket struct {
-	c   *cand
-	enq time.Time
+	c     *cand
+	model string    // 这一笔要用的真实模型 (它决定进哪个模型队列)
+	enq   time.Time // 入流量队列的时刻
+	where queueKind // 此刻排在哪条队列里 (退出时按它摘)
 }
 
-// cand 是每个上游的调度状态: 一条 FIFO 队列 + 自适应并发上限 + 两把锁 (设计 §5.5.2/§5.5.3)。
+// queueKind 是一张 ticket 当前所在的队列。
+type queueKind int
+
+const (
+	queueNone  queueKind = iota // 不在任何队列里
+	queueFlow                   // provider 的流量队列 (出队节拍)
+	queueModel                  // 该模型的队列 (熔断锁 / 退避的等待口)
+)
+
+// cand 是每个上游的调度状态: 两层队列 + 自适应并发上限 + 两把锁 (设计 §5.5.1/§5.5.2/§5.5.3)。
 // 退避、熔断计数与熔断锁按模型分开记 (modelGates), 所以同家一个模型坏了不挡其它模型。
 type cand struct {
 	id string
 
 	mu       sync.Mutex
-	queue    []*ticket
-	inFlight int       // 已拿到信号量的请求数 (含还在排队的)
-	softCap  int       // 自适应并发上限: 起点 1, 不设天花板
-	probing  bool      // 是否已有一笔试探在进行 (同一时刻只允许一笔)
-	nextSend time.Time // 下一笔最早可发送的时刻 (出队节拍)
+	flow     []*ticket            // 流量队列: 只保证出队节拍, 不被任何模型的退避堵住
+	modelQ   map[string][]*ticket // 模型队列: 出队即发, 只在熔断锁 / 退避时等
+	inFlight int                  // 已拿到信号量的请求数 (含还在排队的)
+	softCap  int                  // 自适应并发上限: 起点 1, 不设天花板
+	probing  bool                 // 是否已有一笔试探在进行 (同一时刻只允许一笔)
+	nextSend time.Time            // 下一笔最早可发送的时刻 (出队节拍)
 	// 模型级状态: 键是真实模型 id。锁查询不建表, 记账 (失败/成功/加锁) 才建。
 	modelGates map[string]*modelGate
 	concLock   lockState // 并发上限锁: 只锁超发试探
@@ -386,19 +399,24 @@ func (c *cand) sleep(ctx context.Context, deadline, until time.Time) wakeReason 
 	}
 }
 
-// acquire 按设计 §5.5.1 拿到发送资格: 先取信号量 (a), 再排队等轮到自己 (b)。
-// ok=false 时 why 说明原因 (locked / sem_timeout / queue_timeout / canceled), 上层换下一个候选;
-// semMs / queueMs 是两段等待的毫秒数, 只用于记日志。
-func (c *cand) acquire(ctx context.Context, g GateCfg, model string) (kind slotKind, why string, semMs, queueMs int64, ok bool) {
+// acquire 按设计 §5.5.1 拿到发送资格: 取信号量 (a) → 过流量队列 (b) → 过模型队列 (b2)。
+// 模型队列只有在该模型被熔断锁住或正在退避时才等 (正常情况下出队即发);
+// waitMs 是排队两段之和, 只用于记日志。上层换候选用下一笔。
+func (c *cand) acquire(ctx context.Context, g GateCfg, model string) (kind slotKind, why string, semMs, waitMs int64, ok bool) {
 	start := time.Now()
 	kind, why, ok = c.acquireSlot(ctx, g, model)
 	semMs = time.Since(start).Milliseconds()
 	if !ok {
 		return kind, why, semMs, 0, false
 	}
+	t := &ticket{c: c, model: model, enq: time.Now()}
 	start = time.Now()
-	if why, ok = c.waitTurn(ctx, g, model); !ok {
+	if why, ok = c.waitFlow(ctx, g, t); !ok {
 		c.finish(kind, false) // 没轮到就退出: 归还信号量 (试探不占, 无需归还)
+		return kind, why, semMs, time.Since(start).Milliseconds(), false
+	}
+	if why, ok = c.waitModel(ctx, g, t); !ok {
+		c.finish(kind, false)
 		return kind, why, semMs, time.Since(start).Milliseconds(), false
 	}
 	return kind, "", semMs, time.Since(start).Milliseconds(), true
@@ -436,36 +454,34 @@ func (c *cand) acquireSlot(ctx context.Context, g GateCfg, model string) (slotKi
 	}
 }
 
-// waitTurn 入队等轮到自己, 并保证出队节拍 (设计 §5.5.1 的 b / b1, §5.5.2 的流量限制)。
-func (c *cand) waitTurn(ctx context.Context, g GateCfg, model string) (string, bool) {
-	t := &ticket{c: c, enq: time.Now()}
+// waitFlow 在 provider 的流量队列里等自己的出队节拍 (设计 §5.5.1 的 b / b1, §5.5.2):
+// 出队即离开这条队列, 接着去模型队列 —— 别家模型的退避不会堵在这里。
+func (c *cand) waitFlow(ctx context.Context, g GateCfg, t *ticket) (string, bool) {
 	c.mu.Lock()
-	c.queue = append(c.queue, t)
+	c.enqueueLocked(t, queueFlow)
 	c.mu.Unlock()
 	c.signal()
 	deadline := t.enq.Add(g.queueWait())
 	for {
 		now := time.Now()
 		c.mu.Lock()
-		if locked, _, _ := c.lockedIn(model, now); locked {
-			// 排队期间该候选被锁: 退出队列, 由上层换下一个候选 (整队迁移, §5.5.3)。
-			c.removeLocked(t)
+		if locked, _, _ := c.lockedIn(t.model, now); locked {
+			// 排队期间被锁 (整家额度锁, 或该模型的熔断锁): 退出队列, 由上层换下一个候选
+			// (整队迁移, §5.5.3)。
+			c.removeTicketLocked(t)
 			c.mu.Unlock()
 			c.signal()
 			return "locked", false
 		}
-		if len(c.queue) > 0 && c.queue[0] == t &&
-			!now.Before(c.nextSend) && !now.Before(c.pauseOf(model)) {
-			c.queue = c.queue[1:]
+		if c.flowHead(t) && !now.Before(c.nextSend) {
+			c.dequeueLocked(t, queueFlow)
 			c.nextSend = now.Add(g.interval())
+			c.enqueueLocked(t, queueModel) // 出了流量队列就进模型队列: 出门即发
 			c.mu.Unlock()
 			c.signal()
 			return "", true
 		}
 		next := c.nextSend
-		if pause := c.pauseOf(model); pause.After(next) {
-			next = pause // 退避暂停: 队首也要等到暂停结束
-		}
 		c.mu.Unlock()
 		switch c.sleep(ctx, deadline, next) {
 		case wakeCanceled:
@@ -478,22 +494,123 @@ func (c *cand) waitTurn(ctx context.Context, g GateCfg, model string) (string, b
 	}
 }
 
-// dropTicket 把一项从队列里摘掉 (客户端断开或排队超时)。
-func (c *cand) dropTicket(t *ticket) {
-	c.mu.Lock()
-	c.removeLocked(t)
-	c.mu.Unlock()
-	c.signal()
-}
-
-// removeLocked 摘队列项; 调用方持有 c.mu。
-func (c *cand) removeLocked(t *ticket) {
-	for i, x := range c.queue {
-		if x == t {
-			c.queue = append(c.queue[:i], c.queue[i+1:]...)
-			return
+// waitModel 在模型队列里等熔断解锁 / 退避结束; 正常情况 (没被熔断、没在退避) 立刻放行,
+// 不等节拍 —— 节拍已经在流量队列那一段付过了。
+// 上界用 queue_wait_ms (与流量队列同一个预算口径): 退避 10/20/30s 比它长, 等到超时就换候选。
+func (c *cand) waitModel(ctx context.Context, g GateCfg, t *ticket) (string, bool) {
+	deadline := time.Now().Add(g.queueWait())
+	for {
+		now := time.Now()
+		c.mu.Lock()
+		if locked, _, _ := c.lockedIn(t.model, now); locked {
+			c.removeTicketLocked(t)
+			c.mu.Unlock()
+			c.signal()
+			return "locked", false
+		}
+		paused := !now.Before(c.pauseOf(t.model))
+		if paused && c.modelHead(t) {
+			c.dequeueLocked(t, queueModel)
+			c.mu.Unlock()
+			c.signal()
+			return "", true
+		}
+		if !paused {
+			// 退避已经结束 (或没在退避): 不占着队列, 直接发。
+			c.dequeueLocked(t, queueModel)
+			c.mu.Unlock()
+			c.signal()
+			return "", true
+		}
+		pause := c.pauseOf(t.model)
+		c.mu.Unlock()
+		switch c.sleep(ctx, deadline, pause) {
+		case wakeCanceled:
+			c.dropTicket(t)
+			return "canceled", false
+		case wakeDeadline:
+			c.dropTicket(t)
+			return "backoff_timeout", false
 		}
 	}
+}
+
+// flowHead / modelHead 判断这一项是不是该队列的队首 (调用方持有 c.mu)。
+func (c *cand) flowHead(t *ticket) bool {
+	return len(c.flow) > 0 && c.flow[0] == t
+}
+
+func (c *cand) modelHead(t *ticket) bool {
+	q := c.modelQ[t.model]
+	return len(q) > 0 && q[0] == t
+}
+
+// enqueueLocked 把一项挂到某条队列的队尾, 并记下它在哪条队列 (调用方持有 c.mu)。
+func (c *cand) enqueueLocked(t *ticket, kind queueKind) {
+	switch kind {
+	case queueFlow:
+		c.flow = append(c.flow, t)
+	case queueModel:
+		if c.modelQ == nil {
+			c.modelQ = map[string][]*ticket{}
+		}
+		c.modelQ[t.model] = append(c.modelQ[t.model], t)
+	}
+	t.where = kind
+}
+
+// dequeueLocked 把一项从某条队列的队首摘掉 (调用方持有 c.mu)。
+func (c *cand) dequeueLocked(t *ticket, kind queueKind) {
+	switch kind {
+	case queueFlow:
+		if c.flowHead(t) {
+			c.flow = c.flow[1:]
+		}
+	case queueModel:
+		if q := c.modelQ[t.model]; len(q) > 0 && q[0] == t {
+			c.modelQ[t.model] = q[1:]
+		}
+	}
+	t.where = queueNone
+}
+
+// removeTicketLocked 把一项从它此刻所在的队列里摘掉 (调用方持有 c.mu)。
+func (c *cand) removeTicketLocked(t *ticket) {
+	switch t.where {
+	case queueFlow:
+		for i, x := range c.flow {
+			if x == t {
+				c.flow = append(c.flow[:i], c.flow[i+1:]...)
+				break
+			}
+		}
+	case queueModel:
+		q := c.modelQ[t.model]
+		for i, x := range q {
+			if x == t {
+				c.modelQ[t.model] = append(q[:i], q[i+1:]...)
+				break
+			}
+		}
+	}
+	t.where = queueNone
+}
+
+// queued 是还在两层队列里等的请求数 (观测面用; 调用方持有 c.mu)。
+func (c *cand) queued() int {
+	n := len(c.flow)
+	for _, q := range c.modelQ {
+		n += len(q)
+	}
+	return n
+}
+
+// dropTicket 把一项从队列里摘掉 (客户端断开或等待超时)。
+func (c *cand) dropTicket(t *ticket) {
+	c.mu.Lock()
+	c.removeTicketLocked(t)
+	c.mu.Unlock()
+	c.signal()
 }
 
 // finish 结束一笔发送: 正常占用的归还槽位, 试探按结果放宽上限 (设计 §5.5.2)。
@@ -535,6 +652,17 @@ func (c *cand) pauseOf(model string) time.Time {
 		return g.pausedUntil
 	}
 	return time.Time{}
+}
+
+// paused 报告该模型是否在退避中, 以及还剩多久。
+func (c *cand) paused(model string) (bool, time.Duration) {
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if left := c.pauseOf(model).Sub(now); left > 0 {
+		return true, left
+	}
+	return false, 0
 }
 
 // lockedIn 是锁查询的加锁版实现: 先看锁在它自己头上的熔断锁, 再看整家锁 (额度 10min)。
@@ -942,27 +1070,28 @@ func rewriteModelKnown(data []byte, real, logical string) []byte {
 // ---------- 日志 (JSONL) ----------
 
 type logRec struct {
-	Ts        string  `json:"ts"`
-	Logical   string  `json:"logical"`
-	Upstream  string  `json:"upstream"`
-	Model     string  `json:"model"`
-	Path      string  `json:"path"`
-	Stream    bool    `json:"stream"`
-	Status    int     `json:"status"`
-	Usage     *Usage  `json:"usage,omitempty"`
-	Missing   bool    `json:"missing_usage"`
-	Queued    bool    `json:"queued"`
-	QueueMs   int64   `json:"queue_ms"`
-	SemMs     int64   `json:"sem_ms,omitempty"` // 等并发信号量的时长 (v2)
-	Client    string  `json:"client"`
-	UA        string  `json:"ua,omitempty"`
-	Source    string  `json:"source,omitempty"`
-	Fallbacks int     `json:"fallbacks,omitempty"`
-	Err       string  `json:"err,omitempty"`
-	Gate      string  `json:"gate,omitempty"` // 被闸门挡下没发出去时: locked | sem_timeout | queue_timeout | canceled
-	LockSkips int     `json:"lock_skips,omitempty"`
-	TtfbMs    int64   `json:"ttfb_ms,omitempty"` // 首字节时延 (被动采样)
-	Tps       float64 `json:"tps,omitempty"`     // 解码吞吐 tokens/s (流式才有)
+	Ts           string  `json:"ts"`
+	Logical      string  `json:"logical"`
+	Upstream     string  `json:"upstream"`
+	Model        string  `json:"model"`
+	Path         string  `json:"path"`
+	Stream       bool    `json:"stream"`
+	Status       int     `json:"status"`
+	Usage        *Usage  `json:"usage,omitempty"`
+	Missing      bool    `json:"missing_usage"`
+	Queued       bool    `json:"queued"`
+	QueueMs      int64   `json:"queue_ms"`
+	SemMs        int64   `json:"sem_ms,omitempty"` // 等并发信号量的时长 (v2)
+	Client       string  `json:"client"`
+	UA           string  `json:"ua,omitempty"`
+	Source       string  `json:"source,omitempty"`
+	Fallbacks    int     `json:"fallbacks,omitempty"`
+	Err          string  `json:"err,omitempty"`
+	Gate         string  `json:"gate,omitempty"` // 被闸门挡下没发出去时: locked | sem_timeout | queue_timeout | backoff_timeout | canceled
+	LockSkips    int     `json:"lock_skips,omitempty"`
+	BackoffSkips int     `json:"backoff_skips,omitempty"`
+	TtfbMs       int64   `json:"ttfb_ms,omitempty"` // 首字节时延 (被动采样)
+	Tps          float64 `json:"tps,omitempty"`     // 解码吞吐 tokens/s (流式才有)
 }
 
 // 不动失败计数与锁, 也不打断已建立的流 (切换只可能发生在下次请求开始时)。
@@ -1354,7 +1483,7 @@ func (a *App) candViews() []candView {
 	for _, c := range cands {
 		c.mu.Lock()
 		v := candView{
-			ID: c.id, Queue: len(c.queue), InFlight: c.inFlight, SoftCap: c.softCap,
+			ID: c.id, Queue: c.queued(), InFlight: c.inFlight, SoftCap: c.softCap,
 			Probing: c.probing,
 		}
 		for model, g := range c.modelGates {
@@ -2321,6 +2450,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		attemptStart    time.Time // 被动时延采样: 该候选开始等待的时刻
 	)
 	lockedSkips := 0
+	backoffSkips := 0
 	// 集中 fallback: 按候选顺序尝试, 只在还没给客户端写任何字节前 (传输失败 /
 	// 上游 429 或 5xx) 换下一个候选; 全部失败保留最近一次错误原样透传。
 	for _, at := range attempts {
@@ -2343,6 +2473,18 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				gateLeft = left
 			}
 			lockedSkips++
+			failed++
+			continue
+		}
+		if paused, left := at.cd.paused(at.mod); paused {
+			// 该模型正在退避: 不进它的队列白等 (退避 10/20/30s 比排队预算长), 直接换候选。
+			lastErr = fmt.Errorf("upstream %s/%s backing off for %s",
+				at.up.ID, at.mod, left.Round(time.Second))
+			lastUpID, lastM = at.up.ID, at.mod
+			if left > gateLeft {
+				gateLeft = left
+			}
+			backoffSkips++
 			failed++
 			continue
 		}
@@ -2430,7 +2572,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				if !moveOn {
 					// e2: 退避后回到出队, 重试同一个候选。退避是模型级的, 记这次失败时
-					// 已经把它自己暂停过; 重试时队首会等到暂停结束, 等不到就排队超时换候选。
+					// 已经把它自己暂停过; 下一轮会先撞上"退避中直接跳过"那次检查, 于是换候选。
 					continue
 				}
 				break
@@ -2470,7 +2612,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"),
 			Source: r.Header.Get("X-Tollgate-Source"),
 			Err:    "rate_limited", Gate: gateReject, Fallbacks: failed,
-			LockSkips: lockedSkips,
+			LockSkips: lockedSkips, BackoffSkips: backoffSkips,
 		})
 		return
 	}
@@ -2496,7 +2638,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				Status: lastStatus, Missing: true, Queued: queued, QueueMs: queueMs, SemMs: semMs,
 				Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"),
 				Source: r.Header.Get("X-Tollgate-Source"),
-				Err:    lastErr.Error(), Fallbacks: failed, LockSkips: lockedSkips,
+				Err:    lastErr.Error(), Fallbacks: failed, LockSkips: lockedSkips, BackoffSkips: backoffSkips,
 			})
 			return
 		}
@@ -2514,7 +2656,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				Queued: queued, QueueMs: queueMs, SemMs: semMs,
 				Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"),
 				Source: r.Header.Get("X-Tollgate-Source"),
-				Err:    "upstream_locked", Fallbacks: failed, LockSkips: lockedSkips,
+				Err:    "upstream_locked", Fallbacks: failed, LockSkips: lockedSkips, BackoffSkips: backoffSkips,
 			})
 			return
 		}
@@ -2530,7 +2672,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Status: http.StatusBadGateway, Missing: true, Queued: queued, QueueMs: queueMs, SemMs: semMs,
 			Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"),
 			Source: r.Header.Get("X-Tollgate-Source"),
-			Err:    msg, Fallbacks: failed, LockSkips: lockedSkips,
+			Err:    msg, Fallbacks: failed, LockSkips: lockedSkips, BackoffSkips: backoffSkips,
 		})
 		return
 	}
@@ -2607,7 +2749,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Status: status, Usage: usage, Missing: missing, Queued: queued, QueueMs: queueMs,
 		SemMs:  semMs,
 		Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"), Source: r.Header.Get("X-Tollgate-Source"),
-		Fallbacks: failed, LockSkips: lockedSkips,
+		Fallbacks: failed, LockSkips: lockedSkips, BackoffSkips: backoffSkips,
 		TtfbMs: ttfbMs, Tps: tps,
 	})
 }
