@@ -124,7 +124,7 @@ func normGate(g GateCfg) GateCfg {
 		g.IntervalMs = gateIntervalMs
 	}
 	if g.SemWaitMs <= 0 {
-		g.SemWaitMs = 20000
+		g.SemWaitMs = 5000
 	}
 	if g.QueueWaitMs <= 0 {
 		g.QueueWaitMs = 10000

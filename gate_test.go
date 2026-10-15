@@ -17,7 +17,7 @@ func testGate() GateCfg {
 // TestNormGateDefaults 核对缺省值逐项等于设计 §5.5.4。
 func TestNormGateDefaults(t *testing.T) {
 	g := normGate(GateCfg{})
-	if g.IntervalMs != 500 || g.SemWaitMs != 20000 || g.QueueWaitMs != 10000 ||
+	if g.IntervalMs != 500 || g.SemWaitMs != 5000 || g.QueueWaitMs != 10000 ||
 		g.ConcurrencyLockMs != 3600000 || g.QuotaLockMs != 600000 || g.BreakerLockMs != 300000 {
 		t.Fatalf("缺省值不符: %+v", g)
 	}

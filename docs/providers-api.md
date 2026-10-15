@@ -272,7 +272,7 @@ LiteLLM 形 / 方舟形 / CLIProxyAPI 形；厂商规范只在直连官方 API �
   "timeouts": { "connect_ms": 10000, "response_header_ms": 120000, "stream_idle_ms": 240000 },
   "gate": {
     "interval_ms": 500,
-    "sem_wait_ms": 20000,
+    "sem_wait_ms": 5000,
     "queue_wait_ms": 10000,
     "concurrency_lock_ms": 3600000,
     "quota_lock_ms": 600000,
