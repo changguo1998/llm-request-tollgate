@@ -24,15 +24,15 @@
 | `group` (CLIProxyAPI) | 限流 / 账号额度 | message 关键词 (无稳定 code) |
 | OpenAI (直连) | 限流 / 额度 | `error.code`: `rate_limit_exceeded` vs `insufficient_quota` 系列 |
 | Kimi (直连) | 限流 / 余额 | `error.type`: `rate_limit_reached_error` vs `exceeded_current_quota_error` |
-| DeepSeek (直连) | 限流 (额度走 402) | 状态码即可分 |
+| `deepseek` (官方直连) | 并发超限 429 / 余额不足 402 | 状态码 + message 关键词 |
 
 ## 1.2 判定流水线（顺序固定）
 
 1. **前提**：只在「首字节尚未写给下游」时分类。流已开始就没有分类可言, 只能发 SSE error 事件
    (design §2 第 2 条)。
 2. **取 body**：截断到 8 KB；先试 JSON 解析, 抽出 `error.type` / `error.code` / `error.message`
-   (同一路径覆盖 OpenAI 形、方舟形与 Anthropic 形 `type=error` 包裹)；JSON 失败 (DeepSeek 的 401 是
-   纯文本) 则用原始 body。
+   (同一路径覆盖 OpenAI 形、方舟形与 Anthropic 形 `type=error` 包裹)；JSON 失败 (个别网关回纯文本)
+   则用原始 body。
 3. **拼匹配文本** = `type + code + message`, 统一转小写。不要只挑一个字段 —— 有的上游关键词只在
    `type` (LiteLLM), 有的只在 `code` (方舟, 其 `type` 常为空串), 有的只在 `message` (group)。
 4. **按 `quota → concurrency → rate → other` 顺序匹配**, 首条命中即止。单条规则语义：
@@ -59,7 +59,7 @@
 | `ustc` (LiteLLM) | `error.type`：`budget_exceeded` / `rate_limit_error` / `throttling_error` | message `Budget has been exceeded!`、`ExceededBudget:`、`Max parallel request limit reached` | 状态码（跨版本漂移） |
 | `arkcp` / `arkap` | `error.code` 子串：`RateLimitExceeded.*`、`QuotaExceeded*`、`InflightBatchsizeExceeded`、`InvalidSubscription` | message：`overdue balance`、`free trial quota`、`usage quota` | `error.type`（常为空串）、状态码（429 有六类原因同码） |
 | `group` (CLIProxyAPI) | message 子串 + 状态码 | — | `error.code`（不稳定）、`error.type`（`error` 有时是字符串而非对象） |
-| DeepSeek（未来直连） | 状态码 402 / 429 / 503 | 中英文 message：`Insufficient Balance` / `余额不足` | `error.code` / `error.type`（官方从未定义） |
+| `deepseek` (官方直连) | 状态码 402 / 429 (429 只表限流 / 并发, 额度固定走 402) | message: `Insufficient Balance` / `余额不足` / `Concurrency limit`; `error.type` 实测有值但都是请求级错误, 不区分额度与并发 | `error.code` (实测恒为 `invalid_request_error`, 无区分度) |
 | OpenAI / Kimi（未来直连） | `error.code` / `error.type` | 限流头 `retry-after` | 状态码单判（两家 429 也是混用） |
 
 ## 1.5 关键词写法
@@ -78,8 +78,9 @@
    `<Provider>Exception`（如 `OpenAIException`）—— 这类是上游限流, 不是网关配额。动作同为退避, 可不区分。
 2. **别用响应里的 `model` 判定或路由**：`group` 回写 `kimi-for-coding`、`arkcp` 回写
    `deepseek-v4-flash-ga-260731`, 与别名表里的 id 对不上。
-3. **过载类不进三档**：503 `Server Overloaded`、429 `ServerOverloaded` / `RequestBurstTooFast` /
-   `engine_overloaded_error` 既不是并发上限也不是额度 → 通用兜底退避。
+3. **过载类不进三档**：503 `Server Overloaded`、方舟 / Kimi 的 429 `ServerOverloaded` /
+   `RequestBurstTooFast` / `engine_overloaded_error` 既不是并发上限也不是额度 → 通用兜底退避
+   （DeepSeek 的 429 相反, 官方口径就是账号并发超限, 归并发）。
 4. **上游限流 ≠ 并发上限**：只有明确说「并发 / 在途数 / max parallel」的才算 `concurrency`
    (D17 只在这种情况下锁 1h)；RPM / TPM 类限流走通用兜底。
 
@@ -95,14 +96,17 @@
 | `arkcp` | `https://ark.cn-beijing.volces.com/api/coding/v3` | 火山方舟 Coding Plan | 方舟形 `error{code,message,param,type}` |
 | `arkap` | `https://ark.cn-beijing.volces.com/api/plan/v3` | 火山方舟 Agent Plan | 同上 |
 | `group` | `<group-base>/v1`（真实值见 config.local.json） | CLIProxyAPI + nginx | OpenAI 形；`/v1/messages` 上是 Anthropic 形 |
+| `deepseek` | `https://api.deepseek.com/v1` | DeepSeek 官方 API (openresty) | OpenAI 形 `error{message,type,param,code}` |
 
 判定依据 (实测)：`ustc` 的 401 body 点名 `LiteLLM_VerificationTokenTable` + 响应头 `server: uvicorn`,
 USTC 技术更新页也写明网关是 LiteLLM；`group` 的 401 响应头带 `X-CPA-TRACE-ID` / `X-CPA-VERSION`
 (CPA = CLI Proxy API) 且未知模型文案 `unknown provider for model X` 是其专有字符串；`arkcp` / `arkap`
-响应头 `server: istio-envoy` + `x-request-id`。
+响应头 `server: istio-envoy` + `x-request-id`；`deepseek` 是官方域名, 401 / 400 实测为 OpenAI 形
+JSON, message 带 `(request_id: …)`, 响应头 `server: openresty` + `x-ds-trace-id`。
 
-**结论：规则按上游写, 不按模型厂商写。** 同一个 `deepseek-v4-flash` 走四家, 错误体分别是
-LiteLLM 形 / 方舟形 / CLIProxyAPI 形；厂商规范只在直连官方 API 时适用, 本仓当前没有直连上游。
+**结论：规则按上游写, 不按模型厂商写。** 同一个 `deepseek-v4-flash` 走四家网关, 错误体分别是
+LiteLLM 形 / 方舟形 / CLIProxyAPI 形；第五家 `deepseek` 是官方直连 (2026-10-17 加入, 排在
+`deepseek-v4.1-flash` 候选末尾作兜底), 厂商规范只对它适用。
 
 ## 2.2 实测错误清单
 
@@ -154,6 +158,20 @@ LiteLLM 形 / 方舟形 / CLIProxyAPI 形；厂商规范只在直连官方 API �
   所以**不一定把上游的额度错误透出来**。
 - 它上游接的是 Codex / Claude Code 一类**账号池**, 额度与风控文案随账号方变化, 无法穷举。
 
+### `deepseek`（官方直连, 2026-10-17 实测）
+
+| 场景 | 状态码 | `error.type` | body 原文（已脱敏） |
+|---|---|---|---|
+| key 无效 | 401 | `authentication_error` | `Authentication Fails, Your api key: ****alid is invalid (request_id: <id>)` |
+| 模型不存在 | 400 | `invalid_request_error` | `The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed X. (request_id: <id>)` |
+| 参数越界 | 400 | `invalid_request_error` | `Invalid temperature value, the valid range of temperature is [0, 2] (request_id: <id>)` |
+
+- 错误体：`{"error":{"message":"...","type":"...","param":null,"code":"invalid_request_error"}}`；
+  三例的 `error.code` 都是 `invalid_request_error`, 没有区分度。
+- 响应头：`server: openresty`、`x-ds-trace-id`；401 / 400 上无 `Retry-After` / `x-ratelimit-*`。
+- 402 (余额不足) 与 429 (并发超限) 的 body 原文未实测到 (账号有余额、并发打不满), 见 §2.4。
+- `/v1/models` 可用, 返回 `deepseek-flash` / `deepseek-v4-pro`。
+
 ## 2.3 当前可用性与别名表问题（2026-10-13 实测）
 
 | 上游 | 状态 | 证据 | 恢复条件 |
@@ -175,21 +193,32 @@ LiteLLM 形 / 方舟形 / CLIProxyAPI 形；厂商规范只在直连官方 API �
 ### DeepSeek
 
 - `https://api.deepseek.com`（Anthropic 兼容端点 `/anthropic`）；`Authorization: Bearer sk-...`。
-- **错误体形状官方从未定义**；实测未认证返回**纯文本** `Authentication Fails (governor)`, 不是 JSON。
-  官方只文档化 7 个状态码, `error.code` / `error.type` 字符串全部未文档化。
+  本仓用 `https://api.deepseek.com/v1` —— 官方说明 `/v1` 只是 OpenAI 兼容前缀, 与模型版本无关。
+- **错误体**：2026-10-17 实测是 OpenAI 形 JSON
+  `{"error":{"message":...,"type":...,"param":null,"code":"invalid_request_error"}}`；
+  旧记录「未认证返回纯文本 `Authentication Fails (governor)`」在 2026-10-17 已不复现。
+  `error.type` 有值 (`authentication_error` / `invalid_request_error`), 但额度与并发两档仍靠
+  状态码 + message 判定。
+- **并发上限**（账号级, 与用哪个 key 无关）：`deepseek-flash` 2500, `deepseek-v4-pro` 500；
+  超过即 429。限流页只写并发超限, 错误码页还提到发送过快 / QPS; 两者都不涉及余额。
 
 | HTTP | 官方标签 | 归类 | 关键词 |
 |---|---|---|---|
 | 402 | Insufficient Balance | 额度 | `Insufficient Balance` / `余额不足` |
-| 400 | （第三方称余额不足也可走 400） | 额度 | 同上, 另加 `in arrears` / `欠费` |
-| 429 | Rate Limit Reached | 限流（官方口径混用「发送过快 / 并发超限 / TPM 达上限」） | `Rate limit reached` / `请求速率达到上限` |
+| 429 | Rate Limit Reached（发送过快 / 并发 / QPS 超限） | 并发 | `Concurrency limit` / `Rate limit` |
 | 503 | Server Overloaded | 过载（退避） | `Server Overloaded` / `服务器繁忙` |
 | 500 / 401 | Server Error / Authentication Fails | 服务端 / 鉴权 | `Server Error` / `Authentication Fails` |
 | 400 / 422 | Invalid Format / Invalid Parameters | 请求错误 | `Invalid Format` / `Invalid Parameters` |
 
-- 无 `Retry-After` / `x-ratelimit-*`（官方无记载, 实测 401 也没有）；有 `x-ds-trace-id`。
-- 支持 `stream_options.include_usage`, 但**不单独发 usage-only chunk**：用量挂在 `[DONE]` 前最后一个内容 chunk。
-- 保活：流式发 SSE 注释 `: keep-alive`（代理解析要跳过）；10 分钟未开始推理则服务端断连。
+- 402 / 429 的 body 原文仍未实测到, 上表关键词来自官方措辞；配进规则表时状态码是必要条件,
+  关键词不命中就退回通用退避, 不会误锁。
+- 响应头：`server: openresty`、`x-ds-trace-id`；401 / 400 上无 `Retry-After` / `x-ratelimit-*`
+  （官方亦无记载, 429 未验证）。
+- 支持 `stream_options.include_usage`：开启后每个 chunk 都带 `usage` 字段（只有末块非 null）,
+  **不单独发 usage-only chunk**；不开启时只有末块带 usage。
+- 保活：流式发 SSE 注释 `: keep-alive`, 非流式发空行（代理解析要跳过）；10 分钟未开始推理则
+  服务端断连。
+- `/v1/models` 可用, 返回 `deepseek-flash` / `deepseek-v4-pro`。
 
 ### Kimi / Moonshot
 
@@ -242,7 +271,8 @@ LiteLLM 形 / 方舟形 / CLIProxyAPI 形；厂商规范只在直连官方 API �
 ## 2.5 其它核实到的事实
 
 1. `stream_options.include_usage` 实测：`arkcp` ✓（usage chunk 的 `choices` 为空数组；方舟另有专有参数
-   `chunk_include_usage` 做逐 chunk 累计）, `group` ✓；DeepSeek 支持但不单独发 usage chunk。
+   `chunk_include_usage` 做逐 chunk 累计）, `group` ✓, `deepseek` ✓（开启后每个 chunk 都带 usage,
+   只有末块非 null, 不单独发 usage-only chunk）。
 2. `/responses` 收尾差异（实测）：`arkcp` 会发 `data: [DONE]`（终态事件可能是 `response.incomplete`,
    `incomplete_details.reason=length`）；`group` **不发 `[DONE]`**, 只有 `response.completed`。
    → design §4.3「以 `response.completed` 判正常收尾」需放宽为「`response.completed` 或
@@ -254,7 +284,8 @@ LiteLLM 形 / 方舟形 / CLIProxyAPI 形；厂商规范只在直连官方 API �
 1. `group` 的额度 / 限流文案（402 / 429）与并发文案 —— 未实测到。
 2. `ustc` 的限流 (`rate_limit_error`) 与并发槽位超限文案 —— 该 key 被预算挡在更前面, 没打到。
 3. 方舟的 `Retry-After` / `x-ratelimit-*` 是否存在。
-4. DeepSeek 的 400/402/422/429/500/503 官方 body 原文与 `Retry-After`；Chat Completions 流内错误事件形态。
+4. DeepSeek 的 402 / 429 / 500 / 503 body 原文与 `Retry-After`（401 / 400 已于 2026-10-17 实测）；
+   Chat Completions 流内错误事件形态。
 5. OpenAI 的 `invalid_api_key` / `billing_hard_limit_reached` / `insufficient_quota`（作为 code）。
 
 来源：[USTC API 使用](https://llm.ustc.edu.cn/guide/api-usage/)、[USTC 技术更新](https://llm.ustc.edu.cn/guide/technical-updates/)、[USTC 协议支持](https://llm.ustc.edu.cn/guide/protocol/)、[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)、[LiteLLM Error Reference](https://docs.litellm.ai/docs/proxy/error_reference)、[方舟错误码](https://docs.volcengine.com/docs/ark/error-codes?lang=zh)、[方舟 base url 与认证](https://docs.volcengine.com/docs/ark/base-url-and-authentication?lang=zh)、[DeepSeek error_codes](https://api-docs.deepseek.com/quick_start/error_codes)、[Kimi errors](https://platform.kimi.com/docs/api/errors.md)、[OpenAI error-codes](https://developers.openai.com/api/docs/guides/error-codes.md)、[OpenAI rate-limits](https://developers.openai.com/api/docs/guides/rate-limits.md)
@@ -397,6 +428,25 @@ LiteLLM 形 / 方舟形 / CLIProxyAPI 形；厂商规范只在直连官方 API �
               "AccountRateLimitExceeded"
             ]
           }
+        ]
+      }
+    },
+    {
+      "id": "deepseek",
+      "base_url": "https://api.deepseek.com/v1",
+      "auth_header": "Authorization",
+      "key_env": "DEEPSEEK_API_KEY",
+      "headers": {},
+      "include_usage": true,
+      "errors": {
+        "quota": [
+          {
+            "status": [402],
+            "contains": ["insufficient balance", "insufficient_balance", "余额不足"]
+          }
+        ],
+        "concurrency": [
+          { "status": [429], "contains": ["concurrency", "rate limit"] }
         ]
       }
     },
