@@ -76,7 +76,7 @@ export GROUP_API_KEY=...
 systemd 场景如不想走 fff 加载, 也可以手动导入后重启:
 
 ```bash
-systemctl --user import-environment USTC_API_KEY GROUP_API_KEY ARKCP_API_KEY ARKAP_API_KEY
+systemctl --user import-environment USTC_API_KEY GROUP_API_KEY ARKCP_API_KEY ARKAP_API_KEY DEEPSEEK_API_KEY
 # 或 systemctl --user set-environment USTC_API_KEY=...
 ./deploy/tollgate.sh restart
 ```
@@ -156,6 +156,9 @@ mv llm-request-tollgate.bak llm-request-tollgate && ./deploy/tollgate.sh restart
   `maxTokens`; 缺等级表时 agent 汇报 `UNSUPPORTED_REASONING_EFFORT` 拒发.
 - `key_env` 取 store 里 `apiKey` 的占位符名; `auth_header` 等从现有配置继承.
 - `--dry-run` 只打印; `--providers` 改上游与优先级.
+- 手工加的真上游 (如官方直连 `deepseek`) 不在 fff store 里, 重生成时 `upstreams` 会被重写
+  (`build_upstreams` 只认 store 里的 provider), 这条上游会丢; 要先在 store 里补 provider, 或
+  重生成后手工补回.
 
 ```bash
 # 本机版 (dotfiles 维护, 依赖本机 fff store):
@@ -165,16 +168,17 @@ python3 scripts/gen_tollgate_config.py
 python3 scripts/gen_tollgate_config.example.py
 ```
 
-### 6.2 用 TUI priority 页调权重
+### 6.2 用 TUI settings 页调权重与调度参数
 
-状态台第 4 个页签直接改 store (`~/fff/config/llm-models.json` 里的
-`tollgate_priority`), 右栏实时预览候选顺序; `+/-` 调值, `=` 输数值, `Tab` 换面板,
-`/` 过滤, `s` 存 store, `r` 重生成配置, `h` 热加载, `q` 退出.
+状态台第 4 个页签 (settings) 上半是 `gate` 的 7 项调度参数 (写回 `config.local.json` 的
+`gate` 段, 其余字段与格式原样保留), 下半是 store (`~/fff/config/llm-models.json` 里的
+`tollgate_priority`), 右栏实时预览候选顺序. `m` / `p` / `g` 聚焦模型 / provider / 调度参数,
+`+/-` 调值, `=` 输数值, `/` 过滤, `s` 保存并热加载, `r` 重生成配置, `h` 热加载, `q` 退出.
 
 ```bash
 # 同进程起代理 + 状态台 (q 退出):
 ./llm-request-tollgate -tui
-# 只看已常驻的服务 (priority 页改完 h = 发 SIGHUP):
+# 只看已常驻的服务 (settings 页改完 s/h = 发 SIGHUP):
 ./llm-request-tollgate -tui -tui-state http://127.0.0.1:8787
 ```
 

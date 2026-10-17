@@ -1,5 +1,5 @@
-// tui_priority.go: priority 页 —— 调 tollgate_priority 的编辑器 (原 scripts/set_priority.ts
-// 的 Go 版, 与状态台合成一个界面)。
+// tui_priority.go: settings 页 —— 调度参数 (gate) 与 tollgate_priority 的编辑器
+// (原 scripts/set_priority.ts 的 Go 版, 与状态台合成一个界面)。
 //
 // 左栏是 provider 面板 + 模型列表 (别名 -> 候选), 右栏是所选别名的候选顺序实时预览:
 // 候选顺序 = 模型优先级降序 -> provider 优先级降序 -> 上游顺序 -> 模型 id, 与生成器
@@ -61,7 +61,7 @@ type tuiPrompt struct {
 	commit func(string)
 }
 
-// tuiEditor 是 priority 页的全部状态。
+// tuiEditor 是 settings 页的全部状态: 优先级 (store) + 调度参数 (gate, 写配置文件)。
 type tuiEditor struct {
 	path   string // store: llm-models.json
 	config string // 代理配置 (取上游顺序, 也是重生成的目标)
@@ -74,7 +74,7 @@ type tuiEditor struct {
 
 	dirty    bool
 	asked    bool // q 已经提示过一次未保存
-	focus    int  // 0 = 模型, 1 = provider
+	focus    int  // 0 = 模型, 1 = provider, 2 = 调度参数 (gate)
 	provSel  int
 	modelSel int
 	top      int
@@ -83,6 +83,11 @@ type tuiEditor struct {
 	message  string
 	prompt   *tuiPrompt
 	err      string
+
+	gate      GateCfg // 配置文件里的调度参数 (显示用 normGate 补齐后的值)
+	gateSel   int
+	gateDirty bool
+	gateErr   string
 }
 
 // ---------- 载入与保存 ----------
@@ -139,6 +144,7 @@ func newTuiEditor(cfgPath string) *tuiEditor {
 		config: cfgPath,
 		root:   repoRootFor(cfgPath),
 	}
+	e.loadGate()
 	if err := e.load(); err != nil {
 		e.err = err.Error()
 		e.message = "store 读不到: " + err.Error()
@@ -163,8 +169,26 @@ func (e *tuiEditor) load() error {
 	}
 	e.store = top
 	e.providers = e.providerOrder()
+	e.sortProviders()
 	e.rebuild()
 	return nil
+}
+
+// sortProviders 按 provider 优先级降序排 (同优先级保持配置顺序), 选中项跟着名字走。
+func (e *tuiEditor) sortProviders() {
+	keep := ""
+	if e.provSel >= 0 && e.provSel < len(e.providers) {
+		keep = e.providers[e.provSel]
+	}
+	sort.SliceStable(e.providers, func(i, j int) bool {
+		return prioOf(e.provEntry(e.providers[i])) > prioOf(e.provEntry(e.providers[j]))
+	})
+	for i, name := range e.providers {
+		if keep != "" && name == keep {
+			e.provSel = i
+			return
+		}
+	}
 }
 
 // save 原子写回 store (先写 .tmp 再 rename, 与旧脚本一致)。
@@ -178,6 +202,267 @@ func (e *tuiEditor) save() error {
 		return err
 	}
 	return os.Rename(tmp, e.path)
+}
+
+// ---------- 调度参数 (gate) ----------
+
+// gateLabels 是设置页里 gate 参数的顺序与名字, 与 GateCfg 的字段一一对应;
+// 最后一项是退避序列, 只能用 = 按逗号输入。
+var gateLabels = []string{
+	"interval_ms", "sem_wait_ms", "queue_wait_ms",
+	"concurrency_lock_ms", "quota_lock_ms", "breaker_lock_ms", "retry_backoff_ms",
+}
+
+// gateStep 是 +/- 一次调整的步长 (退避序列返回 0 = 不用加减键)。
+func gateStep(i int) int {
+	switch i {
+	case 0:
+		return 100
+	case 1, 2:
+		return 500
+	case 3, 4, 5:
+		return 60000
+	}
+	return 0
+}
+
+// gateField 取/设一个 gate 参数 (i 是 gateLabels 的下标)。
+func (e *tuiEditor) gateField(i int) int {
+	g := e.gate
+	switch i {
+	case 0:
+		return g.IntervalMs
+	case 1:
+		return g.SemWaitMs
+	case 2:
+		return g.QueueWaitMs
+	case 3:
+		return g.ConcurrencyLockMs
+	case 4:
+		return g.QuotaLockMs
+	case 5:
+		return g.BreakerLockMs
+	}
+	return 0
+}
+
+// gateText 是设置页里那一行的值 (退避序列写成逗号串, 与输入格式一致)。
+func (e *tuiEditor) gateText(i int) string {
+	if i == len(gateLabels)-1 {
+		parts := make([]string, 0, len(e.gate.RetryBackoffMs))
+		for _, v := range e.gate.RetryBackoffMs {
+			parts = append(parts, strconv.Itoa(v))
+		}
+		return strings.Join(parts, ",") + " ms"
+	}
+	return strconv.Itoa(e.gateField(i)) + " ms"
+}
+
+// loadGate 读配置文件里的 gate 段 (只读这一段, 不碰密钥; 缺省值用 normGate 补齐)。
+func (e *tuiEditor) loadGate() {
+	b, err := os.ReadFile(e.config)
+	if err != nil {
+		e.gateErr = err.Error()
+		return
+	}
+	var raw struct {
+		Gate GateCfg `json:"gate"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		e.gateErr = err.Error()
+		return
+	}
+	e.gate = normGate(raw.Gate)
+	e.gateErr = ""
+}
+
+// adjustGate 用 +/- 改一个参数; 退避序列只走 = 输入。
+func (e *tuiEditor) adjustGate(delta int) {
+	i := e.gateSel
+	step := gateStep(i)
+	if step == 0 {
+		e.message = "退避序列用 = 按逗号输入"
+		return
+	}
+	v := e.gateField(i) + delta*step
+	switch i {
+	case 0:
+		v = clampInt(v, 100, 60000)
+		e.gate.IntervalMs = v
+	case 1:
+		v = clampInt(v, 100, 600000)
+		e.gate.SemWaitMs = v
+	case 2:
+		v = clampInt(v, 100, 600000)
+		e.gate.QueueWaitMs = v
+	case 3:
+		v = clampInt(v, 1000, 86400000)
+		e.gate.ConcurrencyLockMs = v
+	case 4:
+		v = clampInt(v, 1000, 86400000)
+		e.gate.QuotaLockMs = v
+	case 5:
+		v = clampInt(v, 1000, 86400000)
+		e.gate.BreakerLockMs = v
+	}
+	e.gateDirty = true
+	e.message = gateLabels[i] + " = " + strconv.Itoa(v)
+}
+
+// setGatePrompt 处理 = 输入: 普通参数一个整数, 退避序列是逗号分隔的毫秒数。
+func (e *tuiEditor) setGatePrompt(i int, text string) {
+	if i == len(gateLabels)-1 {
+		parts := strings.Split(text, ",")
+		seq := make([]int, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			n, err := strconv.Atoi(p)
+			if err != nil || n <= 0 {
+				e.message = "退避序列要逗号分隔的正整数"
+				return
+			}
+			seq = append(seq, n)
+		}
+		if len(seq) == 0 {
+			e.message = "退避序列不能为空"
+			return
+		}
+		e.gate.RetryBackoffMs = seq
+		e.gateDirty = true
+		e.message = "retry_backoff_ms = " + text
+		return
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(text))
+	if err != nil || n <= 0 {
+		e.message = gateLabels[i] + " 要正整数"
+		return
+	}
+	switch i {
+	case 0:
+		e.gate.IntervalMs = n
+	case 1:
+		e.gate.SemWaitMs = n
+	case 2:
+		e.gate.QueueWaitMs = n
+	case 3:
+		e.gate.ConcurrencyLockMs = n
+	case 4:
+		e.gate.QuotaLockMs = n
+	case 5:
+		e.gate.BreakerLockMs = n
+	}
+	e.gateDirty = true
+	e.message = gateLabels[i] + " = " + strconv.Itoa(n)
+}
+
+// marshalConfig 按固定的顶层顺序写回配置文件: 手写 JSON 是因为 map 会把键排序,
+// 让整份配置产生无关的 diff。raw 里没认识的键按字典序补在最后, 不丢数据。
+func marshalConfig(top map[string]json.RawMessage) ([]byte, error) {
+	known := []string{"listen", "log_path", "timeouts", "gate", "upstreams", "aliases", "probe"}
+	rest := make([]string, 0)
+	for k := range top {
+		seen := false
+		for _, k2 := range known {
+			if k == k2 {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			rest = append(rest, k)
+		}
+	}
+	sort.Strings(rest)
+	keys := append(append([]string{}, known...), rest...)
+
+	var b bytes.Buffer
+	b.WriteString("{")
+	first := true
+	for _, k := range keys {
+		raw, ok := top[k]
+		if !ok {
+			continue
+		}
+		var body bytes.Buffer
+		if err := json.Indent(&body, raw, "  ", "  "); err != nil {
+			return nil, err
+		}
+		if !first {
+			b.WriteString(",")
+		}
+		first = false
+		b.WriteString("\n  ")
+		b.WriteString(strconv.Quote(k))
+		b.WriteString(": ")
+		b.Write(body.Bytes())
+	}
+	b.WriteString("\n}\n")
+	return b.Bytes(), nil
+}
+
+// saveGate 只改配置文件里的 gate 段, 其余内容原样保留 (密钥不会写回)。
+// config.local.json 通常是软链: 写到软链的真实目标, 别把软链本身换成普通文件。
+func (e *tuiEditor) saveGate() error {
+	target := e.config
+	if real, err := filepath.EvalSymlinks(e.config); err == nil {
+		target = real
+	}
+	b, err := os.ReadFile(target)
+	if err != nil {
+		return err
+	}
+	top := map[string]json.RawMessage{}
+	if err := json.Unmarshal(b, &top); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(normGate(e.gate))
+	if err != nil {
+		return err
+	}
+	top["gate"] = raw
+	out, err := marshalConfig(top)
+	if err != nil {
+		return err
+	}
+	mode := os.FileMode(0o644)
+	if st, err := os.Stat(target); err == nil {
+		mode = st.Mode().Perm()
+	}
+	tmp := target + ".tmp"
+	if err := os.WriteFile(tmp, out, mode); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		return err
+	}
+	e.gateDirty = false
+	return nil
+}
+
+// saveSettings 先存优先级 store, 再存 gate 到配置文件, 最后热加载一次。
+// 任一保存失败就停下, 不把半套配置推给运行中的代理。
+func (m *tuiModel) saveSettings() {
+	e := m.prio
+	if e == nil {
+		return
+	}
+	if e.usable() && e.dirty {
+		e.saveStore()
+		if e.dirty {
+			return // store 保存失败, 别再热加载
+		}
+	}
+	if !e.gateDirty {
+		return
+	}
+	if err := e.saveGate(); err != nil {
+		e.message = "调度参数保存失败: " + err.Error()
+		return
+	}
+	m.prioHup()
 }
 
 // ---------- store 视图 ----------
@@ -452,6 +737,10 @@ func (e *tuiEditor) markDirty() {
 }
 
 func (e *tuiEditor) adjust(delta int) {
+	if e.focus == 2 {
+		e.adjustGate(delta)
+		return
+	}
 	if !e.usable() {
 		return
 	}
@@ -463,6 +752,7 @@ func (e *tuiEditor) adjust(delta int) {
 		entry := e.provEntry(name)
 		setPrio(entry, prioOf(entry)+delta)
 		e.message = name + ": provider 优先级 = " + strconv.Itoa(prioOf(entry))
+		e.sortProviders()
 	} else {
 		row := e.selected()
 		if row == nil {
@@ -486,6 +776,7 @@ func (e *tuiEditor) setValue(v int) {
 		entry := e.provEntry(e.providers[clampInt(e.provSel, 0, len(e.providers)-1)])
 		setPrio(entry, v)
 		e.message = "provider 优先级 = " + strconv.Itoa(prioOf(entry))
+		e.sortProviders()
 	} else {
 		row := e.selected()
 		if row == nil {
@@ -550,7 +841,7 @@ func lastLine(out, fallback string) string {
 // 走 deploy/tollgate.sh hup 发 SIGHUP —— 与旧 set_priority.ts 的语义一致。
 func (m *tuiModel) prioHup() {
 	e := m.prio
-	if e == nil || !e.usable() {
+	if e == nil {
 		return
 	}
 	if m.reloadFn != nil {
@@ -573,38 +864,62 @@ func (m *tuiModel) prioHup() {
 
 // ---------- 键位 ----------
 
-// key 处理 priority 页的一个按键; 返回 true = 请求退出 (未保存时先问一次)。
+// key 处理 settings 页的一个按键; 返回 true = 请求退出 (未保存时先问一次)。
 func (e *tuiEditor) key(b byte) (quit bool, handled bool) {
 	if e.prompt != nil {
 		return false, e.promptKey(b)
 	}
-	if !e.usable() {
+	if !e.usable() && e.focus != 2 {
 		return false, false
 	}
 	switch b {
 	case 'q', 0x03, 0x04:
 		// 有未保存改动先问一次; 再按一次 q 就是确认放弃 (与旧脚本一致)。
-		if e.dirty && !e.asked {
+		if (e.dirty || e.gateDirty) && !e.asked {
 			e.message = "有未保存改动: 再按 q 放弃退出, 或按 s 保存"
 			e.asked = true
 			return false, true
 		}
 		return true, true
-	case '\t':
-		e.focus = 1 - e.focus
-		return false, true
 	case 'm':
 		e.focus = 0 // m = 切到模型 (改模型优先级)
 		return false, true
 	case 'p':
 		e.focus = 1 // p = 切到 provider (改 provider 优先级)
 		return false, true
+	case 'g':
+		e.focus = 2 // g = 切到调度参数 (gate)
+		return false, true
+	}
+	if e.focus == 2 {
+		switch b {
+		case 'j':
+			e.moveFocus(1)
+		case 'k':
+			e.moveFocus(-1)
+		case 'G':
+			e.jump(1 << 30)
+		case ' ':
+			e.moveFocus(1 << 20)
+		case '+':
+			e.adjust(1)
+		case '-':
+			e.adjust(-1)
+		case '=':
+			i := e.gateSel
+			e.prompt = &tuiPrompt{label: "新的 " + gateLabels[i] + ":", commit: func(v string) {
+				e.setGatePrompt(i, v)
+			}}
+		default:
+			return false, false
+		}
+		return false, true
+	}
+	switch b {
 	case 'j':
 		e.moveFocus(1)
 	case 'k':
 		e.moveFocus(-1)
-	case 'g':
-		e.jump(0)
 	case 'G':
 		e.jump(1 << 30)
 	case ' ':
@@ -651,6 +966,10 @@ func (e *tuiEditor) promptKey(b byte) bool {
 }
 
 func (e *tuiEditor) moveFocus(d int) {
+	if e.focus == 2 {
+		e.gateSel = clampInt(e.gateSel+d, 0, len(gateLabels)-1)
+		return
+	}
 	if e.focus == 1 {
 		e.provSel = clampInt(e.provSel+d, 0, max(0, len(e.providers)-1))
 		return
@@ -659,6 +978,10 @@ func (e *tuiEditor) moveFocus(d int) {
 }
 
 func (e *tuiEditor) jump(to int) {
+	if e.focus == 2 {
+		e.gateSel = clampInt(to, 0, len(gateLabels)-1)
+		return
+	}
 	if e.focus == 1 {
 		e.provSel = clampInt(to, 0, max(0, len(e.providers)-1))
 		return
@@ -676,29 +999,32 @@ func (e *tuiEditor) visibleRows() int {
 
 // ---------- 渲染 ----------
 
-// drawPriority 画 priority 页: 左 provider 面板 + 模型列表, 右候选顺序预览, 底部消息行。
-func (m *tuiModel) drawPriority(c *tuiCanvas, body int) {
+// drawSettings 画设置页: 左栏调度参数 (gate) + provider 面板 + 模型列表, 右栏候选顺序
+// 预览, 底部消息行。列宽按内容算, 右栏一直顶到终端右边界; 不补装饰空行, 短的一栏就
+// 让右侧继续显示。
+func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 	e := m.prio
 	if e == nil {
-		c.line(tuiIndent + tuiYell + "priority 页未装载" + tuiReset)
+		c.line(tuiIndent + tuiYell + "设置页未装载" + tuiReset)
 		return
 	}
-	leftW := m.cols / 2
-	if leftW < 38 {
-		leftW = 38
+	gateLines := 1 + len(gateLabels)
+	provH := 0
+	if e.usable() {
+		// 上游列表优先显示全 (通常就 4-6 个), 剩下的行给模型列表。
+		provH = min(len(e.providers), max(1, body-gateLines-7))
 	}
-	if leftW > m.cols-2 {
-		leftW = m.cols - 2
-	}
-	rightW := m.cols - leftW - 1
-	if rightW < 8 {
-		rightW = 8
-	}
+	// 段与段之间留一个空行: gate / Providers / 模型。
+	visible := max(1, body-gateLines-provH-5)
 	rows := e.filtered()
-	visible := max(1, body-4)
-	e.vis = visible
-	if e.focus == 0 {
-		e.modelSel = clampInt(e.modelSel, 0, max(0, len(rows)-1))
+	if len(rows) == 0 {
+		visible = 0
+	} else {
+		visible = min(visible, len(rows))
+	}
+	e.vis = max(1, visible)
+	if e.focus == 0 && len(rows) > 0 {
+		e.modelSel = clampInt(e.modelSel, 0, len(rows)-1)
 		if e.modelSel < e.top {
 			e.top = e.modelSel
 		}
@@ -711,42 +1037,53 @@ func (m *tuiModel) drawPriority(c *tuiCanvas, body int) {
 	}
 
 	left := make([]string, 0, body)
-	left = append(left, tuiBold+tuiPad(e.provTitle(), leftW)+tuiReset)
-	provH := clampInt(len(e.providers)+1, 2, max(2, body/3))
-	for i, name := range e.providers {
-		if i+1 >= provH {
-			break
-		}
-		attr := ""
-		if e.focus == 1 && i == e.provSel {
-			attr = tuiRev
-		}
-		left = append(left, attr+tuiPad(tuiIndent+name+"  priority="+strconv.Itoa(prioOf(e.provEntry(name))), leftW)+tuiReset)
+	focusGate := ""
+	if e.focus == 2 {
+		focusGate = " (焦点)"
 	}
-	for len(left) < provH {
-		left = append(left, strings.Repeat(" ", leftW))
-	}
-	hidden := len(e.droplist())
-	left = append(left, tuiBold+tuiPad(e.listTitle(len(rows), hidden), leftW)+tuiReset)
-	for i := e.top; i < min(len(rows), e.top+visible); i++ {
-		row := rows[i]
-		attr := ""
-		if e.focus == 0 && i == e.modelSel {
-			attr = tuiRev
+	left = append(left, tuiBold+"调度参数 (gate)"+focusGate+tuiReset)
+	for i := range gateLabels {
+		text := tuiIndent + gateLabels[i] + "  " + e.gateText(i)
+		if e.focus == 2 && i == e.gateSel {
+			text = tuiRev + text + tuiReset
 		}
-		text := tuiIndent + "M" + strconv.Itoa(prioOf(row.model)) + " P" + strconv.Itoa(prioOf(row.entry)) +
-			" " + row.provider + "/" + modelID(row.model)
-		left = append(left, attr+tuiPad(text, leftW)+tuiReset)
+		left = append(left, text)
 	}
-	for len(left) < body-1 {
-		left = append(left, strings.Repeat(" ", leftW))
+	left = append(left, "")
+	if !e.usable() {
+		left = append(left, tuiYell+"store 读不到: "+e.err+tuiReset)
+	} else {
+		left = append(left, tuiBold+e.provTitle()+tuiReset)
+		for i, name := range e.providers {
+			if i >= provH {
+				break
+			}
+			attr := ""
+			if e.focus == 1 && i == e.provSel {
+				attr = tuiRev
+			}
+			left = append(left, attr+tuiIndent+name+"  priority="+strconv.Itoa(prioOf(e.provEntry(name)))+tuiReset)
+		}
+		left = append(left, "")
+		hidden := len(e.droplist())
+		left = append(left, tuiBold+e.listTitle(len(rows), hidden)+tuiReset)
+		for i := e.top; i < min(len(rows), e.top+visible); i++ {
+			row := rows[i]
+			attr := ""
+			if e.focus == 0 && i == e.modelSel {
+				attr = tuiRev
+			}
+			text := tuiIndent + "M" + strconv.Itoa(prioOf(row.model)) + " P" + strconv.Itoa(prioOf(row.entry)) +
+				" " + row.provider + "/" + modelID(row.model)
+			left = append(left, attr+text+tuiReset)
+		}
 	}
 
 	right := make([]string, 0, body)
-	right = append(right, tuiBold+tuiPad(tuiIndent+"候选顺序预览", rightW)+tuiReset)
+	right = append(right, tuiBold+tuiIndent+"候选顺序预览"+tuiReset)
 	if row := e.selected(); row != nil {
 		cands := e.candsFor(row.alias)
-		right = append(right, tuiBold+tuiPad(tuiIndent+row.alias+" ("+strconv.Itoa(len(cands))+" 候选)", rightW)+tuiReset)
+		right = append(right, tuiBold+tuiIndent+row.alias+" ("+strconv.Itoa(len(cands))+" 候选)"+tuiReset)
 		for i, cand := range cands {
 			attr := ""
 			if cand.provider == row.provider && cand.modelID == modelID(row.model) {
@@ -754,15 +1091,28 @@ func (m *tuiModel) drawPriority(c *tuiCanvas, body int) {
 			}
 			text := tuiIndent + strconv.Itoa(i+1) + ". " + cand.provider + "/" + cand.modelID +
 				"  M" + strconv.Itoa(cand.modelPrio) + " P" + strconv.Itoa(cand.provPrio)
-			right = append(right, attr+tuiPad(text, rightW)+tuiReset)
+			right = append(right, attr+text+tuiReset)
 		}
 	}
-	for len(right) < body-1 {
-		right = append(right, strings.Repeat(" ", rightW))
-	}
 
-	for i := 0; i < body-1; i++ {
-		c.line(tuiPad(left[i], leftW) + tuiPad(right[i], rightW))
+	// 左右宽度都按内容算; 右栏吃掉剩余宽度, 一直顶到终端右边界。
+	leftW := 32
+	for _, s := range left {
+		leftW = max(leftW, tuiWidth(s)+1)
+	}
+	leftW = min(leftW, max(24, m.cols-16))
+	rightW := max(8, m.cols-leftW-1)
+
+	n := max(len(left), len(right))
+	for i := 0; i < n; i++ {
+		l, r := "", ""
+		if i < len(left) {
+			l = left[i]
+		}
+		if i < len(right) {
+			r = right[i]
+		}
+		c.line(tuiPad(l, leftW) + tuiPad(r, rightW))
 	}
 	c.line(m.prioMessage(e))
 }
@@ -795,10 +1145,16 @@ func (m *tuiModel) prioMessage(e *tuiEditor) string {
 		text = e.prompt.label + " " + e.prompt.buffer
 	}
 	if e.dirty {
-		text += " [未保存]"
+		text += " [优先级未保存]"
+	}
+	if e.gateDirty {
+		text += " [调度参数未保存]"
+	}
+	if e.gateErr != "" {
+		text += " 配置读不到: " + e.gateErr
 	}
 	if e.err != "" {
-		text = "store 读不到: " + e.err
+		text += " store 读不到: " + e.err
 	}
 	return tuiRev + tuiPad(tuiIndent+text+" ", m.cols-1) + tuiReset
 }

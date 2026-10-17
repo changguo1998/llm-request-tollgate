@@ -1,4 +1,4 @@
-// tui_priority_test.go: priority 页 (权重编辑) 的回归: 存盘口径、候选顺序与生成器一致、
+// tui_priority_test.go: settings 页 (调度参数 + 权重编辑) 的回归: 存盘口径、候选顺序与生成器一致、
 // 键位与未保存守门、渲染不越界。
 package main
 
@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -113,8 +114,8 @@ func TestPrioCandidateOrder(t *testing.T) {
 	if !e.usable() {
 		t.Fatalf("store 装载失败: %v", e.err)
 	}
-	if got := strings.Join(e.providers, ","); got != "ustc,group" {
-		t.Fatalf("上游顺序应为 ustc,group (代理自身排除), 得到 %q", got)
+	if got := strings.Join(e.providers, ","); got != "group,ustc" {
+		t.Fatalf("上游应按优先级降序 (group 3 > ustc 0, 代理自身排除), 得到 %q", got)
 	}
 	cands := e.candsFor("deepseek-v4.1-flash")
 	want := []string{"ustc/deepseek-flash", "group/deepseek-v4.1-flash", "ustc/deepseek-flash-2"}
@@ -220,7 +221,7 @@ func TestPrioKeys(t *testing.T) {
 	_, cfg := prioFixture(t)
 	m := newTUIModel(cfg)
 	m.prio = newTuiEditor(cfg)
-	m.tab = tabPrio
+	m.tab = tabSettings
 	pending := []byte{}
 	key := func(b byte) bool {
 		quit := m.handleKey(b, &pending)
@@ -266,10 +267,10 @@ func TestPrioKeys(t *testing.T) {
 		t.Fatalf("过滤 group 应剩 2 行, 得到 %d", len(rows))
 	}
 
-	// Tab 换到 provider 面板并按 + 调 provider 优先级。
-	key('\t')
+	// p 换到 provider 面板并按 + 调 provider 优先级。
+	key('p')
 	if m.prio.focus != 1 {
-		t.Fatalf("Tab 之后焦点应在 provider 面板")
+		t.Fatalf("p 之后焦点应在 provider 面板")
 	}
 	key('+')
 	if got := prioOf(m.prio.provEntry("ustc")); got != 1 {
@@ -288,21 +289,21 @@ func TestPrioKeys(t *testing.T) {
 	}
 }
 
-// 页签: 4 键进 priority; priority 页的 h 是热加载 (失败也只报错, 不切页);
+// 页签: 4 键进 settings; settings 页的 h 是热加载 (失败也只报错, 不切页);
 // 状态页的 h/bash 语义不变。
 func TestPrioTabScopedKeys(t *testing.T) {
 	_, cfg := prioFixture(t)
 	m := newTUIModel(cfg)
 	pending := []byte{}
-	m.handleKey('3', &pending)
-	if m.tab != tabPrio || m.prio == nil {
-		t.Fatalf("3 应进 priority 页并装载编辑器 (tab=%d)", m.tab)
+	m.handleKey('4', &pending)
+	if m.tab != tabSettings || m.prio == nil {
+		t.Fatalf("4 应进 settings 页并装载编辑器 (tab=%d)", m.tab)
 	}
 	// 把 root 指到空目录: h 会去跑不存在的 deploy/tollgate.sh, 只该报错。
 	m.prio.root = t.TempDir()
 	m.handleKey('h', &pending)
-	if m.tab != tabPrio {
-		t.Fatalf("priority 页的 h 是热加载, 不该切页 (tab=%d)", m.tab)
+	if m.tab != tabSettings {
+		t.Fatalf("settings 页的 h 是热加载, 不该切页 (tab=%d)", m.tab)
 	}
 	if !strings.Contains(m.prio.message, "hup 失败") {
 		t.Errorf("hup 失败应写在消息行: %q", m.prio.message)
@@ -315,17 +316,17 @@ func TestPrioTabScopedKeys(t *testing.T) {
 		t.Errorf("状态页的 r 应重读日志")
 	}
 	m.handleKey('h', &pending)
-	if m.tab != tabPrio {
+	if m.tab != tabSettings {
 		t.Errorf("active 页按 h 应回绕到 priority, 得到 %d", m.tab)
 	}
 }
 
-// 渲染: 每行不越界、页签里有 priority、未保存可见; 没有编辑器也不能崩。
+// 渲染: 每行不越界、页签里有 settings、未保存可见; 没有编辑器也不能崩。
 func TestPrioDraw(t *testing.T) {
 	_, cfg := prioFixture(t)
 	m := newTUIModel(cfg)
 	m.prio = newTuiEditor(cfg)
-	m.tab = tabPrio
+	m.tab = tabSettings
 	m.prio.adjust(1)
 	frame := m.draw()
 	lines := strings.Split(strings.TrimRight(frame, "\n"), "\n")
@@ -337,11 +338,11 @@ func TestPrioDraw(t *testing.T) {
 			t.Errorf("第 %d 行宽 %d 超过 100: %q", i+1, w, line)
 		}
 	}
-	if !strings.Contains(frame, "priority") {
-		t.Errorf("页签里应有 priority: %q", lines[0])
+	if !strings.Contains(frame, "settings") {
+		t.Errorf("页签里应有 settings: %q", lines[0])
 	}
-	if !strings.Contains(frame, "[未保存]") {
-		t.Errorf("改了没存应显示 [未保存]")
+	if !strings.Contains(frame, "[优先级未保存]") {
+		t.Errorf("改了没存应显示 [优先级未保存]")
 	}
 	if !strings.Contains(frame, "候选顺序预览") {
 		t.Errorf("右栏应是候选顺序预览")
@@ -361,12 +362,12 @@ func TestPrioDraw(t *testing.T) {
 	}
 }
 
-// 焦点切换: m 切到模型面板, p 切到 provider 面板 (Tab 仍可来回切)。
+// 焦点切换: m 切到模型面板, p 切到 provider 面板; Tab 不再参与换面板。
 func TestPrioFocusKeys(t *testing.T) {
 	_, cfg := prioFixture(t)
 	m := newTUIModel(cfg)
 	m.prio = newTuiEditor(cfg)
-	m.tab = tabPrio
+	m.tab = tabSettings
 	pending := []byte{}
 	send := func(b byte) {
 		if quit := m.handleKey(b, &pending); quit {
@@ -385,13 +386,173 @@ func TestPrioFocusKeys(t *testing.T) {
 		t.Fatalf("m 应切回模型面板, 得到 %d", m.prio.focus)
 	}
 	send('\t')
-	if m.prio.focus != 1 {
-		t.Fatalf("Tab 仍应能切换, 得到 %d", m.prio.focus)
+	if m.prio.focus != 0 {
+		t.Fatalf("Tab 不该再切换面板, 得到 %d", m.prio.focus)
 	}
+	if m.tab == tabSettings {
+		t.Errorf("Tab 现在只切页, 不该留在 settings")
+	}
+	send('4')
+	if m.tab != tabSettings {
+		t.Fatalf("4 应回到 settings, 得到 %d", m.tab)
+	}
+	send('p')
 	// 切到 provider 后 +/- 改的是 provider 优先级, 不是模型优先级。
 	before := prioOf(m.prio.selected().model)
 	send('+')
 	if got := prioOf(m.prio.selected().model); got != before {
 		t.Fatalf("provider 面板下 + 不该改模型优先级: %d -> %d", before, got)
+	}
+}
+
+// 设置页的调度参数: g 聚焦, +/- 调值, s 写回配置并热加载; 配置文件其余字段原样保留。
+func TestSettingsGateSave(t *testing.T) {
+	_, cfg := prioFixture(t)
+	m := newTUIModel(cfg)
+	m.prio = newTuiEditor(cfg)
+	m.tab = tabSettings
+	pending := []byte{}
+	send := func(b byte) {
+		if quit := m.handleKey(b, &pending); quit {
+			t.Fatal("不该退出")
+		}
+	}
+	send('g')
+	if m.prio.focus != 2 {
+		t.Fatalf("g 应把焦点切到调度参数, 得到 %d", m.prio.focus)
+	}
+	before := m.prio.gate.IntervalMs
+	send('+')
+	if got := m.prio.gate.IntervalMs; got != before+100 {
+		t.Fatalf("interval_ms 应 +100: %d -> %d", before, got)
+	}
+	if !m.prio.gateDirty {
+		t.Fatalf("改了参数应标记未保存")
+	}
+	called := false
+	m.reloadFn = func() error {
+		called = true
+		return nil
+	}
+	send('s')
+	if !called {
+		t.Errorf("保存后应触发热加载")
+	}
+	if m.prio.gateDirty {
+		t.Errorf("保存成功后不该再标记未保存")
+	}
+
+	raw, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	top := map[string]json.RawMessage{}
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatalf("写回的配置不是合法 JSON: %v", err)
+	}
+	for _, k := range []string{"listen", "log_path", "upstreams", "aliases"} {
+		if _, ok := top[k]; !ok {
+			t.Errorf("写回配置丢了字段 %q", k)
+		}
+	}
+	var got struct {
+		Gate GateCfg `json:"gate"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Gate.IntervalMs != before+100 {
+		t.Errorf("配置里的 interval_ms = %d, 期望 %d", got.Gate.IntervalMs, before+100)
+	}
+	if got.Gate.SemWaitMs != m.prio.gate.SemWaitMs {
+		t.Errorf("未改的参数应保持原值")
+	}
+	if strings.Contains(string(raw), "sk-") || strings.Contains(string(raw), "key\": \"") {
+		t.Errorf("写回配置不该出现密钥: %s", raw)
+	}
+}
+
+// 退避序列只能按逗号输入, 非法输入不落盘。
+func TestSettingsBackoffInput(t *testing.T) {
+	_, cfg := prioFixture(t)
+	e := newTuiEditor(cfg)
+	e.setGatePrompt(len(gateLabels)-1, "1000, 2000,3000")
+	if got := strings.Join(itoaSlice(e.gate.RetryBackoffMs), ","); got != "1000,2000,3000" {
+		t.Errorf("退避序列解析不对: %q", got)
+	}
+	e.gateDirty = false
+	e.setGatePrompt(len(gateLabels)-1, "1000,x")
+	if e.gateDirty {
+		t.Errorf("非法输入不该标记未保存")
+	}
+	if got := strings.Join(itoaSlice(e.gate.RetryBackoffMs), ","); got != "1000,2000,3000" {
+		t.Errorf("非法输入不该改值: %q", got)
+	}
+}
+
+func itoaSlice(v []int) []string {
+	out := make([]string, 0, len(v))
+	for _, n := range v {
+		out = append(out, strconv.Itoa(n))
+	}
+	return out
+}
+
+// 配置是软链 (config.local.json -> ~/fff/config/tollgate.json) 时, 保存 gate
+// 必须写真实目标, 不能把软链换成普通文件。
+func TestSettingsGateSaveKeepsSymlink(t *testing.T) {
+	_, real := prioFixture(t)
+	link := filepath.Join(filepath.Dir(real), "config.link.json")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("建软链: %v", err)
+	}
+	e := newTuiEditor(link)
+	e.focus = 2
+	before := e.gate.IntervalMs
+	e.adjustGate(1)
+	if err := e.saveGate(); err != nil {
+		t.Fatalf("保存 gate: %v", err)
+	}
+	st, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("软链被替换成了普通文件")
+	}
+	raw, err := os.ReadFile(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Gate GateCfg `json:"gate"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Gate.IntervalMs != before+100 {
+		t.Errorf("真实配置没更新: interval_ms=%d, 期望 %d", got.Gate.IntervalMs, before+100)
+	}
+}
+
+// 上游列表按优先级降序; 调高某个上游后立刻重排, 选中项跟着它走。
+func TestProviderSortByPriority(t *testing.T) {
+	_, cfg := prioFixture(t)
+	e := newTuiEditor(cfg)
+	if got := strings.Join(e.providers, ","); got != "group,ustc" {
+		t.Fatalf("初始应按优先级 group(3),ustc(0), 得到 %q", got)
+	}
+	e.focus = 1
+	for i, n := range e.providers {
+		if n == "ustc" {
+			e.provSel = i
+		}
+	}
+	e.setValue(9)
+	if got := strings.Join(e.providers, ","); got != "ustc,group" {
+		t.Fatalf("改完优先级应重排, 得到 %q", got)
+	}
+	if e.providers[e.provSel] != "ustc" {
+		t.Errorf("选中项应还停在 ustc, 实际 %q", e.providers[e.provSel])
 	}
 }

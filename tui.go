@@ -227,10 +227,31 @@ const (
 	tuiRed   = "\x1b[31m"
 	tuiGreen = "\x1b[32m"
 	tuiYell  = "\x1b[33m"
-	tuiCyan  = "\x1b[36m"
 )
 
-// tuiIndent 是所有行的左边界缩进: 标题、状态、上游状态、页签、表格与键位提示都从同一列
+// 颜色标准 (全 TUI 一套, 新增画面前先对照这张表):
+//
+//	绿   = 健康 (live / ok / 解锁 / 错误数 0)
+//	红   = 错误与锁 (error / 熔断锁 / 额度锁 / 并发锁 / 连续错误 > 0)
+//	黄   = 等待与降级 (退避 / 换候选 / 慢 / 超发试探 / 顶部错误提示)
+//	灰   = 说明 (标题 / 单位 / 位置行 / 空)
+//	加粗 = 表头; 反显 = 当前选中行。
+func colorDur(ms int64, color string) string {
+	if ms <= 0 {
+		return ""
+	}
+	return color + durStr(time.Duration(ms)*time.Millisecond) + tuiReset
+}
+
+// colorCount 给错误类计数上色: 0 绿色, 大于 0 红色。
+func colorCount(n int) string {
+	if n > 0 {
+		return tuiRed + strconv.Itoa(n) + tuiReset
+	}
+	return tuiGreen + "0" + tuiReset
+}
+
+// tuiIndent 是所有行的左边界缩进: 标题、状态、页签、表格与键位提示都从同一列
 // 起, 各行不再参差不齐。
 const tuiIndent = "  "
 
@@ -280,8 +301,7 @@ type tuiModel struct {
 	pulse   pulse
 	live    bool
 	lastErr string
-	mu      sync.Mutex        // 保护 lastErr (监听失败可能来自别的 goroutine)
-	gates   map[string]string // 候选 -> 当前锁 (gate-state.json 里的锁, 用作补充)
+	mu      sync.Mutex // 保护 lastErr (监听失败可能来自别的 goroutine)
 
 	routes map[string]*routeRow
 	events []routeEvent
@@ -293,14 +313,14 @@ type tuiModel struct {
 	scanned      int
 
 	tab       int
-	scroll    [3]int // 每页各自的滚动位置: m.scroll[m.tab]
+	scroll    [4]int // 每页各自的滚动位置: m.scroll[m.tab]
 	cols      int
 	rows      int
 	refreshed time.Time // 上次重读日志/取观测的时刻 (按键连发时别每次都重读)
-	pageTotal int       // active+routes 页的总行数 (整页滚动用)
+	pageTotal int       // active / models 页的总行数 (整页滚动用)
 	pageTop   int       // 该页当前窗口的第一行
 
-	prio     *tuiEditor   // priority 页 (权重编辑), runTUI 里装载
+	prio     *tuiEditor   // settings 页 (调度参数 + 权重编辑), runTUI 里装载
 	reloadFn func() error // 同进程模式的热加载回调; 空 = 走 deploy/tollgate.sh hup
 }
 
@@ -320,7 +340,7 @@ func (m *tuiModel) lastError() string {
 func newTUIModel(cfgPath string) *tuiModel {
 	m := &tuiModel{
 		cfgPath: cfgPath, start: time.Now(),
-		routes: map[string]*routeRow{}, gates: map[string]string{},
+		routes: map[string]*routeRow{},
 		window: tuiWindow,
 		logPos: map[string]int64{}, logRest: map[string][]byte{}, scannedFiles: map[string]bool{},
 	}
@@ -540,44 +560,6 @@ func (m *tuiModel) addEvent(e routeEvent) {
 	}
 }
 
-// gateLocks 读 gate-state.json: 常驻服务启动时恢复的锁在这里, 内存观测面看不到。
-func (m *tuiModel) gateLocks() {
-	if m.logPath == "" {
-		return
-	}
-	b, err := os.ReadFile(gatePathFor(m.logPath))
-	if err != nil {
-		return
-	}
-	var st gateState
-	if json.Unmarshal(b, &st) != nil {
-		return
-	}
-	now := time.Now()
-	out := map[string]string{}
-	for key, l := range st.Locks {
-		left := time.UnixMilli(l.UntilMs).Sub(now)
-		if left <= 0 {
-			continue
-		}
-		// 记录里带上游与模型; 老版本的文件只有 map 键 "<上游>" / "<上游>/<模型>"。
-		up, model := l.Upstream, l.Model
-		if up == "" {
-			parts := strings.SplitN(key, "/", 2)
-			up = parts[0]
-			if len(parts) == 2 && parts[1] != lockAll {
-				model = parts[1]
-			}
-		}
-		v := lockReason(l.Reason) + " " + durStr(left)
-		if model != "" {
-			v += " " + model // 熔断锁: 标明是哪个模型, 不是整家
-		}
-		out[up] = v
-	}
-	m.gates = out
-}
-
 // ---------- 轮询观测面 ----------
 
 // pollState 同进程直接读内存; 另进程走 GET /v1/state?since=。
@@ -626,13 +608,14 @@ func (m *tuiModel) mergeEvents(evs []viewEvent) {
 
 // 页号与页签一一对应 (tuiTabs 的次序); 比较 m.tab 时用这几个名字, 别写裸数字。
 const (
-	tabLive   = 0 // active+routes
-	tabEvents = 1
-	tabPrio   = 2
+	tabActive   = 0 // 活动连接, 按流程阶段分块
+	tabModels   = 1 // 模型队列 / 上游锁 + 路由聚合
+	tabEvents   = 2
+	tabSettings = 3 // 设置: gate 参数 + 优先级
 )
 
 // 时长一律走 durStr (12s / 02:03 / 01:02:03), 屏幕上不再出现"分 / 秒 / 小时"这类汉字写法。
-var tuiTabs = []string{"active+routes", "events", "priority"}
+var tuiTabs = []string{"active", "models", "events", "settings"}
 
 func (m *tuiModel) draw() string {
 	m.cols, m.rows = tuiSize()
@@ -640,17 +623,19 @@ func (m *tuiModel) draw() string {
 		m.cols = 60
 	}
 	c := &tuiCanvas{cols: m.cols}
-	// 版式: 标题 / 状态 / 空行 / 上游状态 / 页签 / 空行 / 内容 / ... / 键位 (贴底)。
+	// 版式: 标题 / 状态 / 页签 / 内容 / ... / 键位 (贴底); 上游状态只在 models 页里看。
 	m.drawHeader(c)
 	m.drawTabs(c)
 	body := m.bodyRows()
 	switch m.tab {
-	case 0:
-		m.drawLive(c, body)
-	case 1:
+	case tabActive:
+		m.drawFlow(c, body)
+	case tabModels:
+		m.drawModels(c, body)
+	case tabEvents:
 		m.drawEvents(c, body)
 	default:
-		m.drawPriority(c, body)
+		m.drawSettings(c, body)
 	}
 	// 补空行把键位提示压到最后一行。注意别把 countLines() 写进循环条件:
 	// 它每轮都在长, 条件会自己收紧, 循环提前结束 (屏幕上就是"提示浮在中间")。
@@ -662,9 +647,10 @@ func (m *tuiModel) draw() string {
 	return "\x1b[H" + c.clip(m.rows)
 }
 
-// bodyRows 是内容区行数: 固定占 8 行 (标题、状态、3 个空行、上游状态、页签、键位), 其余给内容。
+// bodyRows 是内容区行数: 固定占 4 行 (标题、状态、页签、键位), 其余全部给内容。
+// 布局不用空行做分隔, 屏幕上每一行都是内容或键位。
 func (m *tuiModel) bodyRows() int {
-	if body := m.rows - 8; body >= 3 {
+	if body := m.rows - 4; body >= 3 {
 		return body
 	}
 	return 3
@@ -707,14 +693,13 @@ func (c *tuiCanvas) last(s string) {
 }
 
 func (m *tuiModel) hint() string {
-	if m.tab == tabPrio {
-		return "  m/p 切模型/provider (Tab 也行)   j/k 移动   +/- 调值   = 输入值   / 过滤" +
-			"   s 保存   r 生成   h 热加载   q 退出" +
-			"   (priority: " + m.prioHint() + ")"
+	if m.tab == tabSettings {
+		return "  m/p/g 换面板   j/k 移动   +/- 调值   = 输入   s 保存" +
+			"   r 生成   h 热加载   q 退出   (" + m.prioHint() + ")"
 	}
-	base := "  1-3 或 Tab 切页   up/down/PgUp/PgDn 滚动   r 重读日志   q 退出"
+	base := "  1-4 或 Tab 切页   up/down/PgUp/PgDn 滚动   r 重读日志   q 退出"
 	switch m.tab {
-	case 0:
+	case tabActive, tabModels:
 		// 窗口信息放最前: 键位行本来就长, 放尾巴会被窄终端截掉。
 		base += "   ("
 		if m.pageTotal > 0 {
@@ -728,7 +713,7 @@ func (m *tuiModel) hint() string {
 	return base
 }
 
-// prioHint 是 priority 页提示行右侧那句: 改的是哪份 store。
+// prioHint 是 settings 页提示行右侧那句: 改的是哪份 store。
 func (m *tuiModel) prioHint() string {
 	if m.prio == nil {
 		return "未装载"
@@ -736,7 +721,7 @@ func (m *tuiModel) prioHint() string {
 	if m.prio.err != "" {
 		return "store 读不到"
 	}
-	return m.prio.path
+	return filepath.Base(m.prio.path)
 }
 
 func (m *tuiModel) drawHeader(c *tuiCanvas) {
@@ -751,7 +736,6 @@ func (m *tuiModel) drawHeader(c *tuiCanvas) {
 	// 第 1 行整行都用前景色 (只有程序名加粗): 灰字在深色终端上太弱。
 	c.line(tuiIndent + tuiBold + "tollgate tui" + tuiReset + "  观测 " + src +
 		"   监听 " + m.listen + "   日志 " + m.logPath)
-	c.line("")
 	act := len(m.pulse.Active)
 	line := "状态 " + live + "   进行中 " + strconv.Itoa(act) +
 		"   已读日志 " + strconv.Itoa(m.scanned) + " 条   运行 " + durStr(time.Since(m.start))
@@ -761,11 +745,8 @@ func (m *tuiModel) drawHeader(c *tuiCanvas) {
 	c.line(tuiIndent + line)
 }
 
-// drawTabs 画两行: 上面是每个上游的状态, 下面是页签。分两行是因为上游状态随上游数量
-// 变长, 挤在页签行里会把页签顶掉 (窄终端尤其明显)。
+// drawTabs 画页签行; 上游状态不放在顶端, 统一看 models 页。
 func (m *tuiModel) drawTabs(c *tuiCanvas) {
-	c.line(m.providerLine())
-	c.line("") // 上游状态与页签之间留一行 (状态行与它之间不留)
 	var b strings.Builder
 	b.WriteString(tuiIndent)
 	for i, name := range tuiTabs {
@@ -777,54 +758,6 @@ func (m *tuiModel) drawTabs(c *tuiCanvas) {
 		b.WriteString(" ")
 	}
 	c.line(b.String())
-	c.line("") // 页签与内容之间留一行
-}
-
-// providerLine 是每个上游一句话: 进行中/自适应上限、排队数、锁与退避状态。
-// 行首不加竖线 (左边没有东西可分隔), 竖线只做上游之间的分隔。
-func (m *tuiModel) providerLine() string {
-	var b strings.Builder
-	b.WriteString(tuiIndent)
-	for i, cand := range m.pulse.Cands {
-		if i > 0 {
-			b.WriteString(tuiDim + " | " + tuiReset)
-		}
-		state := tuiGreen + "正常" + tuiReset
-		if s := candState(cand, m.gates[cand.ID]); s != "" {
-			state = tuiRed + s + tuiReset
-		}
-		b.WriteString(cand.ID + " " +
-			strconv.Itoa(cand.InFlight) + "/" + strconv.Itoa(cand.SoftCap) +
-			" 排队" + strconv.Itoa(cand.Queue) + " " + state)
-	}
-	return b.String()
-}
-
-// candState 拼候选的异常状态; 正常时返回空串。整家锁 (额度) 与模型级锁 (熔断) 分开说:
-// 后者带模型名, 免得看成整个上游都不可用。
-func candState(c candView, gateLock string) string {
-	var parts []string
-	if c.LockMs > 0 {
-		parts = append(parts, "额度锁 "+durStr(time.Duration(c.LockMs)*time.Millisecond))
-	} else if gateLock != "" {
-		parts = append(parts, "锁 "+gateLock)
-	}
-	for _, ml := range c.Models {
-		parts = append(parts, "熔断锁 "+durStr(time.Duration(ml.LeftMs)*time.Millisecond)+" "+ml.Model)
-	}
-	if c.PausedMs > 0 {
-		parts = append(parts, "退避 "+durStr(time.Duration(c.PausedMs)*time.Millisecond))
-	}
-	if c.ConcMs > 0 {
-		parts = append(parts, "并发锁")
-	}
-	if c.Probing {
-		parts = append(parts, "试探中")
-	}
-	if c.ErrStrk > 0 {
-		parts = append(parts, "连续错误 "+strconv.Itoa(c.ErrStrk))
-	}
-	return strings.Join(parts, " ")
 }
 
 // tuiTable 是一张表: 每列 标题 + 基准宽 + 内容自适应上限 (+ 右对齐)。
@@ -1020,14 +953,113 @@ var activeCols = []tuiCol{
 	{"状态", 10, 26, false, 0}, {"来源", 8, 14, false, 1}, {"路径", 12, 30, false, 3},
 }
 
-// drawLive: active 与 routes 合成一页 —— 进行中的请求 + 上游队列 + 路由聚合。
-// 整页一起滚动: 先把全量画进临时画布, 再按滚动位置取窗口贴上去。表头会跟着内容一起
-// 滚走, 所以当前窗口写在键位提示行里 (本页 N 行, 当前 a-b)。
-func (m *tuiModel) drawLive(c *tuiCanvas, body int) {
+// flowBlocks 是第 1 页的分块: 顺序就是请求在调度器里的流程顺序。
+// 解析与取信号量合成第一块 (解析是瞬时状态, 单独一块只会闪一下)。
+var flowBlocks = []struct {
+	title  string
+	stages []int
+}{
+	{"获取信号量", []int{stageParse, stageSem}},
+	{"排队 (等出队节拍)", []int{stageQueue}},
+	{"等模型窗口 (退避 / 熔断锁)", []int{stageModelWait}},
+	{"等首字节", []int{stageSend}},
+	{"接收中", []int{stageRecv}},
+	{"已失败", []int{stageFailed}},
+}
+
+func stageIn(st int, list []int) bool {
+	for _, v := range list {
+		if v == st {
+			return true
+		}
+	}
+	return false
+}
+
+// flowCells 是一笔活动连接的表格行 (列与旧版一致: 时间、逻辑名、上游/模型…) 。
+func flowCells(f flow) []string {
+	tag := "否"
+	if f.Stream {
+		tag = "是"
+	}
+	return []string{
+		strconv.FormatUint(f.ID, 10),
+		durStr(time.Since(f.StartTime)),
+		f.Logical,
+		upModel(f.Up, f.Model),
+		tag,
+		stageName(f),
+		f.Source,
+		f.Path,
+	}
+}
+
+// drawFlow 是第 1 页: 活动连接按流程阶段分块, 整页一起滚动。
+// 空块压成一行 (标题 + 空), 免得六个空表头占满屏; 整列都空的时候把那一列丢掉。
+func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
+	grouped := make([][][]string, len(flowBlocks))
+	first := -1
+	for i, b := range flowBlocks {
+		for _, f := range m.pulse.Active {
+			if stageIn(f.Stage, b.stages) {
+				grouped[i] = append(grouped[i], flowCells(f))
+			}
+		}
+		if first < 0 && len(grouped[i]) > 0 {
+			first = i
+		}
+	}
 	full := &tuiCanvas{cols: c.cols}
-	m.drawActive(full)
-	full.line("")
-	m.drawRoutes(full)
+	for i, b := range flowBlocks {
+		rows := grouped[i]
+		if len(rows) == 0 {
+			full.line(tuiDim + tuiIndent + b.title + " (0)  (空)" + tuiReset)
+			continue
+		}
+		cols, rows := dropEmptyCols(activeCols, rows)
+		units := ""
+		if i == first {
+			units = "单位: 已耗时 = 12s / 02:03 / 01:02:03"
+		}
+		drawTable(full, b.title+" ("+strconv.Itoa(len(rows))+")", cols, rows, 0, len(rows), units)
+	}
+	m.drawWindow(c, full, body)
+}
+
+// dropEmptyCols 去掉整列都是空串的列 (例如这批请求都没有来源 / 路径时)。
+// 列与行一起裁, 下标保持一致。
+func dropEmptyCols(cols []tuiCol, rows [][]string) ([]tuiCol, [][]string) {
+	keep := make([]bool, len(cols))
+	for i := range keep {
+		for _, r := range rows {
+			if i < len(r) && strings.TrimSpace(r[i]) != "" {
+				keep[i] = true
+				break
+			}
+		}
+	}
+	outCols := make([]tuiCol, 0, len(cols))
+	for i, col := range cols {
+		if keep[i] {
+			outCols = append(outCols, col)
+		}
+	}
+	outRows := make([][]string, 0, len(rows))
+	for _, r := range rows {
+		cell := make([]string, 0, len(outCols))
+		for i := 0; i < len(cols) && i < len(r); i++ {
+			if keep[i] {
+				cell = append(cell, r[i])
+			}
+		}
+		outRows = append(outRows, cell)
+	}
+	return outCols, outRows
+}
+
+// drawWindow 把整页画布按滚动位置裁一屏贴到 c (第 1 / 2 页共用)。
+// 表头会跟着内容一起滚走, 所以当前窗口写在键位提示行里 (本页 N 行, 当前 a-b)。
+func (m *tuiModel) drawWindow(c *tuiCanvas, full *tuiCanvas, body int) {
 	lines := full.splitLines()
 	m.pageTotal = len(lines)
 	top := m.scrollWindow(len(lines), body)
@@ -1035,6 +1067,162 @@ func (m *tuiModel) drawLive(c *tuiCanvas, body int) {
 	for _, ln := range lines[top:min(top+body, len(lines))] {
 		c.raw(ln)
 	}
+}
+
+// drawModels 是第 2 页: 先上游状态 (并发 / 锁 / 出队), 再列有过请求的 上游/模型 队列,
+// 最下面是路由聚合。整页一起滚动。只出现实际上游/模型, 不按逻辑名或配置候选铺开。
+func (m *tuiModel) drawModels(c *tuiCanvas, body int) {
+	full := &tuiCanvas{cols: c.cols}
+	var urows [][]string
+	for _, cand := range m.pulse.Cands {
+		probe, conc, quota := "否", "-", "-"
+		if cand.Probing {
+			probe = tuiYell + "是" + tuiReset
+		}
+		if cand.ConcMs > 0 {
+			conc = colorDur(cand.ConcMs, tuiRed) // 锁 = 红
+		}
+		if cand.LockMs > 0 {
+			quota = colorDur(cand.LockMs, tuiRed) // 表头已经写明是额度锁
+		}
+		next := "-"
+		if cand.NextMs > 0 {
+			next = durStr(time.Duration(cand.NextMs) * time.Millisecond)
+		}
+		urows = append(urows, []string{
+			cand.ID,
+			strconv.Itoa(cand.InFlight) + "/" + strconv.Itoa(cand.SoftCap),
+			strconv.Itoa(cand.Queue), probe, conc, quota, next, colorCount(cand.ErrStrk),
+		})
+	}
+	drawTable(full, "上游状态 (并发 / 锁 / 出队)", []tuiCol{
+		{"上游", 10, 0, false, 0}, {"进行中/上限", 11, 0, true, 1}, {"排队", 4, 0, true, 0},
+		{"试探", 4, 0, false, 2}, {"并发锁", 8, 0, true, 2}, {"额度锁", 14, 0, true, 2},
+		{"下次出队", 8, 0, true, 3}, {"连续错误", 8, 0, true, 3},
+	}, urows, 0, len(urows),
+		"单位: 进行中/上限、排队、连续错误 = 个; 并发锁、额度锁、下次出队 = 12s / 02:03 / 01:02:03")
+
+	// 合并表: 队列状态 (观测面) + 聚合统计 (日志), 行 = 有过请求的 上游/真实模型。
+	rrows := m.routeRows()
+	full.line(tuiDim + tuiIndent + m.routeSummary(rrows) + tuiReset)
+	full.line(tuiDim + tuiIndent + m.sparkline() + tuiReset)
+
+	var mrows [][]string
+	for _, r := range m.modelRows() {
+		// 队列的锁都画在队列表里: 退避 = 黄 (等待), 熔断锁 = 红 (锁)。
+		paused := colorDur(r.PausedMs, tuiYell)
+		lock := colorDur(r.LockMs, tuiRed)
+		errs := colorCount(r.Errs)
+		ttfb, tps := "-", "-"
+		if r.TtfbN > 0 {
+			ttfb = durStr(time.Duration(r.TtfbSum/int64(r.TtfbN)) * time.Millisecond)
+		}
+		if r.TpsN > 0 {
+			tps = ftoa(r.TpsSum/float64(r.TpsN), 1)
+		}
+		// 与 mcols 的顺序一一对应 (dropEmptyCols 按下标裁列)。
+		mrows = append(mrows, []string{
+			upModel(r.up, r.model), strconv.Itoa(r.Queue),
+			strconv.Itoa(r.Reqs), errs, paused, lock,
+			humanTokens(r.Total), ttfb, mages(r.Last),
+			colorCount(r.Fails), strconv.Itoa(r.Fallbacks), tps,
+			humanTokens(r.Cached), bucketBar(r.bucket),
+		})
+	}
+	mcols, mrows := dropEmptyCols([]tuiCol{
+		{"上游/模型", 24, 60, false, 4}, {"排队", 4, 0, true, 0},
+		{"请求", 6, 0, true, 0}, {"错误", 4, 0, true, 0},
+		{"退避", 8, 0, true, 4}, {"熔断锁", 8, 0, true, 4},
+		{"总 token", 9, 0, true, 3}, {"首字节", 8, 0, true, 3},
+		{"最近一次", 9, 0, true, 2}, {"连续错误", 8, 0, true, 2},
+		{"换候选", 7, 0, true, 1}, {"吞吐", 7, 0, true, 1},
+		{"缓存命中", 8, 0, true, 1}, {strconv.Itoa(tuiBuckets) + "m 条", tuiBuckets, 0, false, 1},
+	}, mrows)
+	drawTable(full, "模型队列 + 路由聚合 (上游/真实模型, 按最近一次请求时间降序)", mcols, mrows, 0, len(mrows),
+		"单位: 排队/连续错误/请求/错误/换候选 = 个; token = 个; 时长 = 12s / 02:03 / 01:02:03; "+
+			"吞吐 = token/s; "+strconv.Itoa(tuiBuckets)+"m 条 = 每分钟请求数")
+
+	m.drawWindow(c, full, body)
+}
+
+// modelRow 是第 2 页合并表的一行: 队列状态 (观测面) + 聚合统计 (日志, 按上游/模型求和,
+// 不区分逻辑名)。
+type modelRow struct {
+	up, model        string
+	Queue, Fails     int
+	PausedMs, LockMs int64
+	Reqs             int
+	Errs             int
+	Fallbacks        int
+	Total, Cached    int
+	TtfbSum          int64
+	TtfbN            int
+	TpsSum           float64
+	TpsN             int
+	Last             time.Time
+	bucket           [tuiBuckets]uint8
+}
+
+// modelRows 合并观测面里的模型队列与日志聚合: 只保留真正有过请求的 上游/模型。
+func (m *tuiModel) modelRows() []*modelRow {
+	by := map[string]*modelRow{}
+	get := func(up, model string) *modelRow {
+		k := up + "\x00" + model
+		r := by[k]
+		if r == nil {
+			r = &modelRow{up: up, model: model}
+			by[k] = r
+		}
+		return r
+	}
+	for _, cand := range m.pulse.Cands {
+		for _, md := range cand.Models {
+			r := get(cand.ID, md.Model)
+			r.Queue, r.Fails, r.PausedMs, r.LockMs = md.Queue, md.Fails, md.PausedMs, md.LeftMs
+		}
+	}
+	for _, rr := range m.routes {
+		if rr.Upstream == "" && rr.Model == "" {
+			continue // 没路由到任何上游的记录 (如 unknown model) 不属于模型视角
+		}
+		r := get(rr.Upstream, rr.Model)
+		r.Reqs += rr.Reqs
+		r.Errs += rr.Errs
+		r.Fallbacks += rr.Fallbacks
+		r.Total += rr.Total
+		r.Cached += rr.Cached
+		r.TtfbSum += rr.TtfbSum
+		r.TtfbN += rr.TtfbN
+		r.TpsSum += rr.TpsSum
+		r.TpsN += rr.TpsN
+		if rr.Last.After(r.Last) {
+			r.Last = rr.Last
+		}
+		for i, v := range rr.bucket {
+			if int(r.bucket[i])+int(v) > 255 {
+				r.bucket[i] = 255
+			} else {
+				r.bucket[i] += v
+			}
+		}
+	}
+	out := make([]*modelRow, 0, len(by))
+	for _, r := range by {
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Last.Equal(out[j].Last) {
+			return out[i].Last.After(out[j].Last)
+		}
+		if out[i].Reqs != out[j].Reqs {
+			return out[i].Reqs > out[j].Reqs
+		}
+		if out[i].up != out[j].up {
+			return out[i].up < out[j].up
+		}
+		return out[i].model < out[j].model
+	})
+	return out
 }
 
 // scrollWindow 把该页的滚动位置夹进实际行数, 返回窗口第一行 —— 空表与 G 键 (设成很大)
@@ -1058,91 +1246,6 @@ func (c *tuiCanvas) splitLines() []string {
 		return nil
 	}
 	return strings.Split(s, "\r\n")
-}
-
-// drawActive: 上半是进行中的请求, 下半是上游队列与锁 (全量画, 滚动交给 drawLive)。
-func (m *tuiModel) drawActive(c *tuiCanvas) {
-	rows := make([][]string, 0, len(m.pulse.Active))
-	for _, f := range m.pulse.Active {
-		tag := "否"
-		if f.Stream {
-			tag = "是"
-		}
-		rows = append(rows, []string{
-			strconv.FormatUint(f.ID, 10),
-			durStr(time.Since(f.StartTime)),
-			f.Logical,
-			f.Up + "/" + f.Model,
-			tag,
-			stageName(f),
-			f.Source,
-			f.Path,
-		})
-	}
-	drawTable(c, "进行中的请求", activeCols, rows, 0, len(rows), "单位: 已耗时 = 12s / 02:03 / 01:02:03")
-
-	c.line("")
-	crows := make([][]string, 0, len(m.pulse.Cands))
-	for _, cand := range m.pulse.Cands {
-		state := tuiGreen + "正常" + tuiReset
-		if s := candState(cand, m.gates[cand.ID]); s != "" {
-			state = tuiYell + s + tuiReset
-		}
-		next := "-"
-		if cand.NextMs > 0 {
-			next = durStr(time.Duration(cand.NextMs) * time.Millisecond)
-		}
-		crows = append(crows, []string{
-			cand.ID,
-			strconv.Itoa(cand.InFlight) + "/" + strconv.Itoa(cand.SoftCap),
-			strconv.Itoa(cand.Queue),
-			next,
-			strconv.Itoa(cand.ErrStrk),
-			state,
-		})
-	}
-	drawTable(c, "上游队列 (进行中/并发上限, 排队, 状态)", []tuiCol{
-		{"上游", 10, 0, false, 0}, {"进行中/上限", 11, 0, true, 1}, {"排队", 4, 0, true, 0},
-		{"下次出队", 8, 0, true, 2}, {"连续错误", 8, 0, true, 2}, {"状态", 30, 40, false, 0},
-	}, crows, 0, len(crows),
-		"单位: 进行中/上限、排队、连续错误 = 个; 下次出队 = 12s / 02:03 / 01:02:03")
-}
-
-// drawRoutes: 路由聚合表 + 顶部窗口汇总 (全量画, 滚动交给 drawLive)。
-func (m *tuiModel) drawRoutes(c *tuiCanvas) {
-	rows := m.routeRows()
-	c.line(tuiDim + tuiIndent + m.routeSummary(rows) + tuiReset)
-	c.line(tuiDim + tuiIndent + m.sparkline() + tuiReset)
-	c.line("")
-	cells := make([][]string, 0, len(rows))
-	for _, r := range rows {
-		errs := tuiGreen + "0" + tuiReset
-		if r.Errs > 0 {
-			errs = tuiRed + strconv.Itoa(r.Errs) + tuiReset
-		}
-		ttfb, tps := "-", "-"
-		if r.TtfbN > 0 {
-			ttfb = durStr(time.Duration(r.TtfbSum/int64(r.TtfbN)) * time.Millisecond)
-		}
-		if r.TpsN > 0 {
-			tps = ftoa(r.TpsSum/float64(r.TpsN), 1)
-		}
-		cells = append(cells, []string{
-			r.Logical, upModel(r.Upstream, r.Model),
-			strconv.Itoa(r.Reqs), errs, strconv.Itoa(r.Fallbacks),
-			humanTokens(r.Total), humanTokens(r.Cached),
-			ttfb, tps, mages(r.Last), bucketBar(r.bucket),
-		})
-	}
-	drawTable(c, "路由聚合 (窗口内, 按最近一次请求时间降序)", []tuiCol{
-		{"逻辑名", 22, 28, false, 0}, {"上游/模型", 24, 44, false, 1},
-		{"请求", 6, 0, true, 0}, {"错误", 4, 0, true, 0}, {"换候选", 7, 0, true, 1},
-		{"总 token", 9, 0, true, 1}, {"缓存命中", 8, 0, true, 3}, {"首字节", 8, 0, true, 2},
-		{"吞吐", 7, 0, true, 2}, {"最近一次", 9, 0, true, 2},
-		{strconv.Itoa(tuiBuckets) + "m 条", tuiBuckets, 0, false, 3},
-	}, cells, 0, len(cells),
-		"单位: 请求/错误/换候选 = 次; token = 个; 首字节、最近一次 = 12s / 02:03 / 01:02:03; 吞吐 = token/s; "+
-			strconv.Itoa(tuiBuckets)+"m 条 = 每分钟请求数")
 }
 
 // drawEvents: 事件流 (最新在前); 连续同类事件折成一行 xN, 免得刷屏。
@@ -1173,7 +1276,7 @@ func (m *tuiModel) drawEvents(c *tuiCanvas, body int) {
 	drawTable(c, "事件流 (最新在前)", []tuiCol{
 		{"时间", 8, 0, false, 0}, {"类型", 10, 0, false, 0}, {"逻辑名", 20, 28, false, 1},
 		{"上游/模型", 30, 46, false, 2}, {"说明", 60, 80, false, 0},
-	}, rows, m.scrollWindow(len(rows), body-3), body-3, "单位: 时间 = hh:mm:ss (时刻)")
+	}, rows, m.scrollWindow(len(rows), max(1, body-4)), max(1, body-4), "单位: 时间 = hh:mm:ss (时刻)")
 }
 
 // upModel 把上游与真实模型拼成一格 (`上游/模型`, 与活跃连接表和路由表同一写法);
@@ -1382,7 +1485,7 @@ func runTUI(cfgPath, stateURL string) {
 			}
 		}()
 		app.evAdd("start", "", "", "", "tollgate 启动, 监听 "+cfg.Listen)
-		// 热加载: priority 页的 h 键与 SIGHUP 走同一条路 (同进程不需要 systemd)。
+		// 热加载: settings 页的 h 键与 SIGHUP 走同一条路 (同进程不需要 systemd)。
 		m.reloadFn = func() error {
 			c, err := loadConfig(cfgPath)
 			if err != nil {
@@ -1452,7 +1555,6 @@ func runTUI(cfgPath, stateURL string) {
 		}
 		m.refreshed = time.Now()
 		m.pollLog()
-		m.gateLocks()
 		since = m.pollState(app, since)
 	}
 	refresh(true)
@@ -1480,11 +1582,11 @@ func runTUI(cfgPath, stateURL string) {
 
 // handleKey 处理一个输入字节; 返回 true = 退出。
 //
-// priority 页把编辑键留给自己 (h = 热加载, r = 生成配置, Tab = 换面板), 状态页的
-// h/l 仍是切页; 切页统一走 1-4 / 左右方向键 / l (priority 页的 h 被编辑键占了)。
+// settings 页把编辑键留给自己 (h = 热加载, r = 生成配置, m/p/g = 换面板), 状态页的
+// h/l 仍是切页; 切页统一走 1-4 / 左右方向键 / l (settings 页的 h 被编辑键占了)。
 func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 	e := m.prio
-	if m.tab == tabPrio && e != nil && e.prompt != nil {
+	if m.tab == tabSettings && e != nil && e.prompt != nil {
 		*pending = nil // 输入态: 整字节喂给输入框, 别把 Esc 当转义序列攒
 		e.promptKey(b)
 		return false
@@ -1522,7 +1624,7 @@ func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 		if code == 'V' {
 			d += 10
 		}
-		if m.tab == tabPrio && e != nil {
+		if m.tab == tabSettings && e != nil {
 			e.moveFocus(d)
 		} else {
 			m.move(d)
@@ -1530,20 +1632,20 @@ func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 		return false
 	}
 	*pending = nil
-	if m.tab == tabPrio && e != nil {
+	if m.tab == tabSettings && e != nil {
 		if quit, handled := e.key(b); handled {
 			return quit
 		}
 		switch b {
 		case 's':
-			e.saveStore()
+			m.saveSettings()
 		case 'r':
 			e.regenerate()
 		case 'h':
 			m.prioHup()
-		case 'l':
+		case 'l', '\t':
 			m.switchTab(1)
-		case '1', '2', '3':
+		case '1', '2', '3', '4':
 			m.switchTabTo(int(b - '1'))
 		}
 		return false
@@ -1551,7 +1653,7 @@ func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 	switch b {
 	case 'q', 0x03, 0x04: // q / Ctrl-C / Ctrl-D
 		return true
-	case '1', '2', '3':
+	case '1', '2', '3', '4':
 		m.switchTabTo(int(b - '1'))
 	case 'h', 0x1b:
 		m.switchTab(-1)
@@ -1584,13 +1686,13 @@ func (m *tuiModel) switchTab(dir int) {
 	m.switchTabTo((m.tab + dir + len(tuiTabs)) % len(tuiTabs))
 }
 
-// switchTabTo 跳到第 i 个页签; 首次进 priority 页才去读 store (那是 ~/fff 下的真文件)。
+// switchTabTo 跳到第 i 个页签; 首次进 settings 页才去读 store 与配置 (那都是真文件)。
 func (m *tuiModel) switchTabTo(i int) {
 	if i < 0 || i >= len(tuiTabs) {
 		return
 	}
 	m.tab = i
-	if m.tab == tabPrio && m.prio == nil {
+	if m.tab == tabSettings && m.prio == nil {
 		m.prio = newTuiEditor(m.cfgPath)
 	}
 }
@@ -1604,14 +1706,6 @@ func (m *tuiModel) move(d int) {
 	if m.scroll[m.tab] > 1<<20 {
 		m.scroll[m.tab] = 1 << 20
 	}
-}
-
-// lockReason 把 gate-state.json 里的原因换成中文。
-func lockReason(r string) string {
-	if r == "breaker" {
-		return "熔断"
-	}
-	return "额度"
 }
 
 // pulsePathFor / gatePathFor: 与被观测服务同目录的状态文件 (var/)。

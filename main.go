@@ -329,7 +329,8 @@ type cand struct {
 	nextSend time.Time            // 下一笔最早可发送的时刻 (出队节拍)
 	// 模型级状态: 键是真实模型 id。锁查询不建表, 记账 (失败/成功/加锁) 才建。
 	modelGates map[string]*modelGate
-	concLock   lockState // 并发上限锁: 只锁超发试探
+	seen       map[string]bool // 进过队列的真实模型 (TUI 模型视角只列有过请求的)
+	concLock   lockState       // 并发上限锁: 只锁超发试探
 	wake       chan struct{}
 }
 
@@ -341,7 +342,8 @@ type modelGate struct {
 }
 
 func newCand(id string) *cand {
-	return &cand{id: id, softCap: minSoftCap, wake: make(chan struct{}, 1)}
+	return &cand{id: id, softCap: minSoftCap, seen: map[string]bool{},
+		wake: make(chan struct{}, 1)}
 }
 
 // signal 唤醒一个等待者; 通道容量 1, 满了说明已经有人会醒来重查。
@@ -402,7 +404,14 @@ func (c *cand) sleep(ctx context.Context, deadline, until time.Time) wakeReason 
 // acquire 按设计 §5.5.1 拿到发送资格: 取信号量 (a) → 过流量队列 (b) → 过模型队列 (b2)。
 // 模型队列只有在该模型被熔断锁住或正在退避时才等 (正常情况下出队即发);
 // waitMs 是排队两段之和, 只用于记日志。上层换候选用下一笔。
-func (c *cand) acquire(ctx context.Context, g GateCfg, model string) (kind slotKind, why string, semMs, waitMs int64, ok bool) {
+func (c *cand) acquire(ctx context.Context, g GateCfg, model string, onStage ...func(int)) (kind slotKind, why string, semMs, waitMs int64, ok bool) {
+	// 展示用回调: 把这一笔此刻卡在流程哪一步报给 TUI。可变参数 = 老调用点不用改。
+	report := func(st int) {
+		if len(onStage) > 0 && onStage[0] != nil {
+			onStage[0](st)
+		}
+	}
+	report(stageSem)
 	start := time.Now()
 	kind, why, ok = c.acquireSlot(ctx, g, model)
 	semMs = time.Since(start).Milliseconds()
@@ -411,11 +420,11 @@ func (c *cand) acquire(ctx context.Context, g GateCfg, model string) (kind slotK
 	}
 	t := &ticket{c: c, model: model, enq: time.Now()}
 	start = time.Now()
-	if why, ok = c.waitFlow(ctx, g, t); !ok {
+	if why, ok = c.waitFlow(ctx, g, t, report); !ok {
 		c.finish(kind, false) // 没轮到就退出: 归还信号量 (试探不占, 无需归还)
 		return kind, why, semMs, time.Since(start).Milliseconds(), false
 	}
-	if why, ok = c.waitModel(ctx, g, t); !ok {
+	if why, ok = c.waitModel(ctx, g, t, report); !ok {
 		c.finish(kind, false)
 		return kind, why, semMs, time.Since(start).Milliseconds(), false
 	}
@@ -456,11 +465,12 @@ func (c *cand) acquireSlot(ctx context.Context, g GateCfg, model string) (slotKi
 
 // waitFlow 在 provider 的流量队列里等自己的出队节拍 (设计 §5.5.1 的 b / b1, §5.5.2):
 // 出队即离开这条队列, 接着去模型队列 —— 别家模型的退避不会堵在这里。
-func (c *cand) waitFlow(ctx context.Context, g GateCfg, t *ticket) (string, bool) {
+func (c *cand) waitFlow(ctx context.Context, g GateCfg, t *ticket, report func(int)) (string, bool) {
 	c.mu.Lock()
 	c.enqueueLocked(t, queueFlow)
 	c.mu.Unlock()
 	c.signal()
+	report(stageQueue)
 	deadline := t.enq.Add(g.queueWait())
 	for {
 		now := time.Now()
@@ -497,7 +507,8 @@ func (c *cand) waitFlow(ctx context.Context, g GateCfg, t *ticket) (string, bool
 // waitModel 在模型队列里等熔断解锁 / 退避结束; 正常情况 (没被熔断、没在退避) 立刻放行,
 // 不等节拍 —— 节拍已经在流量队列那一段付过了。
 // 上界用 queue_wait_ms (与流量队列同一个预算口径): 退避 10/20/30s 比它长, 等到超时就换候选。
-func (c *cand) waitModel(ctx context.Context, g GateCfg, t *ticket) (string, bool) {
+func (c *cand) waitModel(ctx context.Context, g GateCfg, t *ticket, report func(int)) (string, bool) {
+	report(stageModelWait)
 	deadline := time.Now().Add(g.queueWait())
 	for {
 		now := time.Now()
@@ -547,6 +558,10 @@ func (c *cand) modelHead(t *ticket) bool {
 
 // enqueueLocked 把一项挂到某条队列的队尾, 并记下它在哪条队列 (调用方持有 c.mu)。
 func (c *cand) enqueueLocked(t *ticket, kind queueKind) {
+	if c.seen == nil {
+		c.seen = map[string]bool{}
+	}
+	c.seen[t.model] = true // 模型视角只列真正进过队列的 上游/模型
 	switch kind {
 	case queueFlow:
 		c.flow = append(c.flow, t)
@@ -1195,11 +1210,16 @@ const (
 	viewActives = 512                // 进行中请求的上限 (防泄漏兜底, 正常远低于此)
 )
 
-// 请求所处阶段: 上游调度器那一侧细分到「等锁 / 排队 / 等信号量」, 见 flowStage。
+// 请求所处阶段: 与调度器的真实步骤一一对应 (TUI 第 1 页按它分块)。
+// 顺序即流程顺序, 别随意调换。
 const (
-	stageParse  = iota // 已解析出逻辑名, 还没进候选链
-	stageSend          // 正对某候选发送或已发出 (upstream 已填)
-	stageFailed        // 候选链走完仍未发出去 (合成 429 / 透传错误)
+	stageParse     = iota // 已解析出逻辑名, 还没进候选链
+	stageSem              // 取信号量 (含并发满时的超发试探)
+	stageQueue            // provider 流量队列: 等出队节拍
+	stageModelWait        // 模型队列: 等退避结束 / 熔断解锁
+	stageSend             // 已发出, 等响应头 (upstream 已填)
+	stageRecv             // 响应头已到, 正在读 body / 流
+	stageFailed           // 候选链走完仍未发出去 (合成 429 / 透传错误)
 )
 
 // flow 是一笔进行中的请求 (只用于展示, 不参与调度判断)。字段导出, 因为它要按原样
@@ -1231,9 +1251,12 @@ type viewEvent struct {
 
 // candModelLock 是某个 upstream/model 头上的定时锁 (熔断), 供状态台显示。
 type candModelLock struct {
-	Model  string `json:"model"`
-	LeftMs int64  `json:"left_ms"`
-	Why    string `json:"why"` // breaker
+	Model    string `json:"model"`
+	Queue    int    `json:"queue"`     // 该真实模型的队列长度
+	Fails    int    `json:"fails"`     // 连续错误数
+	PausedMs int64  `json:"paused_ms"` // > 0 = 退避中, 剩这么久
+	LeftMs   int64  `json:"left_ms"`   // > 0 = 熔断锁, 剩这么久
+	Why      string `json:"why"`       // breaker
 }
 
 // candView 是某候选上游的瞬时调度状态。
@@ -1247,7 +1270,7 @@ type candView struct {
 	PausedMs int64           `json:"paused_ms"`        // > 0 = 至少一个模型在退避, 取最久的
 	LockMs   int64           `json:"lock_ms"`          // > 0 = 整家锁中 (额度), 剩这么久
 	LockWhy  string          `json:"lock_why"`         // quota
-	Models   []candModelLock `json:"models,omitempty"` // 各模型头上的熔断锁
+	Models   []candModelLock `json:"models,omitempty"` // 每个真实模型的队列 / 退避 / 熔断锁
 	ConcMs   int64           `json:"conc_lock_ms"`     // > 0 = 并发锁 (只锁试探)
 	NextMs   int64           `json:"next_ms"`          // 距下次出队节拍
 	LastTps  float64         `json:"-"`                // 保留: TPS 从日志读, 不在这里
@@ -1272,13 +1295,27 @@ func stageName(f flow) string {
 	switch f.Stage {
 	case stageParse:
 		return "解析中"
+	case stageSem:
+		return "等信号量"
+	case stageQueue:
+		if f.Gate != "" {
+			return f.Gate // 等节拍 …
+		}
+		return "排队"
+	case stageModelWait:
+		if f.Gate != "" {
+			return f.Gate // 退避 … / 熔断锁 …
+		}
+		return "等模型窗口"
+	case stageRecv:
+		return "接收中"
 	case stageFailed:
 		return "已失败"
 	}
 	if f.Gate != "" {
 		return f.Gate
 	}
-	return "已发出"
+	return "等首字节"
 }
 
 func (a *App) evAdd(kind, logical, upstream, model, msg string) {
@@ -1367,7 +1404,16 @@ func (o *flowObs) mark(status int, msg string) {
 		o.a.flowStage(o.id, o.up, o.model, stageFailed, "", o.attempt)
 		return
 	}
-	o.a.flowStage(o.id, o.up, o.model, stageSend, o.gateNow(), o.attempt)
+	st := stageSend
+	if status == 0 {
+		st = stageSem // 刚进入这个候选: 下一步就是取信号量
+	}
+	o.a.flowStage(o.id, o.up, o.model, st, o.gateNow(), o.attempt)
+}
+
+// stage 把展示阶段推到调度器当前的步骤; acquire 的回调与发包前后调用它。
+func (o *flowObs) stage(st int) {
+	o.a.flowStage(o.id, "", "", st, o.gateNow(), o.attempt)
 }
 
 // gateNow 是「这一笔现在卡在哪一步」: 模型锁 / 整家锁 / 退避 / 出队节拍 / 已发出。
@@ -1486,7 +1532,7 @@ func (a *App) candViews() []candView {
 			ID: c.id, Queue: c.queued(), InFlight: c.inFlight, SoftCap: c.softCap,
 			Probing: c.probing,
 		}
-		for model, g := range c.modelGates {
+		for _, g := range c.modelGates {
 			if g.fails > v.ErrStrk {
 				v.ErrStrk = g.fails
 			}
@@ -1496,13 +1542,39 @@ func (a *App) candViews() []candView {
 			if left := g.locks[lockAll].left(now); left > 0 {
 				v.LockMs, v.LockWhy = msCeil(left), g.locks[lockAll].reason
 			}
-			if model != lockAll {
-				if left := g.locks[model].left(now); left > 0 {
-					v.Models = append(v.Models, candModelLock{
-						Model: model, LeftMs: msCeil(left), Why: g.locks[model].reason,
-					})
-				}
+		}
+		// 模型视角: 只列真正进过队列的 上游/模型 (队列已空但曾经有过请求的也算),
+		// 不按逻辑名或配置里的候选清单铺开。
+		models := map[string]*candModelLock{}
+		ensure := func(m string) *candModelLock {
+			if x := models[m]; x != nil {
+				return x
 			}
+			x := &candModelLock{Model: m}
+			models[m] = x
+			return x
+		}
+		for m := range c.seen {
+			ensure(m)
+		}
+		for m, q := range c.modelQ {
+			ensure(m).Queue = len(q)
+		}
+		for model, g := range c.modelGates {
+			if model == lockAll {
+				continue
+			}
+			x := ensure(model)
+			x.Fails = g.fails
+			if left := g.pausedUntil.Sub(now); left > 0 {
+				x.PausedMs = msCeil(left)
+			}
+			if left := g.locks[model].left(now); left > 0 {
+				x.LeftMs, x.Why = msCeil(left), g.locks[model].reason
+			}
+		}
+		for _, x := range models {
+			v.Models = append(v.Models, *x)
 		}
 		sort.Slice(v.Models, func(i, j int) bool { return v.Models[i].Model < v.Models[j].Model })
 		if left := c.concLock.left(now); left > 0 {
@@ -2511,7 +2583,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			outReq.ContentLength = int64(len(body))
 			prepareOutboundHeaders(outReq.Header, r.Header, at.up)
 			// 取资格放在请求体准备之后, 构造失败就不白占槽位。
-			kind, why, sem, qms, ok := at.cd.acquire(r.Context(), gate, at.mod)
+			kind, why, sem, qms, ok := at.cd.acquire(r.Context(), gate, at.mod, obs.stage)
 			semMs += sem
 			queueMs += qms
 			if !ok {
@@ -2527,6 +2599,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				break // 换下一个候选
 			}
 			attemptStart = time.Now()
+			obs.stage(stageSend)
 			resp, err = a.transport.RoundTrip(outReq)
 			if err != nil {
 				// 传输层失败: 没有状态码与 body 可判, 按通用兜底走 (设计 §5.5.2)。
@@ -2538,6 +2611,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				obs.mark(-1, err.Error())
 				continue
 			}
+			obs.stage(stageRecv)
 			if shouldFallback(resp.StatusCode) {
 				b, rerr := io.ReadAll(resp.Body)
 				resp.Body.Close()

@@ -93,6 +93,30 @@ func TestCandViewSnapshot(t *testing.T) {
 	if v.LockMs <= 0 || v.LockWhy != "quota" {
 		t.Errorf("整家锁没被看到: %+v", v)
 	}
+	// 模型视角: 只列进过队列的 上游/模型 (real-m1), 配置里没用过的 (real-m2) 不出现;
+	// 队列 / 退避 / 熔断锁 / 失败数各就各位。
+	c.mu.Lock()
+	g := c.gate("real-m1")
+	g.fails = 2
+	g.pausedUntil = time.Now().Add(20 * time.Second)
+	c.mu.Unlock()
+	c.lock("real-m1", "breaker", 5*time.Minute)
+
+	v = a.candViews()[0]
+	byModel := map[string]candModelLock{}
+	for _, m := range v.Models {
+		byModel[m.Model] = m
+	}
+	m1, ok := byModel["real-m1"]
+	if !ok {
+		t.Fatalf("real-m1 没出现在模型视角里: %+v", v.Models)
+	}
+	if m1.Queue != 1 || m1.Fails != 2 || m1.PausedMs <= 0 || m1.LeftMs <= 0 || m1.Why != "breaker" {
+		t.Errorf("real-m1 的状态不对: %+v", m1)
+	}
+	if m2, ok := byModel["real-m2"]; ok {
+		t.Errorf("没进过队列的模型不该出现: %+v", m2)
+	}
 }
 
 // 终端宽度: ANSI 序列不占列, CJK 占两列 (窄终端丢列与表格对齐都靠它)。

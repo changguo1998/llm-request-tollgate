@@ -48,7 +48,7 @@
     include_usage 注入; 用量按 `input/output_tokens` 口径归一, 流以 `response.completed`
     判正常收尾 (该接口不保证发 `[DONE]`), 事件里嵌在 `response` 下的 `model` 也改回逻辑名。
 13. 只读观测面与状态台: `GET /v1/state` 给出此刻进行中的请求, 以及每个上游的队列/并发上限/锁
-    (纯内存, 不落盘、不参与记账); `-tui` 把它连同日志聚合成三个页的实时状态台。
+    (纯内存, 不落盘、不参与记账); `-tui` 把它连同日志聚合成四个页的实时状态台。
 
 ## 快速开始
 
@@ -82,22 +82,30 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 
 ## 状态台 (TUI)
 
-三个页, `1`-`3` 或 `Tab` 切, `up/down`/`PgUp/PgDn` 滚动, `r` 重读日志, `q` 退出。
+四个页, `1`-`4` 或 `Tab` 切, `up/down`/`PgUp/PgDn` 滚动, `r` 重读日志, `q` 退出。
+界面按终端尺寸铺开: 不画装饰空行, 键位提示贴最后一行, 列宽按内容自适应、右栏顶到右边界。
 
 每张表都是同一套写法: 灰字标题行 (说清这张表看什么、怎么排序) + 加粗表头 + 行 + 超出窗口时的
-`N 行, 当前 a-b` + 灰字单位行; 列宽按内容自适应 (长的列自己撑开, 上限见代码里的 `max`)。
+`N 行, 当前 a-b` + 灰字单位行; 列宽按内容自适应 (长的列自己撑开, 上限见代码里的 `max`),
+一整列都没内容的列自动收起, 空的分块压成一行。
+
+颜色全台一套: 绿 = 健康 (live / ok / 解锁 / 错误数 0), 红 = 错误与锁 (错误 / 熔断锁 /
+额度锁 / 并发锁 / 连续错误 > 0), 黄 = 等待与降级 (退避 / 换候选 / 慢 / 超发试探 / 顶部
+错误提示), 灰 = 说明 (标题 / 单位 / 位置行 / 空); 表头加粗, 当前选中行反显。
 
 | 页 | 看什么 | 数据来源 |
 |---|---|---|
-| `active+routes` | 上: 进行中的请求 (编号 / 已耗时 / 逻辑名 / 上游/模型 / 流式与否 / 当前卡在哪) + 每个上游的 进行中/上限、排队数、锁与退避 (熔断锁带模型名, 如 `熔断锁 4m52s gpt-5-codex`; 额度锁是整家); 下: 按 `逻辑名 × 上游 × 真实模型` 聚合的请求数 / 错误 / 换候选次数 / token / 缓存命中 / 首字节 / 吞吐 / 最近一次 (上游与真实模型合成 `上游/模型` 一格, **按最近一次请求时间降序**), 附每分钟请求数条。两半同页一起滚 | 上: 服务的只读观测面 (同进程读内存, 另进程 `GET /v1/state`); 下: JSONL 日志 (含跨天归档, 窗口 6h) |
+| `active` | 进行中的请求**按流程阶段分块**: 获取信号量 / 排队 (等出队节拍) / 等模型窗口 (退避 / 熔断锁) / 等首字节 / 接收中 / 已失败。每行仍是 编号 / 已耗时 / 逻辑名 / 上游/模型 / 流式 / 状态 / 来源 / 路径, 块标题带当前笔数 | 服务的只读观测面 (同进程读内存, 另进程 `GET /v1/state`) |
+| `models` | 先上游状态: 每个上游的 进行中/上限、排队、是否在超发试探、并发锁、额度锁、下次出队、连续错误; 再把**有过请求的** `上游/真实模型` 的队列与路由聚合成一张表: 排队长度、退避剩余、熔断锁、连续错误 + 请求 / 错误 / 换候选 / token / 缓存 / 首字节 / 吞吐 / 最近一次 / 每分钟条; 统计按模型对所有逻辑名求和, 不出现逻辑名, 队列空了也保留到进程重启 | 队列读 `/v1/state`; 聚合读 JSONL 日志 (含跨天归档, 窗口 6h) |
 | `events` | 列: 时间 / 类型 / 逻辑名 / 上游/模型 / 说明。看 加锁 / 熔断 / 退避 / 解锁 / 换候选 / 错误 / 慢请求, 最新的在最上面, 连续同类事件折成 `xN` | 服务事件流 + 日志还原 |
-| `priority` | 权重编辑: 左栏 provider 面板 + 模型列表 (按别名分组, 行首 `M` 模型优先级 / `P` provider 优先级), 右栏所选别名的候选顺序实时预览。`m` / `p` 或 `Tab` 在模型面板与 provider 面板之间切焦点 | store `~/fff/config/llm-models.json` (唯一一个可写的页) |
+| `settings` | 调度参数 + 权重编辑: 上半是 `gate` 的 7 项 (interval_ms / sem_wait_ms / queue_wait_ms / 三个锁时长 / retry_backoff_ms), 下半是 provider 面板 (按优先级降序, 段间空一行) 与模型列表 (行首 `M` 模型优先级 / `P` provider 优先级), 右栏是所选别名的候选顺序实时预览。`m` / `p` / `g` 分别聚焦模型 / provider / 调度参数, `+` / `-` 调值, `=` 输入, `s` 保存并热加载 | 配置 `config.local.json` 的 `gate` 段 + store `~/fff/config/llm-models.json` (两个都可写) |
 
 - 观测面是**只读且纯内存**的: 不落盘、不参与记账与调度, 服务重启即清空; 明细的事实来源
   仍是日志 (设计 D12)。同进程模式顺手把它写成 `var/tui-pulse.json`, 也便于别的工具读。
 - 两个进程模式随便挑: `-tui` 适合"本地起一份看", `-tui-state` 适合看 systemd 常驻那份
-  (`./deploy/tollgate.sh` 起的服务不变)。`priority` 页两种模式都能改: 写本机的 store,
-  同进程模式热加载直接生效, 观察常驻服务时发 `SIGHUP`。
+  (`./deploy/tollgate.sh` 起的服务不变)。`settings` 页两种模式都能改: 写本机的 store 与
+  配置 `gate` 段, 同进程模式热加载直接生效, 观察常驻服务时发 `SIGHUP`。`s` 只写 `gate`
+  与优先级; `timeouts` 与 `probe` 仍要改配置文件后重启。
 - 列宽按内容分配 (长的列自己撑开, 上限见代码里的 `max`), 余量先补齐差得少的列; 只有连各列
   最小宽都放不下时才按优先级丢列 (先丢路径、来源这类), 至少保留逻辑名、上游与真实模型。
 - 时间段写成 `12s` / `02:03` / `01:02:03` (前导的零段省掉), 时刻仍是 `hh:mm:ss`;
@@ -120,10 +128,11 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
   排查: `ps -o cmd= -p $(systemctl --user show -p MainPID --value tollgate.service)`。
 - 密钥注入 (`key_env`): 真 key 只存环境变量, 不落任何盘。
   - 名字与 fff 的 `~/.fff/keys/*.ai` 一致 (`USTC_API_KEY` / `GROUP_API_KEY` /
-    `ARKCP_API_KEY` / `ARKAP_API_KEY`), 即 store 里 `apiKey` 的占位符名。
+    `ARKCP_API_KEY` / `ARKAP_API_KEY` / `DEEPSEEK_API_KEY`), 即 store 里 `apiKey` 的占位符名
+    (`deepseek` 是官方直连, 其余四家经各自网关)。
   - 交互用: `export USTC_API_KEY=...` (建议写进 shell 启动文件)。
   - systemd 服务用: `for f in ~/.fff/keys/*.ai; do set -a; . "$f"; set +a; done` 后
-    `systemctl --user import-environment USTC_API_KEY GROUP_API_KEY ARKCP_API_KEY ARKAP_API_KEY`
+    `systemctl --user import-environment USTC_API_KEY GROUP_API_KEY ARKCP_API_KEY ARKAP_API_KEY DEEPSEEK_API_KEY`
     (或 `systemctl --user set-environment USTC_API_KEY=...`), 再 `./deploy/tollgate.sh restart`。
 
 ## 配置
@@ -183,6 +192,9 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 - `key_env` 取 store 里 `apiKey` 的占位符名; `auth_header` 等设置从现有配置继承, 不会被覆盖。
 - 写入 `config.local.json` (即 `~/fff/config/tollgate.json`); `--dry-run` 只打印,
   `--providers` 改上游与优先级。
+- 手工加的真上游 (如官方直连 `deepseek`) 不在 fff store 里, 重生成时 `upstreams` 会被重写
+  (`build_upstreams` 只认 store 里的 provider), 这条上游会丢; 要先在 store 里补 provider, 或
+  重生成后手工补回。
 
 ```bash
 # 本机版 (dotfiles 维护, 依赖本机 fff store):
@@ -192,12 +204,12 @@ python3 scripts/gen_tollgate_config.py
 python3 scripts/gen_tollgate_config.example.py
 ```
 
-优先级用状态台的 `priority` 页调: provider 面板 + 模型列表 + 候选顺序实时预览;
-`+/-` 调值, `=` 输入数值, `Tab` 换面板, `/` 过滤, `s` 存 store, `r` 重生成配置,
-`h` 热加载, `q` 退出。改完直接 `r` `h` 即可生效。
+优先级用状态台的 `settings` 页调: provider 面板 + 模型列表 + 候选顺序实时预览;
+`m` / `p` / `g` 切模型 / provider / 调度参数, `+/-` 调值, `=` 输入数值, `/` 过滤,
+`s` 保存 (store 与 `gate`) 并热加载, `r` 重生成配置, `h` 热加载, `q` 退出。
 
 ```bash
-./llm-request-tollgate -tui -tui-state http://127.0.0.1:8787   # 看常驻服务, 按 4 进 priority 页
+./llm-request-tollgate -tui -tui-state http://127.0.0.1:8787   # 看常驻服务, 按 4 进 settings 页
 ```
 
 ### 用量分析 (计划中)
@@ -238,10 +250,10 @@ token) 与 `-usage` (上游 + 模型 × 窗口的 token 分解)。
 - `scripts/gen_tollgate_config.example.py` 由模型列表生成本项目配置 (示例版, 不依赖
   fff; 输入与规则见上) + `llm-models.example.json` 模型列表示例 (本机版
   `gen_tollgate_config.py` 在 dotfiles)。
-- `tui.go` / `tui_priority.go` 状态台: 前三个页读状态与日志, `priority` 页调权重 (写
-  store, 候选顺序实时预览, 界面内即可保存 / 重生成配置 / 热加载)。
+- `tui.go` / `tui_priority.go` 状态台: 前三个页读状态与日志, `settings` 页调 gate 参数与
+  权重 (写配置与 store, 候选顺序实时预览, 界面内即可保存 / 重生成配置 / 热加载)。
 - `gate_test.go` / `proxy_test.go` / `tui_*_test.go` 单元与端到端测试 (`go test .`): 调度
   核心 (排队节拍、试探放宽、两把锁、错误归类、退避熔断、锁落盘)、经代理转发的完整链路,
-  以及状态台版式与 priority 页存盘。
+  以及状态台版式与 settings 页存盘。
 - `test/tmp/` 与 `var/` 是运行产物 (自测二进制/假上游日志; 请求日志与 `gate-state.json`
   等状态), 都在 `.gitignore` 内。
