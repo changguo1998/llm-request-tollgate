@@ -107,13 +107,51 @@ func ioctlCall(fd uintptr, req uintptr, arg unsafe.Pointer) {
 	syscall.Syscall(syscall.SYS_IOCTL, fd, req, uintptr(arg))
 }
 
-// autoCols 的分配规则: 列宽按内容涨 (夹在 [w, max]), 余量先补齐差得少的列;
+// openTestPTY 把 stdout 指到一块 rows x cols 的 pty, 让 draw() 量到指定行列
+// (测试结束复原)。第 1 页的分块撑到 30 行以上, 要断言整页就得给高一点的窗口。
+func openTestPTY(t *testing.T, rows, cols int) {
+	t.Helper()
+	f, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
+	if err != nil {
+		t.Skip("no /dev/ptmx")
+	}
+	var n uint32
+	ioctlCall(f.Fd(), syscall.TIOCGPTN, unsafe.Pointer(&n))
+	var zero int32
+	ioctlCall(f.Fd(), syscall.TIOCSPTLCK, unsafe.Pointer(&zero))
+	sl, err := os.OpenFile("/dev/pts/"+itoa(int(n)), os.O_RDWR, 0)
+	if err != nil {
+		t.Skipf("open pts: %v", err)
+	}
+	old := os.Stdout
+	os.Stdout = sl
+	t.Cleanup(func() {
+		os.Stdout = old
+		sl.Close()
+		f.Close()
+	})
+	// 排空 master, 否则写满缓冲区会卡住
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 1<<16)
+		for {
+			if _, err := f.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+	ioctlCall(f.Fd(), syscall.TIOCSWINSZ, unsafe.Pointer(&tuiWinsize{Row: uint16(rows), Col: uint16(cols)}))
+}
+
+// autoCols 的分配规则: 列宽按内容涨 (下限 w, 上限是终端宽), 余量先补齐差得少的列;
 // 余量不够时是内容被截断, 而不是整列消失。
 func TestAutoColsAllocatesByContent(t *testing.T) {
 	cols := []tuiCol{
-		{"编号", 4, 6, true, 1},
-		{"逻辑名", 10, 28, false, 0},
-		{"路径", 12, 30, false, 3},
+		{"编号", 4, true, true, 1},
+		{"逻辑名", 10, true, false, 0},
+		{"路径", 12, true, false, 3},
 	}
 	rows := [][]string{{"12345", "claude-sonnet-4", "/v1/chat/completions"}}
 	// 基准宽合计 32, 内容宽合计 46 (编号 5 / 逻辑名 15 / 路径 20)。
@@ -133,6 +171,29 @@ func TestAutoColsAllocatesByContent(t *testing.T) {
 			t.Errorf("width=%d (%s): 期望 %v, 实际 %d/%d/%d",
 				c.width, c.why, c.want, got[0].w, got[1].w, got[2].w)
 		}
+	}
+}
+
+// 列宽不写死上限: 长内容一路涨到终端右边界, 顶满之后才截断; 内容都放得下就停在内容宽。
+func TestAutoColsFillsToBoundary(t *testing.T) {
+	cols := []tuiCol{
+		{"编号", 4, true, true, 1},
+		{"逻辑名", 10, true, false, 0},
+		{"路径", 12, true, false, 3},
+	}
+	rows := [][]string{{"1", "m1", strings.Repeat("p", 67)}}
+
+	// 80 列: 余量 48 全给路径列 (67 列内容放不下), 表右边界正好顶到 80。
+	got := autoCols(cols, rows, 80)
+	if w := tableWidth(got); w != 80 {
+		t.Errorf("长行应顶到右边界 80, 实际表宽 %d", w)
+	}
+	if got[2].w != 60 {
+		t.Errorf("路径列应拿走余量 (60), 实际 %d", got[2].w)
+	}
+	// 200 列: 内容都放得下, 各列停在内容宽, 不再多占。
+	if w := tableWidth(autoCols(cols, rows, 200)); w != 2+4+2+10+2+67 {
+		t.Errorf("内容放得下时不该再涨, 实际表宽 %d", w)
 	}
 }
 
@@ -264,6 +325,7 @@ func TestTableTitlesAndEventsScroll(t *testing.T) {
 
 // 第 1 页按流程阶段分块: 顺序与调度器的真实步骤一致, 每笔请求落在自己的块里。
 func TestFlowBlocksByStage(t *testing.T) {
+	openTestPTY(t, 50, 140)
 	m := newTUIModel("cfg")
 	now := time.Now()
 	m.pulse.Active = []flow{
@@ -323,8 +385,9 @@ func flowTitleRows(t *testing.T, out string) []int {
 	return rows
 }
 
-// 分块标题之间至少隔 2 行; 空块只有一行, 不足的部分用空行补齐。
+// 分块标题之间至少隔 2 行: 数据行区按最小行数补齐, 块之间再空一行。
 func TestFlowBlockTitleSpacing(t *testing.T) {
+	openTestPTY(t, 50, 140)
 	m := newTUIModel("cfg")
 	m.tab = tabActive
 	rows := flowTitleRows(t, m.draw())
@@ -336,8 +399,9 @@ func TestFlowBlockTitleSpacing(t *testing.T) {
 	}
 }
 
-// 有内容的块自带表头与行, 标题之间同样不会贴在一起; 每个块只领先下一块 3 行以上。
+// 有内容的块自带行与补齐的空行, 标题之间同样不会贴在一起。
 func TestFlowBlockTitleSpacingWithRows(t *testing.T) {
+	openTestPTY(t, 50, 140)
 	m := newTUIModel("cfg")
 	m.tab = tabActive
 	now := time.Now()
@@ -350,6 +414,71 @@ func TestFlowBlockTitleSpacingWithRows(t *testing.T) {
 		if gap := rows[i] - rows[i-1] - 1; gap < 2 {
 			t.Errorf("分块 %q 与 %q 之间只隔 %d 行, 至少要 2 行",
 				flowBlocks[i-1].title, flowBlocks[i].title, gap)
+		}
+	}
+}
+
+// 第 1 页的版式: 列名与单位行整页各只画一次 (列名在页首, 单位行在末块之后),
+// 块与块之间空一行; 每块的数据行区正好留 flowBlocks[i].minRows 行, 空块也照留。
+func TestFlowSingleHeaderAndMinRows(t *testing.T) {
+	openTestPTY(t, 60, 160)
+	m := newTUIModel("cfg")
+	m.tab = tabActive
+	m.pulse.Active = []flow{
+		{ID: 1, Logical: "queue-me", Up: "ustc", Model: "m1", Stage: stageQueue, StartTime: time.Now()},
+	}
+	out := stripANSI(m.draw())
+
+	if n := strings.Count(out, "上游/模型"); n != 1 {
+		t.Errorf("列名应整页只画一次, 实际 %d 次", n)
+	}
+	if n := strings.Count(out, flowUnits); n != 1 {
+		t.Errorf("单位行应整页只画一次, 实际 %d 次", n)
+	}
+	if strings.Index(out, "上游/模型") > strings.Index(out, "获取信号量") {
+		t.Error("列名应排在第一块标题之前 (页首)")
+	}
+	if strings.Index(out, flowUnits) < strings.Index(out, "已失败") {
+		t.Error("单位行应排在最后一块之后")
+	}
+
+	lines := strings.Split(out, "\r\n")
+	// 页首: 空一行再画列名 (列名不顶在页签下面), 且列名在第一块标题之前。
+	headRow := -1
+	for i, ln := range lines {
+		if strings.Contains(ln, "编号") {
+			headRow = i
+			break
+		}
+	}
+	if headRow < 0 {
+		t.Fatal("没画出列名行")
+	}
+	if headRow == 0 || strings.TrimSpace(lines[headRow-1]) != "" {
+		t.Errorf("列名上一行应是空行, 实际 %q", lines[headRow-1])
+	}
+	unitsRow := -1
+	for i, ln := range lines {
+		if strings.Contains(ln, flowUnits) {
+			unitsRow = i
+		}
+	}
+	if unitsRow < 0 {
+		t.Fatalf("没画出单位行 %q", flowUnits)
+	}
+	titles := flowTitleRows(t, out)
+	for i, row := range titles {
+		end := unitsRow
+		if i+1 < len(titles) {
+			end = titles[i+1]
+			if strings.TrimSpace(lines[end-1]) != "" {
+				t.Errorf("分块 %q 与下一块之间缺空行", flowBlocks[i].title)
+			}
+			end-- // 块间那一个空行不算数据行区
+		}
+		if got := end - row - 1; got != flowBlocks[i].minRows {
+			t.Errorf("分块 %q 的数据行区是 %d 行, 应正好 %d 行",
+				flowBlocks[i].title, got, flowBlocks[i].minRows)
 		}
 	}
 }

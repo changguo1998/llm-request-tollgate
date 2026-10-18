@@ -764,31 +764,41 @@ func (m *tuiModel) drawTabs(c *tuiCanvas) {
 	c.line(b.String())
 }
 
-// tuiTable 是一张表: 每列 标题 + 基准宽 + 内容自适应上限 (+ 右对齐)。
+// tuiTable 是一张表: 每列 标题 + 基准宽 + 是否按内容涨 (+ 右对齐)。
 // w 是基准宽: 内容伸缩与压缩都以它为下限。
-// max 是内容自适应的上限 (max <= w = 定宽列, 不随内容涨)。
+// grow 为真时列宽跟着内容涨, 上限是终端右边界 (不写死); 为假 = 定宽列, 不随内容涨。
 // hide 是被牺牲的先后 (只统计可见列): 0 = 最后才砍, 越大越先砍; 4 = 永不砍。
 type tuiCol struct {
 	title string
 	w     int
-	max   int
+	grow  bool
 	right bool
 	hide  int
 }
 
-// drawTable 画一张表; units 非空时在表下一行标出各列单位 (灰字)。
-// drawTable 画一张表: 标题行 + 表头 + 行 + 滚动位置 + 单位行 (标题与单位是灰字, 空表也画)。
-func drawTable(c *tuiCanvas, title string, cols []tuiCol, rows [][]string, scroll, limit int, units string) {
-	cols = autoCols(cols, rows, c.cols)
-	vis := fitCols(cols, c.cols)
+// tableLayout 按终端宽度定好一张表的列宽与可见列。一页只有一份表头时用它:
+// 列只算一次, 后面每块都用同一套列, 列才不会错位。
+func tableLayout(cols []tuiCol, rows [][]string, width int) ([]tuiCol, []bool) {
+	cols = autoCols(cols, rows, width)
+	return cols, fitCols(cols, width)
+}
+
+// tableHead 是表头那一行 (列名, 按可见列对齐)。
+func tableHead(cols []tuiCol, vis []bool) string {
 	head := make([]string, len(cols))
 	for i, col := range cols {
 		head[i] = tuiTrunc(col.title, col.w)
 	}
+	return tuiIndent + tuiBold + strings.Join(alignRow(cols, head, vis), "  ") + tuiReset
+}
+
+// drawTable 画一张表: 标题行 + 表头 + 行 + 滚动位置 + 单位行 (标题与单位是灰字, 空表也画)。
+func drawTable(c *tuiCanvas, title string, cols []tuiCol, rows [][]string, scroll, limit int, units string) {
+	cols, vis := tableLayout(cols, rows, c.cols)
 	if title != "" {
 		c.line(tuiDim + tuiIndent + title + tuiReset)
 	}
-	c.line(tuiIndent + tuiBold + strings.Join(alignRow(cols, head, vis), "  ") + tuiReset)
+	c.line(tableHead(cols, vis))
 	if len(rows) == 0 {
 		c.line(tuiDim + "  (空)" + tuiReset)
 		if units != "" {
@@ -881,8 +891,9 @@ func cutRank(hide int) int {
 }
 
 // autoCols 按内容与可用宽度分配列宽: 每列先占住基准宽 (下限), 余量按"要得少的先补齐"
-// 分给各列 (差得一样多时重要的先), 补到该列的内容宽 (上限 max) 为止。这样能补齐的列最多,
-// 贪吃的那列 (通常是模型名) 吃剩下的余量、必要时截断; 连基准宽都放不下才原样返回,
+// 分给各列 (差得一样多时重要的先), 一直补到该列的内容宽为止。列宽不写死上限, 上限就是
+// 终端右边界: 内容长的列一路顶到边界, 顶满之后还有的内容才截断。这样能补齐的列最多,
+// 贪吃的那列 (通常是模型名或路径) 吃剩下的余量; 连基准宽都放不下才原样返回,
 // 交给 fitCols 按老规矩丢列。
 func autoCols(cols []tuiCol, rows [][]string, width int) []tuiCol {
 	out := append([]tuiCol(nil), cols...)
@@ -892,8 +903,8 @@ func autoCols(cols []tuiCol, rows [][]string, width int) []tuiCol {
 	}
 	need := make([]int, len(cols))
 	for i, col := range cols {
-		need[i] = col.w // 定宽列 (max <= w) 的需求就是基准宽
-		if col.max <= col.w {
+		need[i] = col.w // 定宽列的需求就是基准宽
+		if !col.grow {
 			continue
 		}
 		n := tuiWidth(col.title)
@@ -902,7 +913,7 @@ func autoCols(cols []tuiCol, rows [][]string, width int) []tuiCol {
 				n = tuiWidth(r[i])
 			}
 		}
-		need[i] = min(max(n, col.w), col.max)
+		need[i] = max(n, col.w)
 	}
 	order := make([]int, len(cols))
 	for i := range order {
@@ -949,26 +960,29 @@ func alignRow(cols []tuiCol, cells []string, vis []bool) []string {
 	return out
 }
 
-// 更宽时按内容涨, 上限见各列 max。上游与真实模型合成一格, 写法 "上游/模型"
+// 更宽时按内容涨, 顶到终端右边界为止。上游与真实模型合成一格, 写法 "上游/模型"
 // (与 -usage 的 key 一致, 如 ustc/gpt-5-codex)。
 var activeCols = []tuiCol{
-	{"编号", 4, 6, true, 1}, {"已耗时", 6, 8, true, 0}, {"逻辑名", 10, 28, false, 0},
-	{"上游/模型", 18, 48, false, 0}, {"流式", 4, 4, false, 2},
-	{"状态", 10, 26, false, 0}, {"来源", 8, 14, false, 1}, {"路径", 12, 30, false, 3},
+	{"编号", 4, true, true, 1}, {"已耗时", 6, true, true, 0}, {"逻辑名", 10, true, false, 0},
+	{"上游/模型", 18, true, false, 0}, {"流式", 4, false, false, 2},
+	{"状态", 10, true, false, 0}, {"来源", 8, true, false, 1}, {"路径", 12, true, false, 3},
 }
 
 // flowBlocks 是第 1 页的分块: 顺序就是请求在调度器里的流程顺序。
 // 解析与取信号量合成第一块 (解析是瞬时状态, 单独一块只会闪一下)。
+// minRows 是这一块的数据行区至少留几行: 取信号量 / 排队 / 等首字节是盯的重点, 多留几行;
+// 行不够就补空行, 请求换阶段、块空了, 底下的块也不会往上跳。
 var flowBlocks = []struct {
-	title  string
-	stages []int
+	title   string
+	stages  []int
+	minRows int
 }{
-	{"获取信号量", []int{stageParse, stageSem}},
-	{"排队 (等出队节拍)", []int{stageQueue}},
-	{"等模型窗口 (退避 / 熔断锁)", []int{stageModelWait}},
-	{"等首字节", []int{stageSend}},
-	{"接收中", []int{stageRecv}},
-	{"已失败", []int{stageFailed}},
+	{"获取信号量", []int{stageParse, stageSem}, 4},
+	{"排队 (等出队节拍)", []int{stageQueue}, 4},
+	{"等模型窗口 (退避 / 熔断锁)", []int{stageModelWait}, 2},
+	{"等首字节", []int{stageSend}, 4},
+	{"接收中", []int{stageRecv}, 2},
+	{"已失败", []int{stageFailed}, 2},
 }
 
 func stageIn(st int, list []int) bool {
@@ -998,48 +1012,50 @@ func flowCells(f flow) []string {
 	}
 }
 
+// flowUnits 是第 1 页表底下那句单位说明 (整页只画一次, 放在末块之后)。
+const flowUnits = "单位: 已耗时 = 12s / 02:03 / 01:02:03"
+
 // drawFlow 是第 1 页: 活动连接按流程阶段分块, 整页一起滚动。
-// 空块压成一行 (标题 + 空), 后面补两行空行, 让相邻两块的标题不贴在一起;
-// 整列都空的时候把那一列丢掉。
+// 列名与单位整页各只画一次 (列名在页首, 单位在末块之后), 块与块之间只隔一行空行;
+// 每块的数据行区至少留 minRows 行 (见 flowBlocks), 空块也照留, 于是各块位置固定。
+// 列按全部请求一起算: 表头只有一份, 各块必须同列同宽。
 func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 	grouped := make([][][]string, len(flowBlocks))
-	first := -1
+	var all [][]string
 	for i, b := range flowBlocks {
 		for _, f := range m.pulse.Active {
 			if stageIn(f.Stage, b.stages) {
 				grouped[i] = append(grouped[i], flowCells(f))
 			}
 		}
-		if first < 0 && len(grouped[i]) > 0 {
-			first = i
-		}
+		all = append(all, grouped[i]...)
 	}
+	// 整列都空的列 (这批请求都没有来源 / 路径) 一起丢掉, 各块才能对齐。
+	keep := colKeep(activeCols, all)
+	cols, vis := tableLayout(pickCols(activeCols, keep), all, c.cols)
+
 	full := &tuiCanvas{cols: c.cols}
+	full.line("") // 表头上一行空着, 不顶在页签下面
+	full.line(tableHead(cols, vis))
 	for i, b := range flowBlocks {
-		rows := grouped[i]
-		if len(rows) == 0 {
-			full.line(tuiDim + tuiIndent + b.title + " (0)  (空)" + tuiReset)
-			// 空块只占一行, 不补就和下一块的标题贴在一起; 有内容的块自带表头与行,
-			// 标题之间已经隔开, 这里只补空块缺的两行。
-			if i < len(flowBlocks)-1 {
-				full.line("")
-				full.line("")
-			}
-			continue
+		if i > 0 {
+			full.line("") // 每块之间空一行
 		}
-		cols, rows := dropEmptyCols(activeCols, rows)
-		units := ""
-		if i == first {
-			units = "单位: 已耗时 = 12s / 02:03 / 01:02:03"
+		rows := pickRows(keep, grouped[i])
+		full.line(tuiDim + tuiIndent + b.title + " (" + strconv.Itoa(len(rows)) + ")" + tuiReset)
+		for _, r := range rows {
+			full.line(tuiIndent + strings.Join(alignRow(cols, r, vis), "  "))
 		}
-		drawTable(full, b.title+" ("+strconv.Itoa(len(rows))+")", cols, rows, 0, len(rows), units)
+		for n := len(rows); n < b.minRows; n++ {
+			full.line("") // 不满 minRows 就补空行, 撑住这一块的高度
+		}
 	}
+	full.line(tuiDim + tuiIndent + flowUnits + tuiReset)
 	m.drawWindow(c, full, body)
 }
 
-// dropEmptyCols 去掉整列都是空串的列 (例如这批请求都没有来源 / 路径时)。
-// 列与行一起裁, 下标保持一致。
-func dropEmptyCols(cols []tuiCol, rows [][]string) ([]tuiCol, [][]string) {
+// colKeep 标出哪些列在 rows 里至少有一个非空值 (整列都空的列画出来只是空白)。
+func colKeep(cols []tuiCol, rows [][]string) []bool {
 	keep := make([]bool, len(cols))
 	for i := range keep {
 		for _, r := range rows {
@@ -1049,23 +1065,40 @@ func dropEmptyCols(cols []tuiCol, rows [][]string) ([]tuiCol, [][]string) {
 			}
 		}
 	}
-	outCols := make([]tuiCol, 0, len(cols))
+	return keep
+}
+
+// pickCols 按 colKeep 的结果裁列。
+func pickCols(cols []tuiCol, keep []bool) []tuiCol {
+	out := make([]tuiCol, 0, len(cols))
 	for i, col := range cols {
-		if keep[i] {
-			outCols = append(outCols, col)
+		if i < len(keep) && keep[i] {
+			out = append(out, col)
 		}
 	}
-	outRows := make([][]string, 0, len(rows))
+	return out
+}
+
+// pickRows 按 colKeep 的结果裁行; 与 pickCols 用同一份 keep, 下标保持一致。
+func pickRows(keep []bool, rows [][]string) [][]string {
+	out := make([][]string, 0, len(rows))
 	for _, r := range rows {
-		cell := make([]string, 0, len(outCols))
-		for i := 0; i < len(cols) && i < len(r); i++ {
+		cell := make([]string, 0, len(keep))
+		for i := 0; i < len(keep) && i < len(r); i++ {
 			if keep[i] {
 				cell = append(cell, r[i])
 			}
 		}
-		outRows = append(outRows, cell)
+		out = append(out, cell)
 	}
-	return outCols, outRows
+	return out
+}
+
+// dropEmptyCols 去掉整列都是空串的列 (例如这批请求都没有来源 / 路径时)。
+// 单张表用这一对函数就够了; 一页多块共用一份表头时, 直接用 colKeep / pickRows。
+func dropEmptyCols(cols []tuiCol, rows [][]string) ([]tuiCol, [][]string) {
+	keep := colKeep(cols, rows)
+	return pickCols(cols, keep), pickRows(keep, rows)
 }
 
 // drawWindow 把整页画布按滚动位置裁一屏贴到 c (第 1 / 2 页共用)。
@@ -1149,9 +1182,9 @@ func (m *tuiModel) drawModels(c *tuiCanvas, body int) {
 		})
 	}
 	drawTable(full, "上游状态 (并发 / 锁 / 出队)", []tuiCol{
-		{"上游", 10, 0, false, 0}, {"进行中/上限", 11, 0, true, 1}, {"排队", 4, 0, true, 0},
-		{"试探", 4, 0, false, 2}, {"并发锁", 8, 0, true, 2}, {"额度锁", 14, 0, true, 2},
-		{"下次出队", 8, 0, true, 3}, {"连续错误", 8, 0, true, 3},
+		{"上游", 10, false, false, 0}, {"进行中/上限", 11, false, true, 1}, {"排队", 4, false, true, 0},
+		{"试探", 4, false, false, 2}, {"并发锁", 8, false, true, 2}, {"额度锁", 14, false, true, 2},
+		{"下次出队", 8, false, true, 3}, {"连续错误", 8, false, true, 3},
 	}, urows, 0, len(urows),
 		"单位: 进行中/上限、排队、连续错误 = 个; 并发锁、额度锁、下次出队 = 12s / 02:03 / 01:02:03")
 	full.line("") // 两张表之间空一行: 上面是上游状态, 下面是汇总 + 模型队列
@@ -1196,13 +1229,13 @@ func (m *tuiModel) drawModels(c *tuiCanvas, body int) {
 // 流量 (总 token / 缓存命中 / 首字节 / 吞吐), 时间 (最近一次)。
 func modelCols() []tuiCol {
 	return []tuiCol{
-		{"上游/模型", 24, 60, false, 4},
-		{"排队", 4, 0, true, 0}, {"退避", 8, 0, true, 4},
-		{"熔断锁", 8, 0, true, 4}, {"连续错误", 8, 0, true, 2},
-		{"请求", 6, 0, true, 0}, {"错误", 4, 0, true, 0}, {"换候选", 7, 0, true, 1},
-		{"总 token", 9, 0, true, 3}, {"缓存命中", 8, 0, true, 1},
-		{"首字节", 8, 0, true, 3}, {"吞吐", 7, 0, true, 1},
-		{"最近一次", 9, 0, true, 2},
+		{"上游/模型", 24, true, false, 4},
+		{"排队", 4, false, true, 0}, {"退避", 8, false, true, 4},
+		{"熔断锁", 8, false, true, 4}, {"连续错误", 8, false, true, 2},
+		{"请求", 6, false, true, 0}, {"错误", 4, false, true, 0}, {"换候选", 7, false, true, 1},
+		{"总 token", 9, false, true, 3}, {"缓存命中", 8, false, true, 1},
+		{"首字节", 8, false, true, 3}, {"吞吐", 7, false, true, 1},
+		{"最近一次", 9, false, true, 2},
 	}
 }
 
@@ -1327,8 +1360,8 @@ func (m *tuiModel) drawEvents(c *tuiCanvas, body int) {
 		i += reps
 	}
 	drawTable(c, "事件流 (最新在前)", []tuiCol{
-		{"时间", 8, 0, false, 0}, {"类型", 10, 0, false, 0}, {"逻辑名", 20, 28, false, 1},
-		{"上游/模型", 30, 46, false, 2}, {"说明", 60, 80, false, 0},
+		{"时间", 8, false, false, 0}, {"类型", 10, false, false, 0}, {"逻辑名", 20, true, false, 1},
+		{"上游/模型", 30, true, false, 2}, {"说明", 60, true, false, 0},
 	}, rows, m.scrollWindow(len(rows), max(1, body-4)), max(1, body-4), "单位: 时间 = hh:mm:ss (时刻)")
 }
 
