@@ -388,6 +388,25 @@ func TestModelsPage(t *testing.T) {
 	}
 }
 
+// 第 2 页合并表的列按类别分组: 调度状态 / 历史计数 / 流量 / 时间, 同类相邻;
+// 原来的 30 分钟小方条那列已去掉。
+func TestModelsColumnGroups(t *testing.T) {
+	got := make([]string, 0, len(modelCols()))
+	for _, c := range modelCols() {
+		got = append(got, c.title)
+	}
+	want := []string{
+		"上游/模型",
+		"排队", "退避", "熔断锁", "连续错误",
+		"请求", "错误", "换候选",
+		"总 token", "缓存命中", "首字节", "吞吐",
+		"最近一次",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("列序应按类别分组:\n得到 %v\n期望 %v", got, want)
+	}
+}
+
 // 第 2 页: 队列与路由聚合成一张表, 行按 上游/真实模型 合并 (同模型多逻辑名求和),
 // 表里不出现逻辑名。
 func TestModelsMergedRow(t *testing.T) {
@@ -427,7 +446,38 @@ func TestModelsMergedRow(t *testing.T) {
 }
 
 // 颜色标准: 锁与错误红, 退避/试探黄, 错误数 0 绿; 表头不加色。
+// 用宽终端画, 免得窄屏按 hide 档位丢列, 把要断言的单元格裁掉。
 func TestColorStandard(t *testing.T) {
+	f, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
+	if err != nil {
+		t.Skip("no /dev/ptmx")
+	}
+	defer f.Close()
+	var n uint32
+	ioctlCall(f.Fd(), syscall.TIOCGPTN, unsafe.Pointer(&n))
+	var zero int32
+	ioctlCall(f.Fd(), syscall.TIOCSPTLCK, unsafe.Pointer(&zero))
+	sl, err := os.OpenFile("/dev/pts/"+itoa(int(n)), os.O_RDWR, 0)
+	if err != nil {
+		t.Skipf("open pts: %v", err)
+	}
+	defer sl.Close()
+	old := os.Stdout
+	os.Stdout = sl
+	defer func() { os.Stdout = old }()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 1<<16)
+		for {
+			if _, err := f.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+	ioctlCall(f.Fd(), syscall.TIOCSWINSZ, unsafe.Pointer(&tuiWinsize{Row: 40, Col: 160}))
+
 	m := newTUIModel("cfg")
 	m.tab = tabModels
 	m.pulse.Cands = []candView{{

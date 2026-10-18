@@ -255,7 +255,7 @@ func colorCount(n int) string {
 // 起, 各行不再参差不齐。
 const tuiIndent = "  "
 
-// tuiBuckets 是路由表右侧"每分钟请求数"小方条的分钟数; tuiBlocks 是它的 9 档灰度。
+// tuiBuckets 是"每分钟请求数"曲线的分钟数; tuiBlocks 是它的 9 档灰度。
 // tuiWindow 是默认回看窗口: 聚合只算这么久以内的日志 (与 -summary 的窗口口径一致)。
 const (
 	tuiBuckets    = 30
@@ -1174,29 +1174,36 @@ func (m *tuiModel) drawModels(c *tuiCanvas, body int) {
 		if r.TpsN > 0 {
 			tps = ftoa(r.TpsSum/float64(r.TpsN), 1)
 		}
-		// 与 mcols 的顺序一一对应 (dropEmptyCols 按下标裁列)。
+		// 与 modelCols 的顺序一一对应 (dropEmptyCols 按下标裁列)。
 		mrows = append(mrows, []string{
-			upModel(r.up, r.model), strconv.Itoa(r.Queue),
-			strconv.Itoa(r.Reqs), errs, paused, lock,
-			humanTokens(r.Total), ttfb, mages(r.Last),
-			colorCount(r.Fails), strconv.Itoa(r.Fallbacks), tps,
-			humanTokens(r.Cached), bucketBar(r.bucket),
+			upModel(r.up, r.model),
+			strconv.Itoa(r.Queue), paused, lock, colorCount(r.Fails),
+			strconv.Itoa(r.Reqs), errs, strconv.Itoa(r.Fallbacks),
+			humanTokens(r.Total), humanTokens(r.Cached), ttfb, tps,
+			mages(r.Last),
 		})
 	}
-	mcols, mrows := dropEmptyCols([]tuiCol{
-		{"上游/模型", 24, 60, false, 4}, {"排队", 4, 0, true, 0},
-		{"请求", 6, 0, true, 0}, {"错误", 4, 0, true, 0},
-		{"退避", 8, 0, true, 4}, {"熔断锁", 8, 0, true, 4},
-		{"总 token", 9, 0, true, 3}, {"首字节", 8, 0, true, 3},
-		{"最近一次", 9, 0, true, 2}, {"连续错误", 8, 0, true, 2},
-		{"换候选", 7, 0, true, 1}, {"吞吐", 7, 0, true, 1},
-		{"缓存命中", 8, 0, true, 1}, {strconv.Itoa(tuiBuckets) + "m 条", tuiBuckets, 0, false, 1},
-	}, mrows)
+	mcols, mrows := dropEmptyCols(modelCols(), mrows)
 	drawTable(full, "模型队列 + 路由聚合 (上游/真实模型, 按最近一次请求时间降序)", mcols, mrows, 0, len(mrows),
-		"单位: 排队/连续错误/请求/错误/换候选 = 个; token = 个; 时长 = 12s / 02:03 / 01:02:03; "+
-			"吞吐 = token/s; "+strconv.Itoa(tuiBuckets)+"m 条 = 每分钟请求数")
+		"单位: 排队/连续错误/请求/错误/换候选/缓存命中/总 token = 个; "+
+			"退避/熔断锁/首字节 = 12s / 02:03 / 01:02:03; 吞吐 = token/s")
 
 	m.drawWindow(c, full, body)
+}
+
+// modelCols 是第 2 页合并表的列: 按类别从左到右排, 同类相邻 ——
+// 调度状态 (排队 / 退避 / 熔断锁 / 连续错误), 历史计数 (请求 / 错误 / 换候选),
+// 流量 (总 token / 缓存命中 / 首字节 / 吞吐), 时间 (最近一次)。
+func modelCols() []tuiCol {
+	return []tuiCol{
+		{"上游/模型", 24, 60, false, 4},
+		{"排队", 4, 0, true, 0}, {"退避", 8, 0, true, 4},
+		{"熔断锁", 8, 0, true, 4}, {"连续错误", 8, 0, true, 2},
+		{"请求", 6, 0, true, 0}, {"错误", 4, 0, true, 0}, {"换候选", 7, 0, true, 1},
+		{"总 token", 9, 0, true, 3}, {"缓存命中", 8, 0, true, 1},
+		{"首字节", 8, 0, true, 3}, {"吞吐", 7, 0, true, 1},
+		{"最近一次", 9, 0, true, 2},
+	}
 }
 
 // modelRow 是第 2 页合并表的一行: 队列状态 (观测面) + 聚合统计 (日志, 按上游/模型求和,
@@ -1214,7 +1221,6 @@ type modelRow struct {
 	TpsSum           float64
 	TpsN             int
 	Last             time.Time
-	bucket           [tuiBuckets]uint8
 }
 
 // modelRows 合并观测面里的模型队列与日志聚合: 只保留真正有过请求的 上游/模型。
@@ -1251,13 +1257,6 @@ func (m *tuiModel) modelRows() []*modelRow {
 		r.TpsN += rr.TpsN
 		if rr.Last.After(r.Last) {
 			r.Last = rr.Last
-		}
-		for i, v := range rr.bucket {
-			if int(r.bucket[i])+int(v) > 255 {
-				r.bucket[i] = 255
-			} else {
-				r.bucket[i] += v
-			}
 		}
 	}
 	out := make([]*modelRow, 0, len(by))
@@ -1455,28 +1454,6 @@ func (m *tuiModel) sparkline() string {
 	}
 	sb.WriteString("  (峰值 " + strconv.Itoa(max) + "/min)")
 	return sb.String()
-}
-
-func bucketBar(b [tuiBuckets]uint8) string {
-	out := make([]byte, 0, tuiBuckets)
-	for _, v := range b {
-		// 5 档: 空白 = 没有请求, 之后按量级升档 (这是"热不热"的粗看, 不是精确刻度)。
-		idx := 0
-		switch {
-		case v == 0:
-			idx = 0
-		case v < 5:
-			idx = 1
-		case v < 20:
-			idx = 3
-		case v < 50:
-			idx = 5
-		default:
-			idx = 7
-		}
-		out = append(out, tuiBlocks[idx])
-	}
-	return string(out)
 }
 
 // mages 是"最近一次"列的写法: 距现在多久 (与其它时长同一口径)。
