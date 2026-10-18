@@ -322,6 +322,10 @@ type tuiModel struct {
 
 	prio     *tuiEditor   // settings 页 (调度参数 + 权重编辑), runTUI 里装载
 	reloadFn func() error // 同进程模式的热加载回调; 空 = 走 deploy/tollgate.sh hup
+
+	// models 页上游表的排序键 (provider 优先级), 按 store / 配置的 mtime 失效。
+	provRank    map[string][2]int
+	provRankMod [2]time.Time
 }
 
 // errf 记下最近一次取数失败 (可能来自别的 goroutine, 加锁)。
@@ -995,7 +999,8 @@ func flowCells(f flow) []string {
 }
 
 // drawFlow 是第 1 页: 活动连接按流程阶段分块, 整页一起滚动。
-// 空块压成一行 (标题 + 空), 免得六个空表头占满屏; 整列都空的时候把那一列丢掉。
+// 空块压成一行 (标题 + 空), 后面补两行空行, 让相邻两块的标题不贴在一起;
+// 整列都空的时候把那一列丢掉。
 func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 	grouped := make([][][]string, len(flowBlocks))
 	first := -1
@@ -1014,6 +1019,12 @@ func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 		rows := grouped[i]
 		if len(rows) == 0 {
 			full.line(tuiDim + tuiIndent + b.title + " (0)  (空)" + tuiReset)
+			// 空块只占一行, 不补就和下一块的标题贴在一起; 有内容的块自带表头与行,
+			// 标题之间已经隔开, 这里只补空块缺的两行。
+			if i < len(flowBlocks)-1 {
+				full.line("")
+				full.line("")
+			}
 			continue
 		}
 		cols, rows := dropEmptyCols(activeCols, rows)
@@ -1069,12 +1080,54 @@ func (m *tuiModel) drawWindow(c *tuiCanvas, full *tuiCanvas, body int) {
 	}
 }
 
+// sortedCands 是 models 页上游表的顺序: provider 优先级降序, 同优先级保持配置顺序
+// (与 settings 页的 provider 面板同口径)。排序键按 store / 配置的 mtime 缓存, 不每帧
+// 读文件; store 读不到时保持观测面原序。
+func (m *tuiModel) sortedCands() []candView {
+	cands := append([]candView(nil), m.pulse.Cands...)
+	rank := m.provRanks()
+	if len(rank) == 0 {
+		return cands
+	}
+	sort.SliceStable(cands, func(i, j int) bool {
+		ri, iok := rank[cands[i].ID]
+		rj, jok := rank[cands[j].ID]
+		if iok != jok {
+			return iok // 配置里有的排前面
+		}
+		if ri[0] != rj[0] {
+			return ri[0] > rj[0]
+		}
+		return ri[1] < rj[1]
+	})
+	return cands
+}
+
+// provRanks 缓存排序键: 只有 store 或配置的文件时间变了才重读, 读不到就缓存空表,
+// 免得每帧反复解析。
+func (m *tuiModel) provRanks() map[string][2]int {
+	sm, serr := os.Stat(storePathFor(m.cfgPath))
+	cm, cerr := os.Stat(m.cfgPath)
+	if serr != nil || cerr != nil {
+		return nil
+	}
+	key := [2]time.Time{sm.ModTime(), cm.ModTime()}
+	if m.provRank == nil || key != m.provRankMod {
+		rank := provRank(m.cfgPath)
+		if rank == nil {
+			rank = map[string][2]int{}
+		}
+		m.provRank, m.provRankMod = rank, key
+	}
+	return m.provRank
+}
+
 // drawModels 是第 2 页: 先上游状态 (并发 / 锁 / 出队), 再列有过请求的 上游/模型 队列,
 // 最下面是路由聚合。整页一起滚动。只出现实际上游/模型, 不按逻辑名或配置候选铺开。
 func (m *tuiModel) drawModels(c *tuiCanvas, body int) {
 	full := &tuiCanvas{cols: c.cols}
 	var urows [][]string
-	for _, cand := range m.pulse.Cands {
+	for _, cand := range m.sortedCands() {
 		probe, conc, quota := "否", "-", "-"
 		if cand.Probing {
 			probe = tuiYell + "是" + tuiReset
@@ -1101,6 +1154,7 @@ func (m *tuiModel) drawModels(c *tuiCanvas, body int) {
 		{"下次出队", 8, 0, true, 3}, {"连续错误", 8, 0, true, 3},
 	}, urows, 0, len(urows),
 		"单位: 进行中/上限、排队、连续错误 = 个; 并发锁、额度锁、下次出队 = 12s / 02:03 / 01:02:03")
+	full.line("") // 两张表之间空一行: 上面是上游状态, 下面是汇总 + 模型队列
 
 	// 合并表: 队列状态 (观测面) + 聚合统计 (日志), 行 = 有过请求的 上游/真实模型。
 	rrows := m.routeRows()

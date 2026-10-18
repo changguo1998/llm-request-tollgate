@@ -298,6 +298,62 @@ func TestFlowBlocksByStage(t *testing.T) {
 	}
 }
 
+// flowTitleRows 找出第 1 页各分块标题所在的行号 (下标对应 flowBlocks 的顺序)。
+func flowTitleRows(t *testing.T, out string) []int {
+	t.Helper()
+	lines := strings.Split(stripANSI(out), "\r\n")
+	rows := make([]int, len(flowBlocks))
+	for i := range rows {
+		rows[i] = -1
+	}
+	for n, ln := range lines {
+		text := strings.TrimPrefix(ln, tuiIndent)
+		for i, b := range flowBlocks {
+			// 只认行首的标题, 别把「状态」列里同名的阶段 (如 接收中) 当成标题。
+			if strings.HasPrefix(text, b.title) {
+				rows[i] = n
+			}
+		}
+	}
+	for i, row := range rows {
+		if row < 0 {
+			t.Fatalf("分块 %q 没画出来", flowBlocks[i].title)
+		}
+	}
+	return rows
+}
+
+// 分块标题之间至少隔 2 行; 空块只有一行, 不足的部分用空行补齐。
+func TestFlowBlockTitleSpacing(t *testing.T) {
+	m := newTUIModel("cfg")
+	m.tab = tabActive
+	rows := flowTitleRows(t, m.draw())
+	for i := 1; i < len(rows); i++ {
+		if gap := rows[i] - rows[i-1] - 1; gap < 2 {
+			t.Errorf("分块 %q 与 %q 之间只隔 %d 行, 至少要 2 行",
+				flowBlocks[i-1].title, flowBlocks[i].title, gap)
+		}
+	}
+}
+
+// 有内容的块自带表头与行, 标题之间同样不会贴在一起; 每个块只领先下一块 3 行以上。
+func TestFlowBlockTitleSpacingWithRows(t *testing.T) {
+	m := newTUIModel("cfg")
+	m.tab = tabActive
+	now := time.Now()
+	m.pulse.Active = []flow{
+		{ID: 1, Logical: "queue-me", Up: "ustc", Model: "m1", Stage: stageQueue, StartTime: now},
+		{ID: 2, Logical: "recv-me", Up: "ustc", Model: "m1", Stage: stageRecv, StartTime: now},
+	}
+	rows := flowTitleRows(t, m.draw())
+	for i := 1; i < len(rows); i++ {
+		if gap := rows[i] - rows[i-1] - 1; gap < 2 {
+			t.Errorf("分块 %q 与 %q 之间只隔 %d 行, 至少要 2 行",
+				flowBlocks[i-1].title, flowBlocks[i].title, gap)
+		}
+	}
+}
+
 // 第 2 页从模型视角画: 每个真实模型的队列 / 退避 / 熔断锁, 以及上游的额度锁。
 func TestModelsPage(t *testing.T) {
 	m := newTUIModel("cfg")
@@ -319,6 +375,16 @@ func TestModelsPage(t *testing.T) {
 	}
 	if strings.Contains(out, "01:00 额度") {
 		t.Errorf("锁列只显示时间, 表头已有名字")
+	}
+	// 上游状态表与下面的汇总 / 模型队列之间空一行。
+	lines := strings.Split(out, "\r\n")
+	for i, ln := range lines {
+		if !strings.HasPrefix(strings.TrimPrefix(ln, tuiIndent), "单位: 进行中/上限") {
+			continue
+		}
+		if i+1 >= len(lines) || strings.TrimSpace(lines[i+1]) != "" {
+			t.Errorf("上游状态表后面应空一行: %q", ln)
+		}
 	}
 }
 

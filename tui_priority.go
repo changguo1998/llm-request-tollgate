@@ -538,25 +538,28 @@ func isProxyEntry(name string, entry map[string]any) bool {
 	return kind == proxyKind
 }
 
-// providerOrder 取配置里的上游顺序; 只留 store 里真有的, 并把本代理自己排除掉。
-func (e *tuiEditor) providerOrder() []string {
-	names := prioFallbackProviders
-	if b, err := os.ReadFile(e.config); err == nil {
-		var cfg struct {
-			Upstreams []struct {
-				ID string `json:"id"`
-			} `json:"upstreams"`
+// configOrder 取配置里的上游顺序 (即生成器的 --providers 次序); 读不到时用兜底列表。
+func configOrder(cfgPath string) []string {
+	var cfg struct {
+		Upstreams []struct {
+			ID string `json:"id"`
+		} `json:"upstreams"`
+	}
+	if b, err := os.ReadFile(cfgPath); err == nil && json.Unmarshal(b, &cfg) == nil {
+		ids := make([]string, 0, len(cfg.Upstreams))
+		for _, u := range cfg.Upstreams {
+			ids = append(ids, u.ID)
 		}
-		if json.Unmarshal(b, &cfg) == nil {
-			var ids []string
-			for _, u := range cfg.Upstreams {
-				ids = append(ids, u.ID)
-			}
-			if len(ids) > 0 {
-				names = ids
-			}
+		if len(ids) > 0 {
+			return ids
 		}
 	}
+	return prioFallbackProviders
+}
+
+// providerOrder 取配置里的上游顺序; 只留 store 里真有的, 并把本代理自己排除掉。
+func (e *tuiEditor) providerOrder() []string {
+	names := configOrder(e.config)
 	entries := e.provEntries()
 	var out []string
 	for _, name := range names {
@@ -567,6 +570,50 @@ func (e *tuiEditor) providerOrder() []string {
 		out = append(out, name)
 	}
 	return out
+}
+
+// provPrios 只读 store 里各 provider 的优先级, 给 models 页排序用。别为了排序去装载
+// 整个编辑器: 那会把 settings 页的 gate 快照提前钉在启动时刻。读不到返回 nil。
+func provPrios(cfgPath string) map[string]int {
+	b, err := os.ReadFile(storePathFor(cfgPath))
+	if err != nil {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var top map[string]any
+	if dec.Decode(&top) != nil {
+		return nil
+	}
+	entries, _ := top["providers"].(map[string]any)
+	out := make(map[string]int, len(entries))
+	for name, raw := range entries {
+		if entry, ok := raw.(map[string]any); ok {
+			out[name] = prioOf(entry)
+		}
+	}
+	return out
+}
+
+// provRank 是 models 页的排序键: [优先级, 配置顺序], 优先级降序, 同优先级保持配置顺序,
+// 与 settings 页的 provider 面板同一口径。store 读不到时返回 nil (调用方保持观测面原序)。
+func provRank(cfgPath string) map[string][2]int {
+	prios := provPrios(cfgPath)
+	if prios == nil {
+		return nil
+	}
+	rank := make(map[string][2]int, len(prios))
+	for i, name := range configOrder(cfgPath) {
+		rank[name] = [2]int{prios[name], i}
+	}
+	// store 里有、配置里没有的上游: 优先级照算, 顺序排在同优先级最后。
+	last := len(rank)
+	for name, p := range prios {
+		if _, ok := rank[name]; !ok {
+			rank[name] = [2]int{p, last}
+		}
+	}
+	return rank
 }
 
 // droplist 读黑名单 (精确匹配模型 id); store 目录优先, 其次配置目录。

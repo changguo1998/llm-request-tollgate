@@ -556,3 +556,55 @@ func TestProviderSortByPriority(t *testing.T) {
 		t.Errorf("选中项应还停在 ustc, 实际 %q", e.providers[e.provSel])
 	}
 }
+
+func candsOrder(cands []candView) string {
+	out := make([]string, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, c.ID)
+	}
+	return strings.Join(out, ",")
+}
+
+// models 页的上游表按 provider 优先级降序, 与 settings 页的 provider 面板同口径。
+func TestModelsCandsSortByPriority(t *testing.T) {
+	_, cfg := prioFixture(t)
+	m := newTUIModel(cfg)
+	m.pulse.Cands = []candView{{ID: "ustc"}, {ID: "group"}}
+	if got := candsOrder(m.sortedCands()); got != "group,ustc" {
+		t.Fatalf("上游表应按优先级降序 (group 3 > ustc 0), 得到 %q", got)
+	}
+}
+
+// 同优先级的两个上游保持配置顺序, 不看 id 字典序。
+func TestModelsCandsTieByConfigOrder(t *testing.T) {
+	dir := t.TempDir()
+	store := `{"providers": {"zeta": {"tollgate_priority": 1}, "alpha": {"tollgate_priority": 1}}}`
+	cfgText := `{"upstreams": [{"id": "zeta"}, {"id": "alpha"}]}`
+	if err := os.WriteFile(filepath.Join(dir, "llm-models.json"), []byte(store), 0o600); err != nil {
+		t.Fatalf("写 store: %v", err)
+	}
+	cfg := filepath.Join(dir, "tollgate.json")
+	if err := os.WriteFile(cfg, []byte(cfgText), 0o600); err != nil {
+		t.Fatalf("写配置: %v", err)
+	}
+	m := newTUIModel(cfg)
+	m.pulse.Cands = []candView{{ID: "alpha"}, {ID: "zeta"}}
+	if got := candsOrder(m.sortedCands()); got != "zeta,alpha" {
+		t.Fatalf("同优先级应按配置顺序 zeta,alpha, 得到 %q", got)
+	}
+}
+
+// store 读不到时保持观测面原序, 不在看板里硬排。
+func TestModelsCandsNoStoreKeepsOrder(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FFF_HOME", dir)
+	cfg := filepath.Join(dir, "tollgate.json")
+	if err := os.WriteFile(cfg, []byte(`{"upstreams": [{"id": "ustc"}, {"id": "group"}]}`), 0o600); err != nil {
+		t.Fatalf("写配置: %v", err)
+	}
+	m := newTUIModel(cfg)
+	m.pulse.Cands = []candView{{ID: "ustc"}, {ID: "group"}}
+	if got := candsOrder(m.sortedCands()); got != "ustc,group" {
+		t.Fatalf("store 读不到应保持原序, 得到 %q", got)
+	}
+}
