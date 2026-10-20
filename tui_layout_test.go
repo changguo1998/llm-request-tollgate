@@ -214,6 +214,28 @@ func TestActiveTableKeepsAllColsAt120(t *testing.T) {
 	}
 }
 
+// 回归: 中间列整列为空被 colKeep 丢掉 (如全部请求都没有来源) 之后, 后面的
+// 路径列不能再按错位的 cell 算宽 —— 曾经列宽停在基准值, 长路径被提前截断,
+// 终端明明够宽也打出 ~。现在行列按同一份 keep 对齐, 宽终端下路径应完整显示。
+func TestFlowDroppedColKeepsLaterColWidth(t *testing.T) {
+	openTestPTY(t, 40, 160)
+	m := newTUIModel("cfg")
+	m.tab = tabActive
+	now := time.Now()
+	path := strings.Repeat("p", 60)
+	m.pulse.Active = []flow{{
+		ID: 7, Logical: "claude-3-5-sonnet", Up: "group", Model: "claude-sonnet-4-5-20250929",
+		Stage: stageSend, StartTime: now, Path: path,
+	}}
+	out := stripANSI(m.draw())
+	if strings.Contains(out, "~") {
+		t.Errorf("宽终端下第 1 页不该出现截断符 ~:\n%v", out)
+	}
+	if !strings.Contains(out, path) {
+		t.Errorf("长路径应完整显示, 实际被截断:\n%v", out)
+	}
+}
+
 // 路由表按最后使用时间降序 (最近用过的排最上面), 同一时刻按请求数兜底。
 func TestRouteRowsSortByLastUse(t *testing.T) {
 	now := time.Now()

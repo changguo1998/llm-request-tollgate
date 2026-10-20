@@ -1032,7 +1032,10 @@ func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 	}
 	// 整列都空的列 (这批请求都没有来源 / 路径) 一起丢掉, 各块才能对齐。
 	keep := colKeep(activeCols, all)
-	cols, vis := tableLayout(pickCols(activeCols, keep), all, c.cols)
+	// 行也按同一份 keep 对齐 (pickRows): 列丢过之后下标已重排, 再拿原始行
+	// 给 autoCols 算内容宽会读错 cell, 后面的列停在基准宽, 内容被提前截断。
+	picked := pickRows(keep, all)
+	cols, vis := tableLayout(pickCols(activeCols, keep), picked, c.cols)
 
 	full := &tuiCanvas{cols: c.cols}
 	full.line("") // 表头上一行空着, 不顶在页签下面
