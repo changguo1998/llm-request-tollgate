@@ -8,13 +8,15 @@ scripts/gen_tollgate_config.py 与它同源, 但直接读 ~/fff/config/llm-model
 
 输入形状与 fff store 一致 (见同目录 llm-models.example.json):
     providers.<name>.baseUrl / apiKey ("$NAME" 占位符) / tollgate_priority?
-    providers.<name>.models[].id / tollgate_group? / tollgate_priority?
+    providers.<name>.models[].id / tollgate_group? / tollgate_billing? / tollgate_priority?
 
 规则 (与 README -配置- 一节一致):
     - 逻辑名 = 条目的 tollgate_group, 没有就是模型 id; 跨上游同名归并成一个别名.
     - 候选顺序 = 模型 tollgate_priority 降序, 同值看 provider 的 tollgate_priority
       降序, 再同值按列表出现顺序. 0 最小, 缺省即 0.
     - key_env = store 里 apiKey 占位符去掉 "$" 后的名字 ($USTC_API_KEY -> USTC_API_KEY).
+    - 额度组 = 条目的 tollgate_billing, 同家同名一组, 缺省归默认组; 输出为上游
+      models 里的 billing_group. 整家都没声明时不写 models (与加组之前的形状一致).
 
 用法:
     python3 scripts/gen_tollgate_config.example.py                 # 读示例列表, 打印 JSON
@@ -56,14 +58,26 @@ def build(list_path: Path) -> dict:
 
     upstreams = []
     for up_id, prov in providers.items():
-        upstreams.append({
+        models = []
+        for model in prov.get("models", []):
+            item = {"id": model["id"]}
+            group = model.get("tollgate_billing")
+            if isinstance(group, str) and group.strip():
+                item["billing_group"] = group.strip()
+            models.append(item)
+        if not any("billing_group" in m for m in models):
+            models = []  # 整家都没声明额度组: 不写 models, 归默认组
+        entry = {
             "id": up_id,
             "base_url": prov["baseUrl"],
             "auth_header": "Authorization",
             "key_env": str(prov.get("apiKey", "")).lstrip("$"),
             "headers": {},
             "include_usage": True,
-        })
+        }
+        if models:
+            entry["models"] = models
+        upstreams.append(entry)
 
     return {"upstreams": upstreams, "aliases": aliases}
 

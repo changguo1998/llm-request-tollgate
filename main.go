@@ -12,15 +12,16 @@
 //  4. 用量提取: 强写 stream_options.include_usage, 流末 usage chunk / 非流式
 //     响应体 usage; 缺 usage 按 F7 字符口径兜底并计数。
 //  5. 限制反应 (设计 §5.5.2): 上游报错按每个上游自己的规则分成并发 / 额度 / 其他
-//     三类; 额度锁整个上游 10min (额度是 key 级共享的), 其他按 10/20/30s 退避、连续
-//     4 次熔断, 熔断只锁出错的 上游/模型 5min (同家别的模型不受影响),
-//     锁与退避状态落 var/gate-state.json (重启仍生效)。服务不记账, 只管写日志。
+//     三类; 额度按「记账组」共享, 命中只锁该组 10min (一个上游可以有多组, 组由模型的
+//     billing_group 声明, 不写 = 默认组); 其他按 10/20/30s 退避、连续 4 次熔断, 熔断只锁
+//     出错的 上游/模型 5min (同家别的模型不受影响), 锁与退避状态落 var/gate-state.json
+//     (重启仍生效)。服务不记账, 只管写日志。
 //  6. 响应整形: 非流 / 流式 chunk 里的 model 字段改回请求的逻辑名 (O9)。
 //  7. 对外面: GET /v1/models 返回逻辑名清单 (O5); 日志记 source 标识 (O3);
 //     -summary 汇总命令 (O2); -check 配置自检 + deploy/ 常驻与自检脚本 (O1)。
 //  8. 集中 fallback: 候选按序尝试, 首字节前 429/5xx/传输失败换下一个, 全败透传最后错误。
-//  9. 定时锁: 熔断只锁出错的 上游/模型, 额度锁整个上游; 锁内不真发, 排队中的请求整队
-//     迁移到下一个候选。
+//  9. 定时锁: 熔断只锁出错的 上游/模型, 额度只锁 上游/记账组; 锁内不真发, 排队中的
+//     请求整队迁移到下一个候选。
 //  10. 探测与延迟观测 (D14, 只观测不接入): 真实请求被动记 ttfb_ms/tps; 开启 probe 后
 //     只主动探测 fallback 顺序里的下一个候选 (scope=next), 结果进 GET /v1/probe 与
 //     var/probe.json; 不改候选顺序、不动失败计数与锁, 已建立的流不迁移。
@@ -75,6 +76,13 @@ type Timeouts struct {
 	StreamIdleMs     int `json:"stream_idle_ms"`
 }
 
+// ModelCfg 是上游声明的一个真实模型。BillingGroup 是它的额度组名: 同一上游里同名的
+// 模型属于同一组, 额度锁只锁组; 不写组名 = 该上游的默认组 (编译期常量 defaultGroup)。
+type ModelCfg struct {
+	ID           string `json:"id"`
+	BillingGroup string `json:"billing_group,omitempty"`
+}
+
 type UpstreamCfg struct {
 	ID           string            `json:"id"`
 	BaseURL      string            `json:"base_url"`
@@ -84,6 +92,9 @@ type UpstreamCfg struct {
 	KeyPrefix    *string           `json:"key_prefix,omitempty"`
 	Headers      map[string]string `json:"headers"`
 	IncludeUsage bool              `json:"include_usage"`
+	// Models 声明该上游提供哪些真实模型以及各自的额度组 (设计 §5.5.2)。可选:
+	// 不写 = 别名引用到的模型全归默认组, 与加组之前的配置行为一致。
+	Models []ModelCfg `json:"models,omitempty"`
 	// Errors 是 v2 的报错分类规则 (设计 §4.8): 每个上游一份「状态码 + body 关键词」,
 	// 用来把报错分成并发 / 额度 / 其他三类; 缺省空表 = 全部走通用兜底。
 	Errors *ErrRules `json:"errors,omitempty"`
@@ -279,9 +290,17 @@ func bodySnippet(b []byte, n int) string {
 // minSoftCap 是并发上限的起点: 每次重启从 1 重新爬 (设计 §5.5.2)。
 const minSoftCap = 1
 
-// lockAll 是定时锁里的"整家"作用域 (键): 额度是 key 级事实, 命中就锁整个上游;
-// 熔断按 upstream/model 粒度锁, 键写具体的真实模型 id (设计 §5.5.3)。
-const lockAll = "*"
+// defaultGroup 是没写 billing_group 的模型所属的额度组: 键是空串, 屏幕上写作「默认」。
+// 一个上游一个默认组, 所以不写 models 的旧配置里额度锁仍然覆盖该上游的全部模型。
+const defaultGroup = ""
+
+// groupLabel 把组名写成屏幕上好读的形态 (空串是内部键, 不能直出)。
+func groupLabel(group string) string {
+	if group == defaultGroup {
+		return "默认"
+	}
+	return group
+}
 
 // lockState 是一个到期时间戳加一个原因标记 (设计 §5.5.3)。
 type lockState struct {
@@ -302,6 +321,7 @@ func (l lockState) left(now time.Time) time.Duration {
 type ticket struct {
 	c     *cand
 	model string    // 这一笔要用的真实模型 (它决定进哪个模型队列)
+	group string    // 该模型所属的额度组 (它决定会撞上哪把额度锁)
 	enq   time.Time // 入流量队列的时刻
 	where queueKind // 此刻排在哪条队列里 (退出时按它摘)
 }
@@ -316,7 +336,8 @@ const (
 )
 
 // cand 是每个上游的调度状态: 两层队列 + 自适应并发上限 + 两把锁 (设计 §5.5.1/§5.5.2/§5.5.3)。
-// 退避、熔断计数与熔断锁按模型分开记 (modelGates), 所以同家一个模型坏了不挡其它模型。
+// 退避、熔断计数与熔断锁按模型分开记 (modelGates), 所以同家一个模型坏了不挡其它模型;
+// 额度锁按额度组分开记 (groupLocks), 所以一个组额度用完不挡同家的其它组。
 type cand struct {
 	id string
 
@@ -330,20 +351,22 @@ type cand struct {
 	// 模型级状态: 键是真实模型 id。锁查询不建表, 记账 (失败/成功/加锁) 才建。
 	modelGates map[string]*modelGate
 	seen       map[string]bool // 进过队列的真实模型 (TUI 模型视角只列有过请求的)
-	concLock   lockState       // 并发上限锁: 只锁超发试探
+	// 额度组锁: 键是组名 (默认组为空串)。额度是组级事实, 命中只锁该组。
+	groupLocks map[string]lockState
+	concLock   lockState // 并发上限锁: 只锁超发试探
 	wake       chan struct{}
 }
 
 // modelGate 是一个 upstream/model 的失败状态 (设计 §5.5.2 通用兜底 / §5.5.3 熔断锁)。
 type modelGate struct {
-	fails       int                  // 连续错误计数, 成功清零
-	pausedUntil time.Time            // 退避到什么时候: 退避期间该模型不出队
-	locks       map[string]lockState // 键 lockAll = 整家 (额度 10min); 其它 = 该模型的熔断锁 5min
+	fails       int       // 连续错误计数, 成功清零
+	pausedUntil time.Time // 退避到什么时候: 退避期间该模型不出队
+	lock        lockState // 熔断锁 (5min): 只锁该 upstream/model
 }
 
 func newCand(id string) *cand {
 	return &cand{id: id, softCap: minSoftCap, seen: map[string]bool{},
-		wake: make(chan struct{}, 1)}
+		groupLocks: map[string]lockState{}, wake: make(chan struct{}, 1)}
 }
 
 // signal 唤醒一个等待者; 通道容量 1, 满了说明已经有人会醒来重查。
@@ -402,9 +425,9 @@ func (c *cand) sleep(ctx context.Context, deadline, until time.Time) wakeReason 
 }
 
 // acquire 按设计 §5.5.1 拿到发送资格: 取信号量 (a) → 过流量队列 (b) → 过模型队列 (b2)。
-// 模型队列只有在该模型被熔断锁住或正在退避时才等 (正常情况下出队即发);
-// waitMs 是排队两段之和, 只用于记日志。上层换候选用下一笔。
-func (c *cand) acquire(ctx context.Context, g GateCfg, model string, onStage ...func(int)) (kind slotKind, why string, semMs, waitMs int64, ok bool) {
+// 模型队列只有在该模型被熔断锁住、或它所属的额度组被额度锁住、或它正在退避时才等
+// (正常情况下出队即发); waitMs 是排队两段之和, 只用于记日志。上层换候选用下一笔。
+func (c *cand) acquire(ctx context.Context, g GateCfg, model, group string, onStage ...func(int)) (kind slotKind, why string, semMs, waitMs int64, ok bool) {
 	// 展示用回调: 把这一笔此刻卡在流程哪一步报给 TUI。可变参数 = 老调用点不用改。
 	report := func(st int) {
 		if len(onStage) > 0 && onStage[0] != nil {
@@ -413,12 +436,12 @@ func (c *cand) acquire(ctx context.Context, g GateCfg, model string, onStage ...
 	}
 	report(stageSem)
 	start := time.Now()
-	kind, why, ok = c.acquireSlot(ctx, g, model)
+	kind, why, ok = c.acquireSlot(ctx, g, model, group)
 	semMs = time.Since(start).Milliseconds()
 	if !ok {
 		return kind, why, semMs, 0, false
 	}
-	t := &ticket{c: c, model: model, enq: time.Now()}
+	t := &ticket{c: c, model: model, group: group, enq: time.Now()}
 	start = time.Now()
 	if why, ok = c.waitFlow(ctx, g, t, report); !ok {
 		c.finish(kind, false) // 没轮到就退出: 归还信号量 (试探不占, 无需归还)
@@ -433,12 +456,12 @@ func (c *cand) acquire(ctx context.Context, g GateCfg, model string, onStage ...
 
 // acquireSlot 取信号量: 有余量直接占; 占满时先试探 (纯超发), 不允许试探才等 semWaitMs
 // (设计 §5.5.1 的 a 与 §5.5.2 的并发限制)。
-func (c *cand) acquireSlot(ctx context.Context, g GateCfg, model string) (slotKind, string, bool) {
+func (c *cand) acquireSlot(ctx context.Context, g GateCfg, model, group string) (slotKind, string, bool) {
 	deadline := time.Now().Add(g.semWait())
 	for {
 		now := time.Now()
 		c.mu.Lock()
-		if locked, _, _ := c.lockedIn(model, now); locked {
+		if locked, _, _ := c.lockedIn(model, group, now); locked {
 			c.mu.Unlock()
 			return slotCapped, "locked", false
 		}
@@ -475,9 +498,9 @@ func (c *cand) waitFlow(ctx context.Context, g GateCfg, t *ticket, report func(i
 	for {
 		now := time.Now()
 		c.mu.Lock()
-		if locked, _, _ := c.lockedIn(t.model, now); locked {
-			// 排队期间被锁 (整家额度锁, 或该模型的熔断锁): 退出队列, 由上层换下一个候选
-			// (整队迁移, §5.5.3)。
+		if locked, _, _ := c.lockedIn(t.model, t.group, now); locked {
+			// 排队期间被锁 (该模型的熔断锁, 或它所属组的额度锁): 退出队列, 由上层换下一个
+			// 候选 (整队迁移, §5.5.3)。同家别的组不在这里被释放。
 			c.removeTicketLocked(t)
 			c.mu.Unlock()
 			c.signal()
@@ -504,8 +527,8 @@ func (c *cand) waitFlow(ctx context.Context, g GateCfg, t *ticket, report func(i
 	}
 }
 
-// waitModel 在模型队列里等熔断解锁 / 退避结束; 正常情况 (没被熔断、没在退避) 立刻放行,
-// 不等节拍 —— 节拍已经在流量队列那一段付过了。
+// waitModel 在模型队列里等熔断解锁 / 组额度解锁 / 退避结束; 正常情况 (没被熔断、组没被
+// 额度锁、没在退避) 立刻放行, 不等节拍 —— 节拍已经在流量队列那一段付过了。
 // 上界用 queue_wait_ms (与流量队列同一个预算口径): 退避 10/20/30s 比它长, 等到超时就换候选。
 func (c *cand) waitModel(ctx context.Context, g GateCfg, t *ticket, report func(int)) (string, bool) {
 	report(stageModelWait)
@@ -513,7 +536,7 @@ func (c *cand) waitModel(ctx context.Context, g GateCfg, t *ticket, report func(
 	for {
 		now := time.Now()
 		c.mu.Lock()
-		if locked, _, _ := c.lockedIn(t.model, now); locked {
+		if locked, _, _ := c.lockedIn(t.model, t.group, now); locked {
 			c.removeTicketLocked(t)
 			c.mu.Unlock()
 			c.signal()
@@ -650,7 +673,7 @@ func (c *cand) gate(model string) *modelGate {
 	}
 	g := c.modelGates[model]
 	if g == nil {
-		g = &modelGate{locks: map[string]lockState{}}
+		g = &modelGate{}
 		c.modelGates[model] = g
 	}
 	return g
@@ -680,40 +703,48 @@ func (c *cand) paused(model string) (bool, time.Duration) {
 	return false, 0
 }
 
-// lockedIn 是锁查询的加锁版实现: 先看锁在它自己头上的熔断锁, 再看整家锁 (额度 10min)。
-// 两把同时在时以模型锁为准 —— 它更具体, 而且还剩多久与整家锁无关。调用方必须持有 c.mu
-// (locked 与队列里的检查都走它)。
-func (c *cand) lockedIn(model string, now time.Time) (bool, time.Duration, string) {
+// lockedIn 是锁查询的加锁版实现: 先看锁在它自己头上的熔断锁, 再看它所属额度组的
+// 额度锁。两把同时在时以模型锁为准 —— 它更具体, 而且还剩多久与组锁无关。调用方必须
+// 持有 c.mu (locked 与队列里的检查都走它)。
+func (c *cand) lockedIn(model, group string, now time.Time) (bool, time.Duration, string) {
 	if g := c.peekGate(model); g != nil {
-		if l := g.locks[model]; l.active(now) {
+		if l := g.lock; l.active(now) {
 			return true, l.left(now), l.reason
 		}
 	}
-	if g := c.peekGate(lockAll); g != nil {
-		if l := g.locks[lockAll]; l.active(now) {
-			return true, l.left(now), l.reason
-		}
+	if l, ok := c.groupLocks[group]; ok && l.active(now) {
+		return true, l.left(now), l.reason
 	}
 	return false, 0, ""
 }
 
 // locked 报告该模型现在能不能真发 (自己加锁)。
-func (c *cand) locked(model string) (bool, time.Duration, string) {
+func (c *cand) locked(model, group string) (bool, time.Duration, string) {
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.lockedIn(model, now)
+	return c.lockedIn(model, group, now)
 }
 
-// lock 加一把定时锁并唤醒排队者, 让它们退出队列换下一个候选。scope 是 lockAll
-// (额度: 锁整个上游) 或真实模型 id (熔断: 只锁该模型); 同一作用域里取更晚的到期时间
-// (设计 §5.5.3)。
-func (c *cand) lock(scope, reason string, dur time.Duration) {
+// lockGroup 给一个额度组加锁并唤醒排队者, 让组内的请求退出队列换下一个候选;
+// 同组里取更晚的到期时间 (设计 §5.5.3)。
+func (c *cand) lockGroup(group, reason string, dur time.Duration) {
 	until := time.Now().Add(dur)
 	c.mu.Lock()
-	g := c.gate(scope)
-	if until.After(g.locks[scope].until) {
-		g.locks[scope] = lockState{until: until, reason: reason}
+	if until.After(c.groupLocks[group].until) {
+		c.groupLocks[group] = lockState{until: until, reason: reason}
+	}
+	c.mu.Unlock()
+	c.signal()
+}
+
+// lockModel 给一个真实模型加熔断锁 (只锁该 upstream/model), 同一模型取更晚的到期时间。
+func (c *cand) lockModel(model, reason string, dur time.Duration) {
+	until := time.Now().Add(dur)
+	c.mu.Lock()
+	g := c.gate(model)
+	if until.After(g.lock.until) {
+		g.lock = lockState{until: until, reason: reason}
 	}
 	c.mu.Unlock()
 	c.signal()
@@ -759,15 +790,17 @@ func (c *cand) recordOther(model string, g GateCfg) (breaker bool) {
 
 // ---------- v2 锁状态落盘 (设计 §5.5.3) ----------
 
-// gateLockRec 是落盘的一条定时锁。Model 空 = 整家锁 (额度); 否则只锁该模型 (熔断)。
+// gateLockRec 是落盘的一条定时锁。Model 非空 = 该模型的熔断锁; 否则是额度组锁,
+// Group 给出组名 (空 = 默认组, 也兼容加记账组之前的整家锁记录)。
 type gateLockRec struct {
 	UntilMs  int64  `json:"until_unix_ms"`
 	Reason   string `json:"reason"`
 	Upstream string `json:"upstream,omitempty"`
+	Group    string `json:"group,omitempty"`
 	Model    string `json:"model,omitempty"`
 }
 
-// gateState 是 gate-state.json 的内容: 只存未到期的定时锁 (整家锁与模型锁)。
+// gateState 是 gate-state.json 的内容: 只存未到期的定时锁 (组锁与模型锁)。
 type gateState struct {
 	UpdatedAt string                 `json:"updated_at"`
 	Locks     map[string]gateLockRec `json:"locks"`
@@ -781,45 +814,50 @@ func (a *App) recordGenericFailure(c *cand, model string, g GateCfg) bool {
 		a.evAdd("gate", "", c.id, model, "上游报错, 先退避再试")
 		return false
 	}
-	a.addLock(c, model, "breaker", g.breakerLock())
+	a.addLockModel(c, model, "breaker", g.breakerLock())
 	c.recordSuccess(model) // 熔断后重新计数, 锁到期从 0 开始
 	return true
 }
 
-// addLock 加一把定时锁并把锁状态落盘 —— 重启后仍在锁内 (设计 §5.5.3)。scope 是 lockAll
-// (额度: 锁整个上游) 或真实模型 id (熔断: 只锁该模型)。
-func (a *App) addLock(c *cand, scope, reason string, dur time.Duration) {
-	why := "额度限制"
-	if reason == "breaker" {
-		why = "连续错误到阈值, 熔断"
-	}
-	a.evAdd("lock", "", c.id, scope, "加锁 "+why+" "+durStr(dur))
-	c.lock(scope, reason, dur)
+// addLockGroup 给额度组加锁并把锁状态落盘 —— 重启后仍在锁内 (设计 §5.5.3)。
+func (a *App) addLockGroup(c *cand, group, reason string, dur time.Duration) {
+	a.evAdd("lock", "", c.id, "", "加锁 额度限制 (组 "+groupLabel(group)+") "+durStr(dur))
+	c.lockGroup(group, reason, dur)
 	a.saveGateState()
 }
 
-// locks 取该候选所有未到期的定时锁 (锁内快照), 供落盘与观测面用。Model 空 = 整家锁。
+// addLockModel 给 upstream/model 加熔断锁并落盘 (只锁该模型, 同家别的模型照常发送)。
+func (a *App) addLockModel(c *cand, model, reason string, dur time.Duration) {
+	a.evAdd("lock", "", c.id, model, "加锁 连续错误到阈值, 熔断 "+durStr(dur))
+	c.lockModel(model, reason, dur)
+	a.saveGateState()
+}
+
+// locks 取该候选所有未到期的定时锁 (锁内快照), 供落盘与观测面用。
 func (c *cand) locks() (out []gateLockRec) {
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, g := range c.modelGates {
-		for scope, l := range g.locks {
-			if left := l.left(now); left > 0 {
-				rec := gateLockRec{
-					UntilMs: now.Add(left).UnixMilli(), Reason: l.reason, Upstream: c.id,
-				}
-				if scope != lockAll {
-					rec.Model = scope
-				}
-				out = append(out, rec)
-			}
+	for group, l := range c.groupLocks {
+		if left := l.left(now); left > 0 {
+			out = append(out, gateLockRec{
+				UntilMs: now.Add(left).UnixMilli(), Reason: l.reason, Upstream: c.id, Group: group,
+			})
+		}
+	}
+	for model, g := range c.modelGates {
+		if left := g.lock.left(now); left > 0 {
+			out = append(out, gateLockRec{
+				UntilMs: now.Add(left).UnixMilli(), Reason: g.lock.reason, Upstream: c.id, Model: model,
+			})
 		}
 	}
 	return out
 }
 
 // saveGateState 把未到期的定时锁落盘 (先写临时文件再改名, 与探测状态同一套路)。
+// 键: 模型锁 "<上游>/<模型>"; 组锁 "<上游>/group:<组名>"; 默认组 "<上游>"
+// (沿用加组之前整家锁的键, 旧版 selftest 与旧文件都不用改)。
 func (a *App) saveGateState() {
 	if a.gatePath == "" {
 		return
@@ -834,9 +872,11 @@ func (a *App) saveGateState() {
 	a.mu.RUnlock()
 	for _, c := range cands {
 		for _, rec := range c.locks() {
-			key := c.id + "/" + lockAll // 整家锁 (额度)
+			key := c.id // 默认组的额度锁
 			if rec.Model != "" {
 				key = c.id + "/" + rec.Model // 单模型锁 (熔断)
+			} else if rec.Group != "" {
+				key = c.id + "/group:" + rec.Group // 有名额度组
 			}
 			st.Locks[key] = rec
 		}
@@ -855,7 +895,7 @@ func (a *App) saveGateState() {
 	}
 }
 
-// loadGateState 启动时恢复未到期的定时锁 (整家锁与模型锁); 已过期的直接丢掉。
+// loadGateState 启动时恢复未到期的定时锁 (组锁与模型锁); 已过期的直接丢掉。
 func (a *App) loadGateState() {
 	if a.gatePath == "" {
 		return
@@ -873,21 +913,19 @@ func (a *App) loadGateState() {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	for key, rec := range st.Locks {
-		// 锁的归属: 先信记录自己的 upstream / model; 老版本的记录没有这两个字段, 退回按
-		// map 键取 ("<上游>" = 整家锁, "<上游>/<模型>" = 模型锁)。
-		scope := rec.Model // 空 = 整家锁 (额度 / 旧记录的供应商锁)
-		upID := rec.Upstream
-		if upID == "" || scope == "" {
+		// 锁的归属: 先信记录自己的 upstream / group / model; 老版本的记录没有这些字段,
+		// 退回按 map 键取 ("<上游>" 或 "<上游>/*" = 默认组额度锁, "<上游>/<模型>" = 熔断锁)。
+		upID, group, model := rec.Upstream, rec.Group, rec.Model
+		if upID == "" {
 			parts := strings.SplitN(key, "/", 2)
-			if upID == "" {
-				upID = parts[0]
+			upID = parts[0]
+			if len(parts) == 2 && parts[1] != "*" {
+				if g, ok := strings.CutPrefix(parts[1], "group:"); ok {
+					group = g
+				} else {
+					model = parts[1]
+				}
 			}
-			if scope == "" && len(parts) == 2 && parts[1] != lockAll {
-				scope = parts[1]
-			}
-		}
-		if scope == "" {
-			scope = lockAll
 		}
 		c, ok := a.cands[upID]
 		if !ok {
@@ -898,9 +936,13 @@ func (a *App) loadGateState() {
 			continue
 		}
 		c.mu.Lock()
-		mg := c.gate(scope)
-		if until.After(mg.locks[scope].until) {
-			mg.locks[scope] = lockState{until: until, reason: rec.Reason}
+		if model != "" {
+			mg := c.gate(model)
+			if until.After(mg.lock.until) {
+				mg.lock = lockState{until: until, reason: rec.Reason}
+			}
+		} else if until.After(c.groupLocks[group].until) {
+			c.groupLocks[group] = lockState{until: until, reason: rec.Reason}
 		}
 		c.mu.Unlock()
 		restored++
@@ -1166,7 +1208,13 @@ type App struct {
 	mu        sync.RWMutex
 	cfg       *Config
 	upstreams map[string]*UpstreamCfg
-	aliases   map[string][]aliasTarget
+	// groups 是「上游 -> 真实模型 -> 额度组名」的索引 (applyConfig 重建), 探测等热路径
+	// 据此把 (上游, 模型) 解析成组, 不必每次扫 models 表。
+	groups map[string]map[string]string
+	// groupOrder 是「上游 -> 组名列表」, 按配置里首次出现的顺序 (含默认组的空串),
+	// 状态台用它铺记账列。
+	groupOrder map[string][]string
+	aliases    map[string][]aliasTarget
 	// v2 调度: 每个上游一份队列与自适应并发上限, 门控参数对所有上游共用。
 	cands     map[string]*cand
 	gate      GateCfg
@@ -1197,6 +1245,7 @@ type App struct {
 type aliasTarget struct {
 	Upstream string
 	Model    string
+	Group    string // 该模型在上游 models 里声明的额度组 (空 = 默认组)
 }
 
 // ---------- 只读观测面 (TUI) ----------
@@ -1259,6 +1308,12 @@ type candModelLock struct {
 	Why      string `json:"why"`       // breaker
 }
 
+// candGroup 是某上游一个记账组的瞬时状态 (额度锁剩余)。组名空串 = 默认组。
+type candGroup struct {
+	Name   string `json:"name"`
+	LockMs int64  `json:"lock_ms,omitempty"` // > 0 = 该组在额度锁内, 剩这么久
+}
+
 // candView 是某候选上游的瞬时调度状态。
 type candView struct {
 	ID       string          `json:"id"`
@@ -1268,8 +1323,9 @@ type candView struct {
 	Probing  bool            `json:"probing"`
 	ErrStrk  int             `json:"err_streak"`       // 该上游下最大的连续错误数
 	PausedMs int64           `json:"paused_ms"`        // > 0 = 至少一个模型在退避, 取最久的
-	LockMs   int64           `json:"lock_ms"`          // > 0 = 整家锁中 (额度), 剩这么久
+	LockMs   int64           `json:"lock_ms"`          // > 0 = 至少一个额度组在锁中, 取最久的
 	LockWhy  string          `json:"lock_why"`         // quota
+	Groups   []candGroup     `json:"groups,omitempty"` // 该上游声明的额度组 (按配置顺序)
 	Models   []candModelLock `json:"models,omitempty"` // 每个真实模型的队列 / 退避 / 熔断锁
 	ConcMs   int64           `json:"conc_lock_ms"`     // > 0 = 并发锁 (只锁试探)
 	NextMs   int64           `json:"next_ms"`          // 距下次出队节拍
@@ -1389,6 +1445,7 @@ type flowObs struct {
 
 	up      string // 当前候选 (换候选时记一条 fallback 事件)
 	model   string // 当前候选的真实模型 id (换候选时一起更新)
+	group   string // 当前候选的额度组名 (查询组锁用; 换候选时一起更新)
 	attempt int
 	slowMs  int64 // 首字节超过它就另记一条 slow (0 = 不记)
 	done    bool
@@ -1416,14 +1473,14 @@ func (o *flowObs) stage(st int) {
 	o.a.flowStage(o.id, "", "", st, o.gateNow(), o.attempt)
 }
 
-// gateNow 是「这一笔现在卡在哪一步」: 模型锁 / 整家锁 / 退避 / 出队节拍 / 已发出。
+// gateNow 是「这一笔现在卡在哪一步」: 模型锁 / 组额度锁 / 退避 / 出队节拍 / 已发出。
 func (o *flowObs) gateNow() string {
 	c := o.a.candOf(o.up)
 	if c == nil {
 		return "已发出"
 	}
 	now := time.Now()
-	if locked, left, reason := c.locked(o.model); locked {
+	if locked, left, reason := c.locked(o.model, o.group); locked {
 		why := "额度"
 		if reason == "breaker" {
 			why = "熔断"
@@ -1523,6 +1580,8 @@ func (a *App) candViews() []candView {
 	for _, c := range a.cands {
 		cands = append(cands, c)
 	}
+	// groupOrder 整体重建 (applyConfig 换新 map), 拿引用后在锁外读是安全的。
+	order := a.groupOrder
 	a.mu.RUnlock()
 	now := time.Now()
 	out := make([]candView, 0, len(cands))
@@ -1539,9 +1598,24 @@ func (a *App) candViews() []candView {
 			if left := g.pausedUntil.Sub(now); left > 0 && msCeil(left) > v.PausedMs {
 				v.PausedMs = msCeil(left)
 			}
-			if left := g.locks[lockAll].left(now); left > 0 {
-				v.LockMs, v.LockWhy = msCeil(left), g.locks[lockAll].reason
+		}
+		// 额度锁按组记, 上游行给出最久的那一把 (老消费方还看这个汇总值)。
+		for _, l := range c.groupLocks {
+			if left := l.left(now); left > 0 && msCeil(left) > v.LockMs {
+				v.LockMs, v.LockWhy = msCeil(left), l.reason
 			}
+		}
+		// 记账列: 声明过的组都列出来 (没锁也列, 组名要当表头), 无 models 的上游只有默认组。
+		names := order[c.id]
+		if len(names) == 0 {
+			names = []string{defaultGroup}
+		}
+		for _, name := range names {
+			g := candGroup{Name: name}
+			if l, ok := c.groupLocks[name]; ok {
+				g.LockMs = msCeil(l.left(now))
+			}
+			v.Groups = append(v.Groups, g)
 		}
 		// 模型视角: 只列真正进过队列的 上游/模型 (队列已空但曾经有过请求的也算),
 		// 不按逻辑名或配置里的候选清单铺开。
@@ -1561,16 +1635,13 @@ func (a *App) candViews() []candView {
 			ensure(m).Queue = len(q)
 		}
 		for model, g := range c.modelGates {
-			if model == lockAll {
-				continue
-			}
 			x := ensure(model)
 			x.Fails = g.fails
 			if left := g.pausedUntil.Sub(now); left > 0 {
 				x.PausedMs = msCeil(left)
 			}
-			if left := g.locks[model].left(now); left > 0 {
-				x.LeftMs, x.Why = msCeil(left), g.locks[model].reason
+			if left := g.lock.left(now); left > 0 {
+				x.LeftMs, x.Why = msCeil(left), g.lock.reason
 			}
 		}
 		for _, x := range models {
@@ -1893,6 +1964,7 @@ func (a *App) probeCandidate(alias string, up *UpstreamCfg, model string, c *Pro
 	}
 	a.mu.RLock()
 	cd, gate := a.cands[up.ID], a.gate
+	group := a.groups[up.ID][model]
 	a.mu.RUnlock()
 	if cd == nil {
 		sample.Err = "no scheduler"
@@ -1901,7 +1973,7 @@ func (a *App) probeCandidate(alias string, up *UpstreamCfg, model string, c *Pro
 	}
 	// 探测自己排队, 最多等 5s; 排不上就跳过这一轮, 不占用户请求的信号量与排队预算。
 	gateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	kind, why, _, _, ok := cd.acquire(gateCtx, gate, model)
+	kind, why, _, _, ok := cd.acquire(gateCtx, gate, model, group)
 	cancel()
 	if !ok {
 		sample.Err = "gate busy: " + why
@@ -2186,9 +2258,26 @@ func (a *App) applyConfig(c *Config) {
 		a.cands = map[string]*cand{}
 	}
 	upstreams := map[string]*UpstreamCfg{}
+	groups := map[string]map[string]string{} // 上游 -> 真实模型 -> 额度组名
+	groupSeq := map[string][]string{}        // 上游 -> 组名 (按配置首次出现, 含默认组)
 	for i := range c.Upstreams {
 		u := &c.Upstreams[i]
 		upstreams[u.ID] = u
+		byModel := make(map[string]string, len(u.Models))
+		var names []string
+		seenGroup := map[string]bool{}
+		for _, m := range u.Models {
+			byModel[m.ID] = m.BillingGroup
+			if !seenGroup[m.BillingGroup] {
+				seenGroup[m.BillingGroup] = true
+				names = append(names, m.BillingGroup)
+			}
+		}
+		if len(names) == 0 {
+			names = []string{defaultGroup} // 不写 models 的上游: 只有一个默认组
+		}
+		groupSeq[u.ID] = names
+		groups[u.ID] = byModel
 		// 调度状态按上游 id 保留不重建: 队列里排着的请求、爬到的并发上限、退避与锁
 		// 都该跨热加载延续 (上限有意不落盘, 但 hup 不该把它清掉)。
 		if _, ok := a.cands[u.ID]; !ok {
@@ -2196,10 +2285,14 @@ func (a *App) applyConfig(c *Config) {
 		}
 	}
 	a.upstreams = upstreams
+	a.groups = groups
+	a.groupOrder = groupSeq
 	aliases := map[string][]aliasTarget{}
 	for name, list := range c.Aliases {
 		for _, pair := range list {
-			aliases[name] = append(aliases[name], aliasTarget{pair[0], pair[1]})
+			aliases[name] = append(aliases[name], aliasTarget{
+				Upstream: pair[0], Model: pair[1], Group: groups[pair[0]][pair[1]],
+			})
 		}
 	}
 	a.aliases = aliases
@@ -2460,9 +2553,10 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 集中 fallback 的候选表: 上游 + 真实模型 + 该候选自己的 v2 调度状态。一把 RLock 拿齐,
 	// 循环里不再读 a.upstreams / a.cands (热加载会改这两张表)。
 	type attempt struct {
-		up  *UpstreamCfg
-		mod string
-		cd  *cand
+		up    *UpstreamCfg
+		mod   string
+		group string
+		cd    *cand
 	}
 	a.mu.RLock()
 	alias, aliasOK := a.aliases[logical]
@@ -2478,7 +2572,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if chosen == nil {
 			chosen, realModel = u, tgt.Model
 		}
-		attempts = append(attempts, attempt{u, tgt.Model, a.cands[u.ID]})
+		attempts = append(attempts, attempt{u, tgt.Model, tgt.Group, a.cands[u.ID]})
 	}
 	a.mu.RUnlock()
 
@@ -2528,7 +2622,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for _, at := range attempts {
 		// 进入这个候选: 展示状态跟着走 (换候选时 mark 收到失败码, 顺手记一条 fallback 事件)。
 		obs.attempt++
-		obs.up, obs.model = at.up.ID, at.mod
+		obs.up, obs.model, obs.group = at.up.ID, at.mod, at.group
 		obs.mark(0, "")
 		if at.cd == nil {
 			lastErr = fmt.Errorf("upstream %s has no scheduler", at.up.ID)
@@ -2536,8 +2630,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			failed++
 			continue
 		}
-		if locked, left, reason := at.cd.locked(at.mod); locked {
-			// 锁内不真发 (该模型的熔断锁 5min / 整家的额度锁 10min), 直接换下一个候选。
+		if locked, left, reason := at.cd.locked(at.mod, at.group); locked {
+			// 锁内不真发 (该模型的熔断锁 5min / 它所属组的额度锁 10min), 直接换下一个候选。
 			lastErr = fmt.Errorf("upstream %s locked for %s (%s)",
 				at.up.ID, left.Round(time.Second), reason)
 			lastUpID, lastM = at.up.ID, at.mod
@@ -2583,7 +2677,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			outReq.ContentLength = int64(len(body))
 			prepareOutboundHeaders(outReq.Header, r.Header, at.up)
 			// 取资格放在请求体准备之后, 构造失败就不白占槽位。
-			kind, why, sem, qms, ok := at.cd.acquire(r.Context(), gate, at.mod, obs.stage)
+			kind, why, sem, qms, ok := at.cd.acquire(r.Context(), gate, at.mod, at.group, obs.stage)
 			semMs += sem
 			queueMs += qms
 			if !ok {
@@ -2592,7 +2686,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				failed++
 				if why == "locked" {
 					lockedSkips++
-					if _, left, _ := at.cd.locked(at.mod); left > gateLeft {
+					if _, left, _ := at.cd.locked(at.mod, at.group); left > gateLeft {
 						gateLeft = left
 					}
 				}
@@ -2620,8 +2714,9 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				moveOn := true
 				switch at.up.classify(resp.StatusCode, b) {
 				case classQuota:
-					// 额度限制: 锁整个上游 (额度是 key 级共享的) 10min, 排队的请求随之迁移。
-					a.addLock(at.cd, lockAll, "quota", gate.quotaLock())
+					// 额度限制: 只锁该模型所属的额度组 10min (额度按组共享), 组内排队的
+					// 请求随之迁移; 同家别的组照常发送。
+					a.addLockGroup(at.cd, at.group, "quota", gate.quotaLock())
 				case classConcurrency:
 					// 并发限制: 锁掉超发试探 1h (设计 §5.5.2)。试探撞上就锁完直接换下一个
 					// 候选; 普通请求锁完后本笔按普通错误走 —— 退避后重试同一候选
@@ -3021,6 +3116,38 @@ func loadConfigOpt(path string, lenient bool) (*Config, error) {
 	}
 	if c.LogPath == "" {
 		c.LogPath = "var/requests.jsonl"
+	}
+	// 额度组: 同一上游里模型 id 唯一; 声明了 models 的上游, 别名引用的模型必须在表内
+	// (没列出的模型属于哪个组无从谈起, 早报错好过静默落进默认组)。
+	declared := map[string]map[string]bool{}
+	for i := range c.Upstreams {
+		u := &c.Upstreams[i]
+		ids := make(map[string]bool, len(u.Models))
+		for j := range u.Models {
+			m := &u.Models[j]
+			m.ID = strings.TrimSpace(m.ID)
+			m.BillingGroup = strings.TrimSpace(m.BillingGroup)
+			if m.ID == "" {
+				return nil, fmt.Errorf("upstream %s: model entry without id", u.ID)
+			}
+			if ids[m.ID] {
+				return nil, fmt.Errorf("upstream %s: duplicate model %s", u.ID, m.ID)
+			}
+			ids[m.ID] = true
+		}
+		declared[u.ID] = ids
+	}
+	for name, list := range c.Aliases {
+		for _, pair := range list {
+			ids := declared[pair[0]]
+			if len(ids) == 0 {
+				continue // 未知上游运行期本来就跳过; 不写 models 的上游不做这项校验
+			}
+			if !ids[pair[1]] {
+				return nil, fmt.Errorf("alias %s: model %s is not declared by upstream %s",
+					name, pair[1], pair[0])
+			}
+		}
 	}
 	// key_env: 配置只存环境变量名, 真 key 启动/热加载时从环境取, 不落盘。
 	for i := range c.Upstreams {

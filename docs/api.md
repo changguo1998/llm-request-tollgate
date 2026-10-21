@@ -104,9 +104,9 @@ key):
   试, 原样透传.
 - 全部候选失败: 保留最近一次错误 (状态码 / 头 / 体) 原样透传; 如果请求根本没发出去
   (被锁 / 排队超时 / 信号量超时), 就合成 429 说明原因 (见 5.2).
-- 锁的粒度: 额度锁整个上游 (`quota_lock_ms`, 缺省 10min, 额度是 key 级共享的); 熔断
-  只锁出错的 `上游/模型` (`breaker_lock_ms`, 缺省 5min), 同家别的模型照常发送. 锁与
-  退避落盘到日志同目录 `gate-state.json`, 重启仍生效.
+- 锁的粒度: 额度锁该模型所属的记账组 (`quota_lock_ms`, 缺省 10min, 额度按组共享,
+  一个上游可以有多组); 熔断只锁出错的 `上游/模型` (`breaker_lock_ms`, 缺省 5min),
+  同家别的模型照常发送. 锁与退避落盘到日志同目录 `gate-state.json`, 重启仍生效.
 
 ## 5. 代理合成的错误
 
@@ -174,7 +174,8 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 - 查询参数 `since`: 只要序号大于它的新增事件, 返回里同时给 `max_seq`, 下次轮询带上.
 - 载荷: `ver` (观测面版本), `listen`, `now`, `active` (进行中请求数组), `cands`
   (每上游一条: 队列长 / 在飞 / 并发上限 / 是否在试探 / 连续错误数 / 退避剩余 / 锁剩余
-  / 锁原因 / 模型级熔断锁 / 距下次节拍), `events` (事件数组), `max_seq`, `slow_ms`.
+  / 锁原因 / 各记账组的额度锁 (`groups`: 组名 + 锁剩余, 按配置顺序) / 模型级熔断锁
+  / 距下次节拍), `events` (事件数组), `max_seq`, `slow_ms`.
 - 事件 `kind`: `start` / `lock` / `unlock` / `fallback` / `gate` / `error` / `slow` /
   `ok` / `reload`.
 - 其余方法返回 405.

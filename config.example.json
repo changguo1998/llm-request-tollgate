@@ -13,7 +13,11 @@
     "concurrency_lock_ms": 3600000,
     "quota_lock_ms": 600000,
     "breaker_lock_ms": 300000,
-    "retry_backoff_ms": [10000, 20000, 30000]
+    "retry_backoff_ms": [
+      10000,
+      20000,
+      30000
+    ]
   },
   "probe": {
     "enabled": false,
@@ -34,7 +38,17 @@
       "auth_header": "Authorization",
       "key_env": "USTC_API_KEY",
       "headers": {},
-      "include_usage": true
+      "include_usage": true,
+      "models": [
+        {
+          "id": "deepseek-v4.1-flash",
+          "billing_group": "deepseek"
+        },
+        {
+          "id": "qwen2.5-chat",
+          "billing_group": "qwen"
+        }
+      ]
     },
     {
       "id": "group",
@@ -42,18 +56,40 @@
       "auth_header": "Authorization",
       "key_env": "GROUP_API_KEY",
       "headers": {},
-      "include_usage": true
+      "include_usage": true,
+      "models": [
+        {
+          "id": "deepseek-v4.1-flash",
+          "billing_group": "deepseek"
+        },
+        {
+          "id": "glm-5-lite",
+          "billing_group": "glm"
+        }
+      ]
     }
   ],
   "aliases": {
     "deepseek-v4.1-flash": [
       [
-        "ustc",
+        "group",
         "deepseek-v4.1-flash"
       ],
       [
-        "group",
+        "ustc",
         "deepseek-v4.1-flash"
+      ]
+    ],
+    "glm-5-lite": [
+      [
+        "group",
+        "glm-5-lite"
+      ]
+    ],
+    "qwen2.5-chat": [
+      [
+        "ustc",
+        "qwen2.5-chat"
       ]
     ]
   }

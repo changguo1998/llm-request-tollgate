@@ -233,8 +233,8 @@ func TestProxyBusyReturnsSynthetic429(t *testing.T) {
 	}
 }
 
-// TestProxyQuotaRuleLocksCandidate 覆盖额度限制: 命中规则的上游被锁 10min, 后续请求
-// 不再真发 (整条候选链试完给 429)。
+// TestProxyQuotaRuleLocksCandidate 覆盖额度限制: 命中规则后该模型所属的额度组被锁
+// 10min, 后续请求不再真发 (整条候选链试完给 429)。
 func TestProxyQuotaRuleLocksCandidate(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0
@@ -252,14 +252,14 @@ func TestProxyQuotaRuleLocksCandidate(t *testing.T) {
 	defer proxy.Close()
 	url := proxy.URL + "/v1/chat/completions"
 
-	// 第一笔真发出去: 429 与上游 body 原样透传, 同时该候选被锁。
+	// 第一笔真发出去: 429 与上游 body 原样透传, 同时该模型所属的组被锁。
 	status, body := postJSON(t, url, `{"model":"m1","messages":[]}`)
 	if status != http.StatusTooManyRequests || !strings.Contains(string(body), "insufficient balance") {
 		t.Fatalf("上游 429 应原样透传, 实为 %d %s", status, body)
 	}
-	locked, _, reason := app.cands["u1"].locked("real-1")
+	locked, _, reason := app.cands["u1"].locked("real-1", "")
 	if !locked || reason != "quota" {
-		t.Fatalf("命中额度规则后该上游应被锁: locked=%v reason=%s", locked, reason)
+		t.Fatalf("命中额度规则后该组应被锁: locked=%v reason=%s", locked, reason)
 	}
 
 	// 第二笔不再真发: 候选全被锁 → 429 说明是锁而不是上游错误。
@@ -272,6 +272,65 @@ func TestProxyQuotaRuleLocksCandidate(t *testing.T) {
 	mu.Unlock()
 	if n != 1 {
 		t.Fatalf("锁内不该真发, 上游被调用 %d 次", n)
+	}
+}
+
+// TestProxyQuotaLockStaysInGroup 覆盖记账组: 同一上游两个组, 一组命中额度锁后同家
+// 另一个组照常真发 (额度锁不锁整个上游)。
+func TestProxyQuotaLockStaysInGroup(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), `"real-1"`) {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"error":{"message":"insufficient balance"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"model":"real-2","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	defer up.Close()
+	rules := &ErrRules{Quota: []ErrRule{{Status: []int{429}, Contains: []string{"insufficient balance"}}}}
+	app := newTestAppCfg(t, &Config{
+		Gate: GateCfg{IntervalMs: 5, SemWaitMs: 500, QueueWaitMs: 500},
+		Upstreams: []UpstreamCfg{{
+			ID: "u1", BaseURL: up.URL, AuthHeader: "Authorization", Key: "k",
+			IncludeUsage: true, Errors: rules,
+			Models: []ModelCfg{
+				{ID: "real-1", BillingGroup: "g1"},
+				{ID: "real-2", BillingGroup: "g2"},
+			},
+		}},
+		Aliases: map[string][][2]string{
+			"m1": {{"u1", "real-1"}},
+			"m2": {{"u1", "real-2"}},
+		},
+	})
+	proxy := httptest.NewServer(app)
+	defer proxy.Close()
+
+	// 候选应解析到各自声明的组。
+	if got := app.aliases["m1"][0].Group; got != "g1" {
+		t.Fatalf("m1 的候选应属于 g1, 实为 %q", got)
+	}
+	if got := app.aliases["m2"][0].Group; got != "g2" {
+		t.Fatalf("m2 的候选应属于 g2, 实为 %q", got)
+	}
+
+	// m1 命中额度: g1 被锁, 这一笔仍把上游 429 透传回去。
+	status, body := postJSON(t, proxy.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("m1 应透传上游 429, 实为 %d %s", status, body)
+	}
+	if locked, _, reason := app.cands["u1"].locked("real-1", "g1"); !locked || reason != "quota" {
+		t.Fatalf("g1 应被锁: locked=%v reason=%s", locked, reason)
+	}
+	if locked, _, _ := app.cands["u1"].locked("real-2", "g2"); locked {
+		t.Fatal("g1 的额度锁不该管住同家另一个组")
+	}
+
+	// m2 属于 g2: 照常真发, 200。
+	status, body = postJSON(t, proxy.URL+"/v1/chat/completions", `{"model":"m2","messages":[]}`)
+	if status != http.StatusOK {
+		t.Fatalf("同家另一个组应照常发送, 实为 %d %s", status, body)
 	}
 }
 
@@ -306,7 +365,7 @@ func TestProxyBreakerAfterRepeatedFailures(t *testing.T) {
 	app.mu.RLock()
 	streak := app.cands["u1"].gate("real-1").fails
 	app.mu.RUnlock()
-	locked, _, reason := app.cands["u1"].locked("real-1")
+	locked, _, reason := app.cands["u1"].locked("real-1", "")
 	if !locked || reason != "breaker" {
 		t.Fatalf("连续 4 次失败后应熔断: locked=%v reason=%s calls=%d streak=%d", locked, reason, n, streak)
 	}
@@ -504,10 +563,10 @@ func TestProxyBreakerIsPerModel(t *testing.T) {
 	if status, body := postJSON(t, url, `{"model":"m1","messages":[]}`); status != http.StatusInternalServerError {
 		t.Fatalf("应透传上游 500, 实为 %d %s", status, body)
 	}
-	if locked, _, reason := app.cands["u1"].locked("bad-1"); !locked || reason != "breaker" {
+	if locked, _, reason := app.cands["u1"].locked("bad-1", ""); !locked || reason != "breaker" {
 		t.Fatalf("bad-1 连错 4 次后该熔断: locked=%v reason=%s", locked, reason)
 	}
-	if locked, _, _ := app.cands["u1"].locked("good-1"); locked {
+	if locked, _, _ := app.cands["u1"].locked("good-1", ""); locked {
 		t.Fatal("同家另一个模型不该被锁")
 	}
 
@@ -578,5 +637,51 @@ func TestProxyModelQueueDoesNotBlockSiblings(t *testing.T) {
 	}
 	if el > 150*time.Millisecond {
 		t.Fatalf("健康模型不该为别家的退避多等, 实耗 %s", el)
+	}
+}
+
+// TestLoadConfigValidatesGroups 核对记账组的配置校验: 同一上游重复的模型 id 与别名
+// 引用未声明模型都报错; 不写 models 的旧配置照常加载 (全部归默认组)。
+func TestLoadConfigValidatesGroups(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	dup := `{
+	  "upstreams": [{"id": "u1", "base_url": "http://x", "models": [
+	    {"id": "a", "billing_group": "g1"},
+	    {"id": "a", "billing_group": "g2"}
+	  ]}],
+	  "aliases": {"m1": [["u1", "a"]]}
+	}`
+	if _, err := loadConfig(write("dup.json", dup)); err == nil {
+		t.Fatal("同一上游重复的模型 id 应报错")
+	}
+
+	undeclared := `{
+	  "upstreams": [{"id": "u1", "base_url": "http://x", "models": [{"id": "a"}]}],
+	  "aliases": {"m1": [["u1", "b"]]}
+	}`
+	if _, err := loadConfig(write("undeclared.json", undeclared)); err == nil {
+		t.Fatal("别名引用未声明的模型应报错")
+	}
+
+	// 旧配置: 不写 models 就不做这项校验, 模型归默认组。
+	legacy := `{
+	  "upstreams": [{"id": "u1", "base_url": "http://x"}],
+	  "aliases": {"m1": [["u1", "anything"]]}
+	}`
+	cfg, err := loadConfig(write("legacy.json", legacy))
+	if err != nil {
+		t.Fatalf("不写 models 的旧配置应照常加载: %v", err)
+	}
+	if len(cfg.Upstreams[0].Models) != 0 {
+		t.Fatalf("旧配置不该凭空多出 models: %+v", cfg.Upstreams[0].Models)
 	}
 }

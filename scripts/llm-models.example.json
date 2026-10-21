@@ -8,10 +8,12 @@
         {
           "id": "deepseek-v4.1-flash",
           "tollgate_group": "deepseek-v4.1-flash",
+          "tollgate_billing": "deepseek",
           "tollgate_priority": 10
         },
         {
           "id": "qwen2.5-chat",
+          "tollgate_billing": "qwen",
           "tollgate_priority": 0
         }
       ]
@@ -24,10 +26,12 @@
         {
           "id": "deepseek-v4.1-flash",
           "tollgate_group": "deepseek-v4.1-flash",
+          "tollgate_billing": "deepseek",
           "tollgate_priority": 20
         },
         {
           "id": "glm-5-lite",
+          "tollgate_billing": "glm",
           "tollgate_priority": 0
         }
       ]
