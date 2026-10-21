@@ -515,7 +515,7 @@ EOF
         -d '{"model":"only","messages":[{"role":"user","content":"hi"}]}')
     [ "$code" = "429" ] && pass "唯一候选 429 原样透传" || fail "429 透传 -> $code"
     [ "$(cat "$TMP/rot-count.txt")" = "4" ] && pass "退避重试到第 4 次后熔断 (计数 4)" || fail "计数=$(cat "$TMP/rot-count.txt")"
-    jq -e '.locks.limited.reason == "breaker"' "$D/gate-state.json" > /dev/null 2>&1 &&
+    jq -e '.locks["limited/deepseek-v4.1-flash"].reason == "breaker"' "$D/gate-state.json" > /dev/null 2>&1 &&
         pass "熔断锁落盘 (gate-state.json)" || fail "熔断锁未落盘"
 }
 
