@@ -155,10 +155,12 @@ mv llm-request-tollgate.bak llm-request-tollgate && ./deploy/tollgate.sh restart
 - 代理对外模型列表继承候选的 `thinkingLevelMap` (取交集) 与最小的 `contextWindow` /
   `maxTokens`; 缺等级表时 agent 汇报 `UNSUPPORTED_REASONING_EFFORT` 拒发.
 - `key_env` 取 store 里 `apiKey` 的占位符名; `auth_header` 等从现有配置继承.
-- `--dry-run` 只打印; `--providers` 改上游与优先级.
-- 手工加的真上游 (如官方直连 `deepseek`) 不在 fff store 里, 重生成时 `upstreams` 会被重写
-  (`build_upstreams` 只认 store 里的 provider), 这条上游会丢; 要先在 store 里补 provider, 或
-  重生成后手工补回.
+- `--dry-run` 只打印; `--providers` 改上游与优先级. 不传时缺省是 store 里除 `tollgate`
+  (代理自身) 与 `arkap` 外的全部 provider; arkap 要带就显式写进 `--providers`.
+- 额度组取模型的 `tollgate_billing`, 生成到上游的 `models` (字段 `billing_group`); 同家同名
+  一组, 不写归默认组, 整家都没写时不输出 `models`.
+- 不在 store 里的手加上游在重生成时会丢 (`build_upstreams` 只认 store 里的 provider);
+  要先在 store 里补 provider, 或重生成后手工补回.
 
 ```bash
 # 本机版 (dotfiles 维护, 依赖本机 fff store):
