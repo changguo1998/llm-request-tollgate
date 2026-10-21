@@ -60,7 +60,10 @@ func TestViewFlowAndEvents(t *testing.T) {
 func TestCandViewSnapshot(t *testing.T) {
 	a, err := newApp(&Config{
 		Listen: "127.0.0.1:0", LogPath: filepath.Join(t.TempDir(), "req.jsonl"),
-		Upstreams: []UpstreamCfg{{ID: "up1", BaseURL: "http://127.0.0.1:1/v1"}},
+		Upstreams: []UpstreamCfg{{
+			ID: "up1", BaseURL: "http://127.0.0.1:1/v1",
+			Models: []ModelCfg{{ID: "real-m1", BillingGroup: "g1"}, {ID: "real-m2", BillingGroup: "g2"}},
+		}},
 	})
 	if err != nil {
 		t.Fatalf("newApp: %v", err)
@@ -74,7 +77,7 @@ func TestCandViewSnapshot(t *testing.T) {
 	if c == nil {
 		t.Fatal("上游没有调度器")
 	}
-	c.lock(lockAll, "quota", 10*time.Minute)
+	c.lockGroup("g1", "quota", 10*time.Minute)
 	c.mu.Lock()
 	c.inFlight, c.softCap = 2, 3
 	// 两层队列各放一笔: 观测面的 Queue 是两段之和。
@@ -91,7 +94,12 @@ func TestCandViewSnapshot(t *testing.T) {
 		t.Errorf("候选计数不对: %+v", v)
 	}
 	if v.LockMs <= 0 || v.LockWhy != "quota" {
-		t.Errorf("整家锁没被看到: %+v", v)
+		t.Errorf("组额度锁没被看到: %+v", v)
+	}
+	// 记账组快照: 配置声明的组都列出来, 有锁的带剩余, 没锁的是 0。
+	if len(v.Groups) != 2 || v.Groups[0].Name != "g1" || v.Groups[0].LockMs <= 0 ||
+		v.Groups[1].Name != "g2" || v.Groups[1].LockMs != 0 {
+		t.Errorf("记账组快照不对: %+v", v.Groups)
 	}
 	// 模型视角: 只列进过队列的 上游/模型 (real-m1), 配置里没用过的 (real-m2) 不出现;
 	// 队列 / 退避 / 熔断锁 / 失败数各就各位。
@@ -100,7 +108,7 @@ func TestCandViewSnapshot(t *testing.T) {
 	g.fails = 2
 	g.pausedUntil = time.Now().Add(20 * time.Second)
 	c.mu.Unlock()
-	c.lock("real-m1", "breaker", 5*time.Minute)
+	c.lockModel("real-m1", "breaker", 5*time.Minute)
 
 	v = a.candViews()[0]
 	byModel := map[string]candModelLock{}
@@ -206,3 +214,37 @@ func TestTUIPollLogAcrossArchive(t *testing.T) {
 }
 
 func itoa(n int) string { return itoa64(int64(n)) }
+
+// 每个上游一种专属色: 互不重复, 且不用红 / 黄 / 绿 (状态色)。
+func TestUpstreamColors(t *testing.T) {
+	m := newTUIModel("cfg")
+	m.pulse.Cands = []candView{{ID: "a"}, {ID: "b"}, {ID: "c"}, {ID: "d"}}
+	_ = m.draw()
+	seen := map[string]bool{}
+	for _, id := range []string{"a", "b", "c", "d"} {
+		c := m.upColors[id]
+		if c == "" {
+			t.Fatalf("上游 %s 没分到颜色", id)
+		}
+		if c == tuiRed || c == tuiYell || c == tuiGreen {
+			t.Errorf("上游 %s 用了状态色 %q", id, c)
+		}
+		if seen[c] {
+			t.Errorf("上游 %s 的颜色与别人重复", id)
+		}
+		seen[c] = true
+	}
+}
+
+// 上游名在表格里带上它的专属色 (模型部分不上色)。
+func TestUpstreamNameColored(t *testing.T) {
+	openTestPTY(t, 24, 120)
+	m := newTUIModel("cfg")
+	m.tab = tabModels
+	m.pulse.Cands = []candView{{ID: "ustc", SoftCap: 1, Groups: []candGroup{{Name: ""}}}}
+	raw := m.draw()
+	want := m.upColors["ustc"] + "ustc" + tuiReset
+	if !strings.Contains(raw, want) {
+		t.Errorf("上游名没带专属色 %q", want)
+	}
+}

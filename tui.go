@@ -229,6 +229,13 @@ const (
 	tuiYell  = "\x1b[33m"
 )
 
+// upPalette 是上游的专属色: 红 / 黄 / 绿留给状态色, 这里只用青 / 品红 / 蓝系
+// (含亮色变体), 按上游在 models 页的固定顺序轮流分配, 各页同色。
+var upPalette = []string{
+	"\x1b[36m", "\x1b[35m", "\x1b[34m",
+	"\x1b[96m", "\x1b[95m", "\x1b[94m",
+}
+
 // 颜色标准 (全 TUI 一套, 新增画面前先对照这张表):
 //
 //	绿   = 健康 (live / ok / 解锁 / 错误数 0)
@@ -254,6 +261,11 @@ func colorCount(n int) string {
 // tuiIndent 是所有行的左边界缩进: 标题、状态、页签、表格与键位提示都从同一列
 // 起, 各行不再参差不齐。
 const tuiIndent = "  "
+
+// tuiColGap 是表格列与列之间留几格 (所有表统一); tuiColSep 是对应的分隔串。
+const tuiColGap = 1
+
+var tuiColSep = strings.Repeat(" ", tuiColGap)
 
 // tuiBuckets 是"每分钟请求数"曲线的分钟数; tuiBlocks 是它的 9 档灰度。
 // tuiWindow 是默认回看窗口: 聚合只算这么久以内的日志 (与 -summary 的窗口口径一致)。
@@ -317,8 +329,9 @@ type tuiModel struct {
 	cols      int
 	rows      int
 	refreshed time.Time // 上次重读日志/取观测的时刻 (按键连发时别每次都重读)
-	pageTotal int       // active / models 页的总行数 (整页滚动用)
+	pageTotal int       // active / models 页的总行数 (滚动用)
 	pageTop   int       // 该页当前窗口的第一行
+	pageWin   int       // 该页当前窗口的数据行数 (提示行里的 a-b 按它算)
 
 	prio     *tuiEditor   // settings 页 (调度参数 + 权重编辑), runTUI 里装载
 	reloadFn func() error // 同进程模式的热加载回调; 空 = 走 deploy/tollgate.sh hup
@@ -326,6 +339,9 @@ type tuiModel struct {
 	// models 页上游表的排序键 (provider 优先级), 按 store / 配置的 mtime 失效。
 	provRank    map[string][2]int
 	provRankMod [2]time.Time
+
+	// 上游专属色 (每帧按 models 页顺序重算), 各页的 上游/模型 单元格共用。
+	upColors map[string]string
 }
 
 // errf 记下最近一次取数失败 (可能来自别的 goroutine, 加锁)。
@@ -628,6 +644,11 @@ func (m *tuiModel) draw() string {
 	}
 	c := &tuiCanvas{cols: m.cols}
 	// 版式: 标题 / 状态 / 页签 / 内容 / ... / 键位 (贴底); 上游状态只在 models 页里看。
+	// 上游专属色: 按 models 页的固定顺序分配, 各页同色; 红黄绿留给状态。
+	m.upColors = make(map[string]string, len(m.pulse.Cands))
+	for i, cand := range m.sortedCands() {
+		m.upColors[cand.ID] = upPalette[i%len(upPalette)]
+	}
 	m.drawHeader(c)
 	m.drawTabs(c)
 	body := m.bodyRows()
@@ -707,8 +728,12 @@ func (m *tuiModel) hint() string {
 		// 窗口信息放最前: 键位行本来就长, 放尾巴会被窄终端截掉。
 		base += "   ("
 		if m.pageTotal > 0 {
+			win := m.pageWin
+			if win <= 0 {
+				win = m.bodyRows()
+			}
 			base += "行 " + strconv.Itoa(m.pageTop+1) + "-" +
-				strconv.Itoa(min(m.pageTop+m.bodyRows(), m.pageTotal)) + "/" + strconv.Itoa(m.pageTotal) + ", "
+				strconv.Itoa(min(m.pageTop+win, m.pageTotal)) + "/" + strconv.Itoa(m.pageTotal) + ", "
 		}
 		base += "窗口 " + durStr(m.window) + ")"
 	default:
@@ -789,11 +814,11 @@ func tableHead(cols []tuiCol, vis []bool) string {
 	for i, col := range cols {
 		head[i] = tuiTrunc(col.title, col.w)
 	}
-	return tuiIndent + tuiBold + strings.Join(alignRow(cols, head, vis), "  ") + tuiReset
+	return tuiIndent + tuiBold + strings.Join(alignRow(cols, head, vis), tuiColSep) + tuiReset
 }
 
 // drawTable 画一张表: 标题行 + 表头 + 行 + 滚动位置 + 单位行 (标题与单位是灰字, 空表也画)。
-func drawTable(c *tuiCanvas, title string, cols []tuiCol, rows [][]string, scroll, limit int, units string) {
+func drawTable(c *tuiCanvas, title string, cols []tuiCol, rows [][]string, scroll, limit int) {
 	cols, vis := tableLayout(cols, rows, c.cols)
 	if title != "" {
 		c.line(tuiDim + tuiIndent + title + tuiReset)
@@ -801,9 +826,6 @@ func drawTable(c *tuiCanvas, title string, cols []tuiCol, rows [][]string, scrol
 	c.line(tableHead(cols, vis))
 	if len(rows) == 0 {
 		c.line(tuiDim + "  (空)" + tuiReset)
-		if units != "" {
-			c.line(tuiDim + tuiIndent + units + tuiReset)
-		}
 		return
 	}
 	top := clampScroll(scroll, len(rows), limit)
@@ -815,10 +837,7 @@ func drawTable(c *tuiCanvas, title string, cols []tuiCol, rows [][]string, scrol
 			strconv.Itoa(top+1) + "-" + strconv.Itoa(end) + tuiReset)
 	}
 	for i := top; i < end; i++ {
-		c.line(tuiIndent + strings.Join(alignRow(cols, rows[i], vis), "  "))
-	}
-	if units != "" {
-		c.line(tuiDim + tuiIndent + units + tuiReset)
+		c.line(tuiIndent + strings.Join(alignRow(cols, rows[i], vis), tuiColSep))
 	}
 }
 
@@ -849,11 +868,11 @@ func fitCols(cols []tuiCol, width int) []bool {
 			if !vis[i] {
 				continue
 			}
-			n += col.w + 2
+			n += col.w + tuiColGap
 			shown++
 		}
 		if shown > 1 {
-			n -= 2
+			n -= tuiColGap
 		}
 		return n
 	}
@@ -870,12 +889,12 @@ func fitCols(cols []tuiCol, width int) []bool {
 	return vis
 }
 
-// tableWidth 是一行表格的显示宽度: 缩进 + 各列列宽 + 列间距 (两空格)。
+// tableWidth 是一行表格的显示宽度: 缩进 + 各列列宽 + 列间距 (tuiColGap)。
 func tableWidth(cols []tuiCol) int {
 	n := len(tuiIndent)
 	for i, col := range cols {
 		if i > 0 {
-			n += 2
+			n += tuiColGap
 		}
 		n += col.w
 	}
@@ -963,7 +982,7 @@ func alignRow(cols []tuiCol, cells []string, vis []bool) []string {
 // 更宽时按内容涨, 顶到终端右边界为止。上游与真实模型合成一格, 写法 "上游/模型"
 // (与 -usage 的 key 一致, 如 ustc/gpt-5-codex)。
 var activeCols = []tuiCol{
-	{"编号", 4, true, true, 1}, {"已耗时", 6, true, true, 0}, {"逻辑名", 10, true, false, 0},
+	{"编号", 4, true, true, 1}, {"耗时", 6, true, true, 0}, {"逻辑名", 10, true, false, 0},
 	{"上游/模型", 18, true, false, 0}, {"流式", 4, false, false, 2},
 	{"状态", 10, true, false, 0}, {"来源", 8, true, false, 1}, {"路径", 12, true, false, 3},
 }
@@ -995,7 +1014,7 @@ func stageIn(st int, list []int) bool {
 }
 
 // flowCells 是一笔活动连接的表格行 (列与旧版一致: 时间、逻辑名、上游/模型…) 。
-func flowCells(f flow) []string {
+func (m *tuiModel) flowCells(f flow) []string {
 	tag := "否"
 	if f.Stream {
 		tag = "是"
@@ -1004,7 +1023,7 @@ func flowCells(f flow) []string {
 		strconv.FormatUint(f.ID, 10),
 		durStr(time.Since(f.StartTime)),
 		f.Logical,
-		upModel(f.Up, f.Model),
+		m.upModel(f.Up, f.Model),
 		tag,
 		stageName(f),
 		f.Source,
@@ -1012,12 +1031,9 @@ func flowCells(f flow) []string {
 	}
 }
 
-// flowUnits 是第 1 页表底下那句单位说明 (整页只画一次, 放在末块之后)。
-const flowUnits = "单位: 已耗时 = 12s / 02:03 / 01:02:03"
-
-// drawFlow 是第 1 页: 活动连接按流程阶段分块, 整页一起滚动。
-// 列名与单位整页各只画一次 (列名在页首, 单位在末块之后), 块与块之间只隔一行空行;
-// 每块的数据行区至少留 minRows 行 (见 flowBlocks), 空块也照留, 于是各块位置固定。
+// drawFlow 是第 1 页: 活动连接按流程阶段分块。列名固定在页签下方, 不随内容滚走;
+// 分块内容单独滚动 (up/down 只动分块), 块与块之间只隔一行空行; 每块的数据行区至少留
+// minRows 行 (见 flowBlocks), 空块也照留, 于是各块位置固定。
 // 列按全部请求一起算: 表头只有一份, 各块必须同列同宽。
 func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 	grouped := make([][][]string, len(flowBlocks))
@@ -1025,21 +1041,29 @@ func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 	for i, b := range flowBlocks {
 		for _, f := range m.pulse.Active {
 			if stageIn(f.Stage, b.stages) {
-				grouped[i] = append(grouped[i], flowCells(f))
+				grouped[i] = append(grouped[i], m.flowCells(f))
 			}
 		}
 		all = append(all, grouped[i]...)
 	}
 	// 整列都空的列 (这批请求都没有来源 / 路径) 一起丢掉, 各块才能对齐。
 	keep := colKeep(activeCols, all)
+	if len(all) == 0 {
+		// 没有进行中的请求时不能按"整列为空"收列: 那样列名也会一起消失。
+		// 列名是一直要显示的, 空表照常画全部列 (窄屏再由 fitCols 按档位丢)。
+		for i := range keep {
+			keep[i] = true
+		}
+	}
 	// 行也按同一份 keep 对齐 (pickRows): 列丢过之后下标已重排, 再拿原始行
 	// 给 autoCols 算内容宽会读错 cell, 后面的列停在基准宽, 内容被提前截断。
 	picked := pickRows(keep, all)
 	cols, vis := tableLayout(pickCols(activeCols, keep), picked, c.cols)
 
+	// 列名画在固定区 (页签下方空一行), 分块画在可滚动区。
+	c.line("") // 表头上一行空着, 不顶在页签下面
+	c.line(tableHead(cols, vis))
 	full := &tuiCanvas{cols: c.cols}
-	full.line("") // 表头上一行空着, 不顶在页签下面
-	full.line(tableHead(cols, vis))
 	for i, b := range flowBlocks {
 		if i > 0 {
 			full.line("") // 每块之间空一行
@@ -1047,14 +1071,13 @@ func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 		rows := pickRows(keep, grouped[i])
 		full.line(tuiDim + tuiIndent + b.title + " (" + strconv.Itoa(len(rows)) + ")" + tuiReset)
 		for _, r := range rows {
-			full.line(tuiIndent + strings.Join(alignRow(cols, r, vis), "  "))
+			full.line(tuiIndent + strings.Join(alignRow(cols, r, vis), tuiColSep))
 		}
 		for n := len(rows); n < b.minRows; n++ {
 			full.line("") // 不满 minRows 就补空行, 撑住这一块的高度
 		}
 	}
-	full.line(tuiDim + tuiIndent + flowUnits + tuiReset)
-	m.drawWindow(c, full, body)
+	m.drawWindow(c, full, max(1, body-2))
 }
 
 // colKeep 标出哪些列在 rows 里至少有一个非空值 (整列都空的列画出来只是空白)。
@@ -1104,13 +1127,13 @@ func dropEmptyCols(cols []tuiCol, rows [][]string) ([]tuiCol, [][]string) {
 	return pickCols(cols, keep), pickRows(keep, rows)
 }
 
-// drawWindow 把整页画布按滚动位置裁一屏贴到 c (第 1 / 2 页共用)。
-// 表头会跟着内容一起滚走, 所以当前窗口写在键位提示行里 (本页 N 行, 当前 a-b)。
+// drawWindow 把画布按滚动位置裁一屏贴到 c (第 1 / 2 页共用)。第 1 页只把分块传进来
+// (列名已经画在固定区), 第 2 页整页滚 (表头跟着走); 当前窗口写在键位提示行里。
 func (m *tuiModel) drawWindow(c *tuiCanvas, full *tuiCanvas, body int) {
 	lines := full.splitLines()
 	m.pageTotal = len(lines)
 	top := m.scrollWindow(len(lines), body)
-	m.pageTop = top
+	m.pageTop, m.pageWin = top, body
 	for _, ln := range lines[top:min(top+body, len(lines))] {
 		c.raw(ln)
 	}
@@ -1158,38 +1181,82 @@ func (m *tuiModel) provRanks() map[string][2]int {
 	return m.provRank
 }
 
-// drawModels 是第 2 页: 先上游状态 (并发 / 锁 / 出队), 再列有过请求的 上游/模型 队列,
-// 最下面是路由聚合。整页一起滚动。只出现实际上游/模型, 不按逻辑名或配置候选铺开。
+// namedGroupCount 数一行里有名记账组的个数 (默认组不算, 它固定在「记账」列)。
+func namedGroupCount(groups []candGroup) int {
+	n := 0
+	for _, g := range groups {
+		if g.Name != defaultGroup {
+			n++
+		}
+	}
+	return n
+}
+
+// groupCell 画一个记账组: 未锁 = 绿色组名 (默认组写 -), 锁内 = 红色倒计时。
+func groupCell(g candGroup, isDefault bool) string {
+	if g.LockMs > 0 {
+		return colorDur(g.LockMs, tuiRed)
+	}
+	if isDefault {
+		return "-"
+	}
+	return tuiGreen + g.Name + tuiReset
+}
+
+// drawModels 是第 2 页: 先上游状态 (并发 / 排队 / 错误 / 记账组锁), 再列有过请求的
+// 上游/模型 队列, 最下面是路由聚合。整页一起滚动。只出现实际上游/模型, 不按逻辑名或
+// 配置候选铺开。
 func (m *tuiModel) drawModels(c *tuiCanvas, body int) {
 	full := &tuiCanvas{cols: c.cols}
-	var urows [][]string
-	for _, cand := range m.sortedCands() {
-		probe, conc, quota := "否", "-", "-"
-		if cand.Probing {
-			probe = tuiYell + "是" + tuiReset
+	cands := m.sortedCands()
+	// 记账列: 第一列固定是「记账」(默认组), 后面按各行自己声明的组铺开, 列标题留空;
+	// 列数取各行组数的最大值, 组少的行后面留空。行与行之间互不占位。
+	maxNamed := 0
+	for _, cand := range cands {
+		if n := namedGroupCount(cand.Groups); n > maxNamed {
+			maxNamed = n
 		}
-		if cand.ConcMs > 0 {
-			conc = colorDur(cand.ConcMs, tuiRed) // 锁 = 红
-		}
-		if cand.LockMs > 0 {
-			quota = colorDur(cand.LockMs, tuiRed) // 表头已经写明是额度锁
-		}
-		next := "-"
-		if cand.NextMs > 0 {
-			next = durStr(time.Duration(cand.NextMs) * time.Millisecond)
-		}
-		urows = append(urows, []string{
-			cand.ID,
-			strconv.Itoa(cand.InFlight) + "/" + strconv.Itoa(cand.SoftCap),
-			strconv.Itoa(cand.Queue), probe, conc, quota, next, colorCount(cand.ErrStrk),
-		})
 	}
-	drawTable(full, "上游状态 (并发 / 锁 / 出队)", []tuiCol{
-		{"上游", 10, false, false, 0}, {"进行中/上限", 11, false, true, 1}, {"排队", 4, false, true, 0},
-		{"试探", 4, false, false, 2}, {"并发锁", 8, false, true, 2}, {"额度锁", 14, false, true, 2},
-		{"下次出队", 8, false, true, 3}, {"连续错误", 8, false, true, 3},
-	}, urows, 0, len(urows),
-		"单位: 进行中/上限、排队、连续错误 = 个; 并发锁、额度锁、下次出队 = 12s / 02:03 / 01:02:03")
+	var urows [][]string
+	for _, cand := range cands {
+		conc := strconv.Itoa(cand.InFlight)
+		if cand.Probing {
+			conc += tuiYell + "(+1)" + tuiReset // 试探不占槽位, 单独标出来
+		}
+		conc += "/" + strconv.Itoa(cand.SoftCap)
+		queue := strconv.Itoa(cand.Queue)
+		if cand.Queue > 0 && cand.NextMs > 0 {
+			queue += "[/" + durStr(time.Duration(cand.NextMs)*time.Millisecond) + "]"
+		}
+		var def candGroup
+		var named []candGroup
+		for _, g := range cand.Groups {
+			if g.Name == defaultGroup {
+				def = g
+			} else {
+				named = append(named, g)
+			}
+		}
+		row := []string{m.upName(cand.ID), conc, queue, colorCount(cand.ErrStrk), groupCell(def, true)}
+		for _, g := range named {
+			row = append(row, groupCell(g, false))
+		}
+		for len(row) < 5+maxNamed {
+			row = append(row, "")
+		}
+		urows = append(urows, row)
+	}
+	cols := []tuiCol{
+		{"上游", tuiWidth("上游"), true, false, 4},
+		{"并发", tuiWidth("并发"), true, true, 2},
+		{"排队", tuiWidth("排队"), true, true, 1},
+		{"错误", tuiWidth("错误"), true, true, 2},
+		{"记账", tuiWidth("记账"), true, false, 3},
+	}
+	for i := 0; i < maxNamed; i++ {
+		cols = append(cols, tuiCol{"", 0, true, false, 3})
+	}
+	drawTable(full, "上游状态 (并发 / 排队 / 错误 / 组锁)", cols, urows, 0, len(urows))
 	full.line("") // 两张表之间空一行: 上面是上游状态, 下面是汇总 + 模型队列
 
 	// 合并表: 队列状态 (观测面) + 聚合统计 (日志), 行 = 有过请求的 上游/真实模型。
@@ -1212,7 +1279,7 @@ func (m *tuiModel) drawModels(c *tuiCanvas, body int) {
 		}
 		// 与 modelCols 的顺序一一对应 (dropEmptyCols 按下标裁列)。
 		mrows = append(mrows, []string{
-			upModel(r.up, r.model),
+			m.upModel(r.up, r.model),
 			strconv.Itoa(r.Queue), paused, lock, colorCount(r.Fails),
 			strconv.Itoa(r.Reqs), errs, strconv.Itoa(r.Fallbacks),
 			humanTokens(r.Total), humanTokens(r.Cached), ttfb, tps,
@@ -1220,9 +1287,7 @@ func (m *tuiModel) drawModels(c *tuiCanvas, body int) {
 		})
 	}
 	mcols, mrows := dropEmptyCols(modelCols(), mrows)
-	drawTable(full, "模型队列 + 路由聚合 (上游/真实模型, 按最近一次请求时间降序)", mcols, mrows, 0, len(mrows),
-		"单位: 排队/连续错误/请求/错误/换候选/缓存命中/总 token = 个; "+
-			"退避/熔断锁/首字节 = 12s / 02:03 / 01:02:03; 吞吐 = token/s")
+	drawTable(full, "模型队列 + 路由聚合 (上游/真实模型, 按最近请求降序)", mcols, mrows, 0, len(mrows))
 
 	m.drawWindow(c, full, body)
 }
@@ -1234,11 +1299,11 @@ func modelCols() []tuiCol {
 	return []tuiCol{
 		{"上游/模型", 24, true, false, 4},
 		{"排队", 4, false, true, 0}, {"退避", 8, false, true, 4},
-		{"熔断锁", 8, false, true, 4}, {"连续错误", 8, false, true, 2},
+		{"熔断", 8, false, true, 4}, {"连错", 8, false, true, 2},
 		{"请求", 6, false, true, 0}, {"错误", 4, false, true, 0}, {"换候选", 7, false, true, 1},
-		{"总 token", 9, false, true, 3}, {"缓存命中", 8, false, true, 1},
+		{"token", 9, false, true, 3}, {"缓存", 8, false, true, 1},
 		{"首字节", 8, false, true, 3}, {"吞吐", 7, false, true, 1},
-		{"最近一次", 9, false, true, 2},
+		{"最近", 9, false, true, 2},
 	}
 }
 
@@ -1357,7 +1422,7 @@ func (m *tuiModel) drawEvents(c *tuiCanvas, body int) {
 			e.Ts.Format("15:04:05"),
 			tuiEventTag(e.Kind),
 			e.Logical,
-			upModel(e.Upstream, e.Model),
+			m.upModel(e.Upstream, e.Model),
 			msg,
 		})
 		i += reps
@@ -1365,19 +1430,30 @@ func (m *tuiModel) drawEvents(c *tuiCanvas, body int) {
 	drawTable(c, "事件流 (最新在前)", []tuiCol{
 		{"时间", 8, false, false, 0}, {"类型", 10, false, false, 0}, {"逻辑名", 20, true, false, 1},
 		{"上游/模型", 30, true, false, 2}, {"说明", 60, true, false, 0},
-	}, rows, m.scrollWindow(len(rows), max(1, body-4)), max(1, body-4), "单位: 时间 = hh:mm:ss (时刻)")
+	}, rows, m.scrollWindow(len(rows), max(1, body-4)), max(1, body-4))
+}
+
+// upName 给上游名上它的专属色; 空串原样返回。
+func (m *tuiModel) upName(up string) string {
+	if up == "" {
+		return ""
+	}
+	if c := m.upColors[up]; c != "" {
+		return c + up + tuiReset
+	}
+	return up
 }
 
 // upModel 把上游与真实模型拼成一格 (`上游/模型`, 与活跃连接表和路由表同一写法);
-// 有一边为空时不留那个斜杠。
-func upModel(up, model string) string {
+// 上游部分用专属色, 有一边为空时不留那个斜杠。
+func (m *tuiModel) upModel(up, model string) string {
 	switch {
 	case up == "":
 		return model
 	case model == "":
-		return up
+		return m.upName(up)
 	}
-	return up + "/" + model
+	return m.upName(up) + "/" + model
 }
 
 // sameEvent 判断两条事件能不能折叠成一行 (同类 + 同路由 + 同文案)。
