@@ -202,7 +202,7 @@ func TestAutoColsFillsToBoundary(t *testing.T) {
 func TestActiveTableKeepsAllColsAt120(t *testing.T) {
 	rows := [][]string{{
 		"12345", "1m02s", "claude-3-5-sonnet", "group/claude-sonnet-4-5-20250929",
-		"是", "额度锁 09:12", "claude-code", "/v1/messages",
+		"是", "claude-code", "/v1/messages", "额度锁 09:12",
 	}}
 	cols := autoCols(activeCols, rows, 120)
 	if w := tableWidth(cols); w > 120 {
@@ -309,7 +309,7 @@ func TestTableTitlesAndEventsScroll(t *testing.T) {
 	m.pulse.Cands = []candView{{ID: "ustc", SoftCap: 1}}
 	m.tab = tabActive
 	out := m.draw()
-	for _, title := range []string{"获取信号量", "排队", "等模型窗口", "等首字节", "接收中", "已失败"} {
+	for _, title := range []string{"并发池", "频率队列", "状态锁", "已发送", "接收中", "已失败"} {
 		if !strings.Contains(stripANSI(out), title) {
 			t.Errorf("active 页缺少分块 %q", title)
 		}
@@ -361,8 +361,8 @@ func TestFlowBlocksByStage(t *testing.T) {
 		{ID: 6, Logical: "recv-me", Up: "group", Model: "m3", Stage: stageRecv, StartTime: now},
 	}
 	out := stripANSI(m.draw())
-	for _, s := range []string{"获取信号量 (2)", "排队 (等出队节拍) (1)",
-		"等模型窗口 (退避 / 熔断锁) (1)", "等首字节 (1)", "接收中 (1)", "已失败 (0)"} {
+	for _, s := range []string{"并发池 (2)", "频率队列 (1)",
+		"状态锁 (1)", "已发送 (1)", "接收中 (1)", "已失败 (0)"} {
 		if !strings.Contains(out, s) {
 			t.Errorf("缺少分块 %q", s)
 		}
@@ -373,7 +373,7 @@ func TestFlowBlocksByStage(t *testing.T) {
 		}
 	}
 	// 块序 = 流程顺序。
-	order := []string{"获取信号量", "排队", "等模型窗口", "等首字节", "接收中", "已失败"}
+	order := []string{"并发池", "频率队列", "状态锁", "已发送", "接收中", "已失败"}
 	last := -1
 	for _, s := range order {
 		i := strings.Index(out, s)
@@ -443,7 +443,7 @@ func TestFlowBlockTitleSpacingWithRows(t *testing.T) {
 }
 
 // 第 1 页的版式: 列名整页只画一次 (在页首), 块与块之间空一行; 每块的数据行区正好
-// 留 flowBlocks[i].minRows 行, 空块也照留。表后不再有单位说明行。
+// 留 defaultMinRows[i] 行 (没有历史停留时长时), 空块也照留。表后不再有单位说明行。
 func TestFlowSingleHeaderAndMinRows(t *testing.T) {
 	openTestPTY(t, 60, 160)
 	m := newTUIModel("cfg")
@@ -456,7 +456,7 @@ func TestFlowSingleHeaderAndMinRows(t *testing.T) {
 	if n := strings.Count(out, "上游/模型"); n != 1 {
 		t.Errorf("列名应整页只画一次, 实际 %d 次", n)
 	}
-	if strings.Index(out, "上游/模型") > strings.Index(out, "获取信号量") {
+	if strings.Index(out, "上游/模型") > strings.Index(out, "并发池") {
 		t.Error("列名应排在第一块标题之前 (页首)")
 	}
 	if strings.Contains(out, "单位:") {
@@ -478,13 +478,13 @@ func TestFlowSingleHeaderAndMinRows(t *testing.T) {
 	if headRow == 0 || strings.TrimSpace(lines[headRow-1]) != "" {
 		t.Errorf("列名上一行应是空行, 实际 %q", lines[headRow-1])
 	}
-	// 块间距 = 上一块标题 + 1 + 数据行区 minRows + 空行; 空块也照留, 所以位置固定。
+	// 块间距 = 上一块标题 + 1 + 数据行区 defaultMinRows + 空行; 空块也照留, 所以位置固定。
 	titles := flowTitleRows(t, out)
 	for i := 1; i < len(titles); i++ {
-		want := titles[i-1] + 1 + flowBlocks[i-1].minRows + 1
+		want := titles[i-1] + 1 + defaultMinRows[i-1] + 1
 		if titles[i] != want {
 			t.Errorf("分块 %q 起始行 %d, 应为 %d (上一块 %d 行数据 + 空行)",
-				flowBlocks[i].title, titles[i], want, flowBlocks[i-1].minRows)
+				flowBlocks[i].title, titles[i], want, defaultMinRows[i-1])
 		}
 	}
 }
@@ -529,7 +529,7 @@ func TestFlowHeaderPinned(t *testing.T) {
 	if headRow > 4 {
 		t.Errorf("列名应固定在页签下方, 实际在第 %d 行", headRow+1)
 	}
-	if strings.Contains(out, "获取信号量") {
+	if strings.Contains(out, "并发池") {
 		t.Error("滚动后分块内容应已上移 (第一块不在窗口里)")
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -984,24 +985,63 @@ func alignRow(cols []tuiCol, cells []string, vis []bool) []string {
 var activeCols = []tuiCol{
 	{"编号", 4, true, true, 1}, {"耗时", 6, true, true, 0}, {"逻辑名", 10, true, false, 0},
 	{"上游/模型", 18, true, false, 0}, {"流式", 4, false, false, 2},
-	{"状态", 10, true, false, 0}, {"来源", 8, true, false, 1}, {"路径", 12, true, false, 3},
+	{"来源", 8, true, false, 1}, {"路径", 12, true, false, 3}, {"状态", 10, true, false, 0},
 }
 
 // flowBlocks 是第 1 页的分块: 顺序就是请求在调度器里的流程顺序。
-// 解析与取信号量合成第一块 (解析是瞬时状态, 单独一块只会闪一下)。
-// minRows 是这一块的数据行区至少留几行: 取信号量 / 排队 / 等首字节是盯的重点, 多留几行;
-// 行不够就补空行, 请求换阶段、块空了, 底下的块也不会往上跳。
+// 解析与并发池合成第一块 (解析是瞬时状态, 单独一块只会闪一下)。
+// 各块的数据行区高度按历史停留时长动态分档 (flowMinRows): 停留久的阶段多留几行
+// (内容多、盯的重点), 一闪而过的阶段少留几行; 行不够就补空行, 请求换阶段、块空了,
+// 底下的块也不会往上跳。
 var flowBlocks = []struct {
-	title   string
-	stages  []int
-	minRows int
+	title  string
+	stages []int
 }{
-	{"获取信号量", []int{stageParse, stageSem}, 4},
-	{"排队 (等出队节拍)", []int{stageQueue}, 4},
-	{"等模型窗口 (退避 / 熔断锁)", []int{stageModelWait}, 2},
-	{"等首字节", []int{stageSend}, 4},
-	{"接收中", []int{stageRecv}, 2},
-	{"已失败", []int{stageFailed}, 2},
+	{"并发池", []int{stageParse, stageSem}},
+	{"频率队列", []int{stageQueue}},
+	{"状态锁", []int{stageModelWait}},
+	{"已发送", []int{stageSend}},
+	{"接收中", []int{stageRecv}},
+	{"已失败", []int{stageFailed}},
+}
+
+// defaultMinRows 是各块数据行区的缺省档: 停留时长统计还没数据 (新起的 TUI, 或对端
+// 观测面没有 dwell 字段) 时用这一档。
+var defaultMinRows = []int{4, 4, 2, 4, 2, 2}
+
+// flowMinRows 按各阶段的历史停留时长给每个分块定数据行区高度: 占时越长的阶段行越多
+// (1 至 6 行封顶, 至少 1 行撑版式)。停留时长由服务侧按阶段精确累计 (pulse.Dwell,
+// 比 TUI 轮询采样准: 采样会把一闪而过的阶段也记成约一个采样周期)。
+func (m *tuiModel) flowMinRows() []int {
+	out := append([]int(nil), defaultMinRows...)
+	dwell := m.pulse.Dwell
+	if len(dwell) < stageCount {
+		return out
+	}
+	total := 0.0
+	for _, d := range dwell[:stageCount] {
+		total += float64(d)
+	}
+	if total <= 0 {
+		return out
+	}
+	for i, b := range flowBlocks {
+		sum := 0.0
+		for _, st := range b.stages {
+			if st >= 0 && st < stageCount {
+				sum += float64(dwell[st])
+			}
+		}
+		n := int(math.Round(sum/total*14)) + 1 // 均分 ~3 行, 占大头顶到 6, 极少落回 1
+		if n < 1 {
+			n = 1
+		}
+		if n > 6 {
+			n = 6
+		}
+		out[i] = n
+	}
+	return out
 }
 
 func stageIn(st int, list []int) bool {
@@ -1025,15 +1065,15 @@ func (m *tuiModel) flowCells(f flow) []string {
 		f.Logical,
 		m.upModel(f.Up, f.Model),
 		tag,
-		stageName(f),
 		f.Source,
 		f.Path,
+		stageName(f),
 	}
 }
 
 // drawFlow 是第 1 页: 活动连接按流程阶段分块。列名固定在页签下方, 不随内容滚走;
-// 分块内容单独滚动 (up/down 只动分块), 块与块之间只隔一行空行; 每块的数据行区至少留
-// minRows 行 (见 flowBlocks), 空块也照留, 于是各块位置固定。
+// 分块内容单独滚动 (up/down 只动分块), 块与块之间只隔一行空行; 每块的数据行区高度
+// 按历史停留时长动态定 (flowMinRows), 空块也照留, 于是各块位置相对稳定。
 // 列按全部请求一起算: 表头只有一份, 各块必须同列同宽。
 func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 	grouped := make([][][]string, len(flowBlocks))
@@ -1048,6 +1088,13 @@ func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 	}
 	// 整列都空的列 (这批请求都没有来源 / 路径) 一起丢掉, 各块才能对齐。
 	keep := colKeep(activeCols, all)
+	// 状态列恒保留: 阶段已由块标题说明, 状态列多为细节 (退避 / 熔断锁 / 额度锁), 整列
+	// 同时为空时不能像 来源/路径 那样丢列, 否则列会闪跳、各块对不齐。
+	for i, c := range activeCols {
+		if c.title == "状态" {
+			keep[i] = true
+		}
+	}
 	if len(all) == 0 {
 		// 没有进行中的请求时不能按"整列为空"收列: 那样列名也会一起消失。
 		// 列名是一直要显示的, 空表照常画全部列 (窄屏再由 fitCols 按档位丢)。
@@ -1064,6 +1111,7 @@ func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 	c.line("") // 表头上一行空着, 不顶在页签下面
 	c.line(tableHead(cols, vis))
 	full := &tuiCanvas{cols: c.cols}
+	minRows := m.flowMinRows() // 各块数据行区高度: 按历史停留时长分档
 	for i, b := range flowBlocks {
 		if i > 0 {
 			full.line("") // 每块之间空一行
@@ -1073,8 +1121,8 @@ func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 		for _, r := range rows {
 			full.line(tuiIndent + strings.Join(alignRow(cols, r, vis), tuiColSep))
 		}
-		for n := len(rows); n < b.minRows; n++ {
-			full.line("") // 不满 minRows 就补空行, 撑住这一块的高度
+		for n := len(rows); n < minRows[i]; n++ {
+			full.line("") // 不满就补空行, 撑住这一块的高度
 		}
 	}
 	m.drawWindow(c, full, max(1, body-2))
@@ -1295,15 +1343,17 @@ func (m *tuiModel) drawModels(c *tuiCanvas, body int) {
 // modelCols 是第 2 页合并表的列: 按类别从左到右排, 同类相邻 ——
 // 调度状态 (排队 / 退避 / 熔断锁 / 连续错误), 历史计数 (请求 / 错误 / 换候选),
 // 流量 (总 token / 缓存命中 / 首字节 / 吞吐), 时间 (最近一次)。
+// 全部按内容成长 (grow=true), 基准宽只贴标题/内容的典型宽度, 不留大补白 ——
+// 这样与第 1 页和其它表一样, 列与列之间视觉上只隔 1 格。
 func modelCols() []tuiCol {
 	return []tuiCol{
-		{"上游/模型", 24, true, false, 4},
-		{"排队", 4, false, true, 0}, {"退避", 8, false, true, 4},
-		{"熔断", 8, false, true, 4}, {"连错", 8, false, true, 2},
-		{"请求", 6, false, true, 0}, {"错误", 4, false, true, 0}, {"换候选", 7, false, true, 1},
-		{"token", 9, false, true, 3}, {"缓存", 8, false, true, 1},
-		{"首字节", 8, false, true, 3}, {"吞吐", 7, false, true, 1},
-		{"最近", 9, false, true, 2},
+		{"上游/模型", 20, true, false, 4},
+		{"排队", 2, true, true, 0}, {"退避", 4, true, true, 4},
+		{"熔断", 5, true, true, 4}, {"连错", 2, true, true, 2},
+		{"请求", 4, true, true, 0}, {"错误", 2, true, true, 0}, {"换候选", 4, true, true, 1},
+		{"token", 6, true, true, 3}, {"缓存", 5, true, true, 1},
+		{"首字节", 6, true, true, 3}, {"吞吐", 5, true, true, 1},
+		{"最近", 6, true, true, 2},
 	}
 }
 

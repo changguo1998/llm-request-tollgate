@@ -1237,9 +1237,12 @@ type App struct {
 	flowMu   sync.Mutex
 	flows    map[uint64]*flow
 	nextFlow uint64
-	evMu     sync.Mutex
-	events   [viewEvents]viewEvent
-	evNext   uint64 // 累计事件序号 (TUI 拿它当起点, 只取新增的那部分)
+	// dwell 是各阶段的停留时长累计 (纳秒, 下标 = stage*), 由 flowStage/flowEnd 在
+	// flowMu 里记账。TUI 按它给第 1 页各分块分配数据行区高度: 停留久的阶段多留几行。
+	dwell  [stageCount]int64
+	evMu   sync.Mutex
+	events [viewEvents]viewEvent
+	evNext uint64 // 累计事件序号 (TUI 拿它当起点, 只取新增的那部分)
 }
 
 type aliasTarget struct {
@@ -1269,6 +1272,7 @@ const (
 	stageSend             // 已发出, 等响应头 (upstream 已填)
 	stageRecv             // 响应头已到, 正在读 body / 流
 	stageFailed           // 候选链走完仍未发出去 (合成 429 / 透传错误)
+	stageCount            // 阶段总数 (停留时长统计数组的长度)
 )
 
 // flow 是一笔进行中的请求 (只用于展示, 不参与调度判断)。字段导出, 因为它要按原样
@@ -1285,6 +1289,8 @@ type flow struct {
 	Stage     int       `json:"stage"`
 	Attempt   int       `json:"attempt,omitempty"` // 已试过的候选数 (含当前)
 	Gate      string    `json:"gate,omitempty"`    // 在等什么 (屏幕上那句话): 已发出 / 等节拍 … / 退避 … / 额度锁 …
+
+	stageAt time.Time // 进入当前阶段的时刻 (停留时长统计用, 不出 JSON)
 }
 
 // viewEvent 是事件流的一条: 调度器动作 + 每笔请求的结局 (由引擎侧发出, 不经日志回读)。
@@ -1339,39 +1345,53 @@ type pulse struct {
 	Now       string      `json:"now"`
 	Active    []flow      `json:"active"`
 	Cands     []candView  `json:"cands"`
-	Events    []viewEvent `json:"events"`  // 序号 > 请求里的 since 的那些
-	MaxSeq    uint64      `json:"max_seq"` // 下次轮询带它作 since
-	SlowMs    int64       `json:"slow_ms"` // 慢请求告警线 (TUI 用同一口径)
+	Events    []viewEvent `json:"events"`          // 序号 > 请求里的 since 的那些
+	MaxSeq    uint64      `json:"max_seq"`         // 下次轮询带它作 since
+	SlowMs    int64       `json:"slow_ms"`         // 慢请求告警线 (TUI 用同一口径)
+	Dwell     []int64     `json:"dwell,omitempty"` // 各阶段停留时长累计 (纳秒, 下标 = stage*); TUI 用它分配第 1 页各块高度
 	MissingAt string      `json:"missing_at,omitempty"`
 }
 
 // stageName 是屏幕上「状态」那一列: 只写变化的部分 (在等什么 / 卡在哪一步)。
-// 不加"等待"前缀 —— 表里每行都在等, 前缀只是噪音。
+// 所处阶段由块标题说明 (并发池 / 频率队列 / 状态锁 / 已发送 / 接收中 / 已失败),
+// 标题与所在位置覆盖得到的不重复写 (在频率队列里 = 在等出队, 在已发送块 = 已发出),
+// 这里只留真正卡住的原因: 额度锁 / 熔断锁 / 退避的倒计时 (解析中一闪而过也保留)。
 func stageName(f flow) string {
 	switch f.Stage {
 	case stageParse:
 		return "解析中"
 	case stageSem:
-		return "等信号量"
+		return "" // 块标题「并发池」已说明
 	case stageQueue:
-		if f.Gate != "" {
-			return f.Gate // 等节拍 …
+		if isGateDetail(f.Gate) {
+			return f.Gate // 排队期间撞上的锁 / 退避: 为什么没出队
 		}
-		return "排队"
+		return "" // 在频率队列里就说明在等出队节拍
 	case stageModelWait:
-		if f.Gate != "" {
-			return f.Gate // 退避 … / 熔断锁 …
+		if isGateDetail(f.Gate) {
+			return f.Gate // 退避 … / 熔断锁 … / 额度锁 …
 		}
-		return "等模型窗口"
+		return "" // 块标题「状态锁」已说明
 	case stageRecv:
-		return "接收中"
+		return "" // 块标题「接收中」已说明
 	case stageFailed:
-		return "已失败"
+		return "" // 块标题「已失败」已说明
 	}
-	if f.Gate != "" {
+	if isGateDetail(f.Gate) {
 		return f.Gate
 	}
-	return "等首字节"
+	return "" // 已发送块: 已发出由位置说明, 同一位置没有别的内容就是已发出
+}
+
+// isGateDetail 判断 Gate 是不是值得在状态列单独写的细节: 锁与退避是「为什么卡住」的
+// 原因; 等节拍 (在队列里必然在等) 与 已发出 (已发送块已隐含) 不写。
+func isGateDetail(g string) bool {
+	for _, p := range []string{"额度锁", "熔断锁", "退避"} {
+		if strings.HasPrefix(g, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) evAdd(kind, logical, upstream, model, msg string) {
@@ -1415,7 +1435,7 @@ func (a *App) flowStart(logical, source, path string, stream bool) uint64 {
 		delete(a.flows, oldest)
 	}
 	a.flows[id] = &flow{ID: id, Logical: logical, Source: source, Path: path,
-		Stream: stream, StartTime: now, Stage: stageParse}
+		Stream: stream, StartTime: now, Stage: stageParse, stageAt: now}
 	a.flowMu.Unlock()
 	return id
 }
@@ -1425,13 +1445,17 @@ func (a *App) flowStart(logical, source, path string, stream bool) uint64 {
 func (a *App) flowStage(id uint64, up, mod string, stage int, gate string, attempt int) {
 	a.flowMu.Lock()
 	if f := a.flows[id]; f != nil {
+		if !f.stageAt.IsZero() && f.Stage >= 0 && f.Stage < stageCount {
+			a.dwell[f.Stage] += time.Since(f.stageAt).Nanoseconds()
+		}
+		f.Stage, f.stageAt = stage, time.Now()
 		if up != "" {
 			f.Up = up
 		}
 		if mod != "" {
 			f.Model = mod
 		}
-		f.Stage, f.Gate, f.Attempt = stage, gate, attempt
+		f.Gate, f.Attempt = gate, attempt
 	}
 	a.flowMu.Unlock()
 }
@@ -1557,6 +1581,10 @@ func durStr(d time.Duration) string {
 
 func (a *App) flowEnd(id uint64) {
 	a.flowMu.Lock()
+	if f := a.flows[id]; f != nil && !f.stageAt.IsZero() &&
+		f.Stage >= 0 && f.Stage < stageCount {
+		a.dwell[f.Stage] += time.Since(f.stageAt).Nanoseconds()
+	}
 	delete(a.flows, id)
 	a.flowMu.Unlock()
 }
@@ -1673,11 +1701,14 @@ func (a *App) listenAddr() string {
 // snapshot 组装一份观测载荷 (since = TUI 上次拿到的 MaxSeq)。
 func (a *App) snapshot(since uint64) pulse {
 	evs, max := a.eventsSince(since)
+	a.flowMu.Lock()
+	dwell := append([]int64(nil), a.dwell[:]...)
+	a.flowMu.Unlock()
 	return pulse{
 		Ver:    viewVer,
 		Listen: a.listenAddr(), Now: time.Now().Format(time.RFC3339Nano),
 		Active: a.flowActives(), Cands: a.candViews(), Events: evs, MaxSeq: max,
-		SlowMs: 30000,
+		SlowMs: 30000, Dwell: dwell,
 	}
 }
 
@@ -2753,7 +2784,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				heldCand, heldKind = at.cd, kind // 响应发完才归还槽位
 			}
 			servedUp, servedMod = at.up, at.mod
-			obs.mark(0, "")
+			obs.stage(stageRecv) // 响应头已到, 之后的整段转发都算「接收中」, 别再退回并发池
 			break
 		}
 		if servedUp != nil {
