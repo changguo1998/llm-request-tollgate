@@ -384,6 +384,41 @@ func TestFlowBlocksByStage(t *testing.T) {
 	}
 }
 
+// 同一块内按编号倒序: 编号大 (后进来) 的请求排在块的上方, 小的在下方。
+func TestFlowRowsSortByIDDesc(t *testing.T) {
+	openTestPTY(t, 50, 140)
+	m := newTUIModel("cfg")
+	now := time.Now()
+	// 故意按 中 / 小 / 大 的顺序喂进去, 排序若没生效就还是这个次序。
+	m.pulse.Active = []flow{
+		{ID: 2, Logical: "id-two", Up: "ustc", Model: "m1", Stage: stageQueue, StartTime: now},
+		{ID: 1, Logical: "id-one", Up: "ustc", Model: "m1", Stage: stageQueue, StartTime: now},
+		{ID: 3, Logical: "id-three", Up: "ustc", Model: "m1", Stage: stageQueue, StartTime: now},
+	}
+	out := stripANSI(m.draw())
+	big, mid, small := strings.Index(out, "id-three"), strings.Index(out, "id-two"), strings.Index(out, "id-one")
+	if big < 0 || mid < 0 || small < 0 {
+		t.Fatalf("活动连接没画全: three=%d two=%d one=%d", big, mid, small)
+	}
+	if !(big < mid && mid < small) {
+		t.Errorf("块内应按编号倒序, 实际位置 three=%d two=%d one=%d", big, mid, small)
+	}
+}
+
+// 整十的编号前加 "*", 其余原样; 编号 0 不存在, 不加。
+func TestFlowIDCellMarksTens(t *testing.T) {
+	for _, tc := range []struct {
+		id   uint64
+		want string
+	}{
+		{9, "9"}, {10, "*10"}, {11, "11"}, {20, "*20"}, {100, "*100"},
+	} {
+		if got := flowIDCell(tc.id); got != tc.want {
+			t.Errorf("flowIDCell(%d) = %q, 期望 %q", tc.id, got, tc.want)
+		}
+	}
+}
+
 // flowTitleRows 找出第 1 页各分块标题所在的行号 (下标对应 flowBlocks 的顺序)。
 func flowTitleRows(t *testing.T, out string) []int {
 	t.Helper()
@@ -549,7 +584,7 @@ func TestModelsPage(t *testing.T) {
 	}}
 	out := stripANSI(m.draw())
 	for _, s := range []string{"模型队列", "上游/真实模型", "ustc/deepseek-flash", "ustc/glm-5.3",
-		"ustc/kimi-k3", "上游状态", "记账", "g2", "4[/12s]", "01:00", "路由聚合"} {
+		"ustc/kimi-k3", "上游状态", "记账", "g2", "4/12s", "01:00", "路由聚合"} {
 		if !strings.Contains(out, s) {
 			t.Errorf("models 页缺少 %q", s)
 		}

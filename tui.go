@@ -1060,7 +1060,7 @@ func (m *tuiModel) flowCells(f flow) []string {
 		tag = "是"
 	}
 	return []string{
-		strconv.FormatUint(f.ID, 10),
+		flowIDCell(f.ID),
 		durStr(time.Since(f.StartTime)),
 		f.Logical,
 		m.upModel(f.Up, f.Model),
@@ -1071,7 +1071,17 @@ func (m *tuiModel) flowCells(f flow) []string {
 	}
 }
 
-// drawFlow 是第 1 页: 活动连接按流程阶段分块。列名固定在页签下方, 不随内容滚走;
+// flowIDCell 是编号格: 整十的编号前加 "*", 让每十条有个肉眼可数的锚点。
+func flowIDCell(id uint64) string {
+	s := strconv.FormatUint(id, 10)
+	if id > 0 && id%10 == 0 {
+		return "*" + s
+	}
+	return s
+}
+
+// drawFlow 是第 1 页: 活动连接按流程阶段分块, 每块内按编号倒序 (大的在上)。列名固定在
+// 页签下方, 不随内容滚走;
 // 分块内容单独滚动 (up/down 只动分块), 块与块之间只隔一行空行; 每块的数据行区高度
 // 按历史停留时长动态定 (flowMinRows), 空块也照留, 于是各块位置相对稳定。
 // 列按全部请求一起算: 表头只有一份, 各块必须同列同宽。
@@ -1079,10 +1089,16 @@ func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 	grouped := make([][][]string, len(flowBlocks))
 	var all [][]string
 	for i, b := range flowBlocks {
+		// 块内按编号从大到小: 编号大的是后进来的请求, 排在块的上方 (与日志尾部同向)。
+		block := make([]flow, 0, len(m.pulse.Active))
 		for _, f := range m.pulse.Active {
 			if stageIn(f.Stage, b.stages) {
-				grouped[i] = append(grouped[i], m.flowCells(f))
+				block = append(block, f)
 			}
+		}
+		sort.Slice(block, func(x, y int) bool { return block[x].ID > block[y].ID })
+		for _, f := range block {
+			grouped[i] = append(grouped[i], m.flowCells(f))
 		}
 		all = append(all, grouped[i]...)
 	}
@@ -1274,7 +1290,8 @@ func (m *tuiModel) drawModels(c *tuiCanvas, body int) {
 		conc += "/" + strconv.Itoa(cand.SoftCap)
 		queue := strconv.Itoa(cand.Queue)
 		if cand.Queue > 0 && cand.NextMs > 0 {
-			queue += "[/" + durStr(time.Duration(cand.NextMs)*time.Millisecond) + "]"
+			// 排队的下一个发车时刻直接跟在队数后面 (1/1.0s), 不加方括号: 省两格且列宽稳定。
+			queue += "/" + durStr(time.Duration(cand.NextMs)*time.Millisecond)
 		}
 		var def candGroup
 		var named []candGroup
@@ -1296,8 +1313,10 @@ func (m *tuiModel) drawModels(c *tuiCanvas, body int) {
 	}
 	cols := []tuiCol{
 		{"上游", tuiWidth("上游"), true, false, 4},
-		{"并发", tuiWidth("并发"), true, true, 2},
-		{"排队", tuiWidth("排队"), true, true, 1},
+		// 并发列基准 8 格: 容得下 "3(+1)/10" 这种带超发试探标记的写法。
+		{"并发", 8, true, true, 2},
+		// 排队列最小 6 格: 容得下 "1/1.0s" 这种带等节拍的写法, 不被压成半截。
+		{"排队", 6, true, true, 1},
 		{"错误", tuiWidth("错误"), true, true, 2},
 		{"记账", tuiWidth("记账"), true, false, 3},
 	}
