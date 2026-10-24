@@ -3414,6 +3414,64 @@ func runUsage(path string, windows []string) {
 	fmt.Println("提示: 服务只写日志, 不做预算与折算; 额度分析交给独立的分析程序 (设计 O10, 尚未实现)")
 }
 
+// defaultTuiStateURL 是 -tui-state 不带地址时观测的常驻服务 (与示例配置的 listen 一致)。
+const defaultTuiStateURL = "http://127.0.0.1:8787"
+
+// tuiStateArg 是 -tui-state 的值: 记住这个选项有没有出现过 (裸写经 withTuiStateDefault
+// 补成默认地址), 好让 -tui 与它互斥。
+type tuiStateArg struct {
+	url string
+	set bool
+}
+
+func (a *tuiStateArg) String() string { return a.url }
+
+func (a *tuiStateArg) Set(s string) error {
+	a.url, a.set = s, true
+	return nil
+}
+
+// withTuiStateDefault 给只写 `-tui-state` (不带值) 的写法补上默认地址, 免得 flag 包把它
+// 当成缺参数报错; `-tui-state <base>` 与 `-tui-state=<base>` 照常保留。`--` 之后是位置
+// 参数, 不再改写。
+func withTuiStateDefault(args []string, defURL string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			return append(out, args[i:]...)
+		}
+		if a == "-tui-state" || a == "--tui-state" {
+			next := ""
+			if i+1 < len(args) {
+				next = args[i+1]
+			}
+			if next == "" || strings.HasPrefix(next, "-") {
+				a += "=" + defURL
+			}
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// tuiTarget 解析状态台的两种入口: -tui 同进程起代理, -tui-state [base] 看常驻服务
+// (不带值用 defURL)。两个选项同时给算用法错误。
+func tuiTarget(inProc, stateSet bool, stateURL, defURL string) (bool, string, error) {
+	switch {
+	case inProc && stateSet:
+		return false, "", errors.New("-tui 与 -tui-state 不能同时使用")
+	case inProc:
+		return true, "", nil
+	case stateSet:
+		if stateURL == "" {
+			stateURL = defURL
+		}
+		return true, stateURL, nil
+	}
+	return false, "", nil
+}
+
 func main() {
 	cfgPath := flag.String("config", "config.local.json", "config file path")
 	summary := flag.String("summary", "", "aggregate JSONL request log and exit")
@@ -3421,12 +3479,20 @@ func main() {
 	windows := flag.String("windows", "3h,12h,24h", "windows for -usage, comma separated")
 	check := flag.Bool("check", false, "validate config and exit")
 	probe := flag.String("probe", "", "print the latency/probe report for a config file and exit")
-	tui := flag.Bool("tui", false, "run the terminal dashboard on top of the proxy (q to quit)")
-	tuiState := flag.String("tui-state", "", "TUI: observe a running proxy at this base URL (default: in-process)")
-	flag.Parse()
+	tui := flag.Bool("tui", false, "run the terminal dashboard with an in-process proxy (q to quit)")
+	var tuiState tuiStateArg
+	flag.Var(&tuiState, "tui-state", "run the terminal dashboard against a running proxy (default URL: "+
+		defaultTuiStateURL+")")
+	flag.CommandLine.Parse(withTuiStateDefault(os.Args[1:], defaultTuiStateURL))
 
-	if *tui {
-		runTUI(*cfgPath, *tuiState)
+	enabled, baseURL, err := tuiTarget(*tui, tuiState.set, tuiState.url, defaultTuiStateURL)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(os.Stderr, "用法: -tui (同进程) 或 -tui-state [base] (看常驻服务)")
+		os.Exit(2)
+	}
+	if enabled {
+		runTUI(*cfgPath, baseURL)
 		return
 	}
 

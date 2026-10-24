@@ -180,8 +180,10 @@ python3 scripts/gen_tollgate_config.example.py
 ```bash
 # 同进程起代理 + 状态台 (q 退出):
 ./llm-request-tollgate -tui
-# 只看已常驻的服务 (settings 页改完 s/h = 发 SIGHUP):
-./llm-request-tollgate -tui -tui-state http://127.0.0.1:8787
+# 只看已常驻的服务 (settings 页改完 s/h = 发 SIGHUP; 不带地址用默认 127.0.0.1:8787):
+./llm-request-tollgate -tui-state
+# 或显式给地址:
+./llm-request-tollgate -tui-state http://127.0.0.1:8787
 ```
 
 ## 7. 日志 / 状态文件 / 离线分析

@@ -76,7 +76,8 @@ go build ./...
 
 # 实时状态台 (TUI: active 进行中的请求 / models 模型与路由聚合 / events 事件 / settings 调度参数与优先级):
 ./llm-request-tollgate -tui                     # 同进程起代理 + 状态台 (q 退出)
-./llm-request-tollgate -tui -tui-state http://127.0.0.1:8787   # 只看已常驻的服务
+./llm-request-tollgate -tui-state               # 只看已常驻的服务 (默认 http://127.0.0.1:8787)
+./llm-request-tollgate -tui-state <base>        # 只看指定地址上的常驻服务
 ```
 
 agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
@@ -108,7 +109,7 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 
 - 观测面是**只读且纯内存**的: 不落盘、不参与记账与调度, 服务重启即清空; 明细的事实来源
   仍是日志 (设计 D12)。同进程模式顺手把它写成 `var/tui-pulse.json`, 也便于别的工具读。
-- 两个进程模式随便挑: `-tui` 适合"本地起一份看", `-tui-state` 适合看 systemd 常驻那份
+- 两个入口二选一: `-tui` 适合"本地起一份看" (同进程), `-tui-state` 适合看 systemd 常驻那份
   (`./deploy/tollgate.sh` 起的服务不变)。`settings` 页两种模式都能改: 写本机的 store 与
   配置 `gate` 段, 同进程模式热加载直接生效, 观察常驻服务时发 `SIGHUP`。`s` 只写 `gate`
   与优先级; `timeouts` 与 `probe` 仍要改配置文件后重启。
@@ -221,7 +222,7 @@ python3 scripts/gen_tollgate_config.example.py
 `s` 保存 (store 与 `gate`) 并热加载, `r` 重生成配置, `h` 热加载, `q` 退出。
 
 ```bash
-./llm-request-tollgate -tui -tui-state http://127.0.0.1:8787   # 看常驻服务, 按 4 进 settings 页
+./llm-request-tollgate -tui-state   # 看常驻服务, 按 4 进 settings 页
 ```
 
 ### 用量分析 (计划中)
