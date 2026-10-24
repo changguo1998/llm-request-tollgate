@@ -572,7 +572,7 @@ func (e *tuiEditor) providerOrder() []string {
 	return out
 }
 
-// provPrios 只读 store 里各 provider 的优先级, 给 models 页排序用。别为了排序去装载
+// provPrios 只读 store 里各 provider 的优先级, 给第 1 页上游表排序用。别为了排序去装载
 // 整个编辑器: 那会把 settings 页的 gate 快照提前钉在启动时刻。读不到返回 nil。
 func provPrios(cfgPath string) map[string]int {
 	b, err := os.ReadFile(storePathFor(cfgPath))
@@ -595,7 +595,7 @@ func provPrios(cfgPath string) map[string]int {
 	return out
 }
 
-// provRank 是 models 页的排序键: [优先级, 配置顺序], 优先级降序, 同优先级保持配置顺序,
+// provRank 是第 1 页上游表的排序键: [优先级, 配置顺序], 优先级降序, 同优先级保持配置顺序,
 // 与 settings 页的 provider 面板同一口径。store 读不到时返回 nil (调用方保持观测面原序)。
 func provRank(cfgPath string) map[string][2]int {
 	prios := provPrios(cfgPath)

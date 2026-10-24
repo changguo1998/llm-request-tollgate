@@ -289,15 +289,15 @@ func TestPrioKeys(t *testing.T) {
 	}
 }
 
-// 页签: 4 键进 settings; settings 页的 h 是热加载 (失败也只报错, 不切页);
+// 页签: 3 键进 settings; settings 页的 h 是热加载 (失败也只报错, 不切页);
 // 状态页的 h/bash 语义不变。
 func TestPrioTabScopedKeys(t *testing.T) {
 	_, cfg := prioFixture(t)
 	m := newTUIModel(cfg)
 	pending := []byte{}
-	m.handleKey('4', &pending)
+	m.handleKey('3', &pending)
 	if m.tab != tabSettings || m.prio == nil {
-		t.Fatalf("4 应进 settings 页并装载编辑器 (tab=%d)", m.tab)
+		t.Fatalf("3 应进 settings 页并装载编辑器 (tab=%d)", m.tab)
 	}
 	// 把 root 指到空目录: h 会去跑不存在的 deploy/tollgate.sh, 只该报错。
 	m.prio.root = t.TempDir()
@@ -334,7 +334,8 @@ func TestPrioDraw(t *testing.T) {
 		t.Fatalf("帧应是 30 行, 得到 %d", len(lines))
 	}
 	for i, line := range lines {
-		if w := tuiWidth(line); w > 100 {
+		// 行尾的 \r 不对应显示列, 量宽度前先去掉 (状态行顶部内容仍在 100 列内)。
+		if w := tuiWidth(strings.TrimSuffix(line, "\r")); w > 100 {
 			t.Errorf("第 %d 行宽 %d 超过 100: %q", i+1, w, line)
 		}
 	}
@@ -352,7 +353,7 @@ func TestPrioDraw(t *testing.T) {
 	t.Setenv("FFF_HOME", t.TempDir())
 	bad := newTUIModel(filepath.Join(t.TempDir(), "nope.json"))
 	bad.prio = newTuiEditor(bad.cfgPath)
-	bad.tab = 3
+	bad.tab = tabSettings
 	bad.draw()
 	if bad.prio.err == "" {
 		t.Errorf("store 不存在时应记下错误")
@@ -392,9 +393,9 @@ func TestPrioFocusKeys(t *testing.T) {
 	if m.tab == tabSettings {
 		t.Errorf("Tab 现在只切页, 不该留在 settings")
 	}
-	send('4')
+	send('3')
 	if m.tab != tabSettings {
-		t.Fatalf("4 应回到 settings, 得到 %d", m.tab)
+		t.Fatalf("3 应回到 settings, 得到 %d", m.tab)
 	}
 	send('p')
 	// 切到 provider 后 +/- 改的是 provider 优先级, 不是模型优先级。
@@ -565,7 +566,7 @@ func candsOrder(cands []candView) string {
 	return strings.Join(out, ",")
 }
 
-// models 页的上游表按 provider 优先级降序, 与 settings 页的 provider 面板同口径。
+// 第 1 页上游表按 provider 优先级降序, 与 settings 页的 provider 面板同口径。
 func TestModelsCandsSortByPriority(t *testing.T) {
 	_, cfg := prioFixture(t)
 	m := newTUIModel(cfg)

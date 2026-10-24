@@ -51,7 +51,7 @@ func TestDrawFillsTerminalHeight(t *testing.T) {
 		ioctlCall(m.Fd(), syscall.TIOCSWINSZ, unsafe.Pointer(&tuiWinsize{Row: uint16(rows), Col: 120}))
 		mo := newTUIModel("cfg")
 		mo.pulse.Cands = []candView{{ID: "ustc", SoftCap: 1}}
-		for _, tab := range []int{0, 1, 2, 3} {
+		for _, tab := range []int{0, 1, 2} {
 			mo.tab = tab
 			out := mo.draw()
 			got := strings.Count(out, "\r\n")
@@ -61,9 +61,10 @@ func TestDrawFillsTerminalHeight(t *testing.T) {
 			if hintRow != rows {
 				t.Errorf("rows=%d tab=%d: 键位应贴底 (第 %d 行), 实际第 %d 行", rows, tab, rows, hintRow)
 			}
-			// 顶端只留页签, 不再画上游状态 (上游状态在 models 页看)。
-			if strings.Contains(out, "ustc 2/3") {
-				t.Errorf("rows=%d tab=%d: 顶端不该出现上游状态", rows, tab)
+			// 固定区只放标题 / 状态 (含路由聚合汇总) / 页签; 上游明细在正文里。
+			head := strings.SplitN(out, "\r\n", 4)
+			if len(head) >= 3 && strings.Contains(strings.Join(head[:3], "\n"), "ustc") {
+				t.Errorf("rows=%d tab=%d: 顶端固定区不该出现上游明细", rows, tab)
 			}
 			// 左边界的缩进统一: 每个非空行的可见文本都从 tuiIndent 起。
 			for i, line := range strings.Split(out, "\r\n") {
@@ -273,8 +274,9 @@ func TestUpModelJoin(t *testing.T) {
 	}
 }
 
-// 每张表都有标题行 (标题在表头之上); events 页滚动到底不再画成空白 (G 键把滚动设成很大)。
-func TestTableTitlesAndEventsScroll(t *testing.T) {
+// 第 1 页分块都有标题行; 并入的上游表与模型表不画标题; events 页滚动到底不再画成空白
+// (G 键把滚动设成很大)。
+func TestFlowTablesAndEventsScroll(t *testing.T) {
 	f, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
 	if err != nil {
 		t.Skip("no /dev/ptmx")
@@ -306,7 +308,9 @@ func TestTableTitlesAndEventsScroll(t *testing.T) {
 
 	ioctlCall(f.Fd(), syscall.TIOCSWINSZ, unsafe.Pointer(&tuiWinsize{Row: 40, Col: 140}))
 	m := newTUIModel("cfg")
-	m.pulse.Cands = []candView{{ID: "ustc", SoftCap: 1}}
+	// 给一个有过队列的模型: 模型表的列名行才会整行画出来。
+	m.pulse.Cands = []candView{{ID: "ustc", SoftCap: 1,
+		Models: []candModelLock{{Model: "m1", Queue: 1}}}}
 	m.tab = tabActive
 	out := m.draw()
 	for _, title := range []string{"并发池", "频率队列", "状态锁", "已发送", "接收中", "已失败"} {
@@ -314,15 +318,17 @@ func TestTableTitlesAndEventsScroll(t *testing.T) {
 			t.Errorf("active 页缺少分块 %q", title)
 		}
 	}
-	m.tab = tabModels
+	// 第 1 页正文下半段并入了上游表与 模型/路由聚合表: 不画表标题, 列名行保留。
 	out = m.draw()
-	for _, title := range []string{"模型队列", "上游状态", "路由聚合"} {
-		if !strings.Contains(stripANSI(out), title) {
-			t.Errorf("models 页缺少标题 %q", title)
+	for _, head := range []string{"记账", "连错"} {
+		if !strings.Contains(stripANSI(out), head) {
+			t.Errorf("active 页缺少并入表的列名 %q", head)
 		}
 	}
-	if strings.Index(out, "上游状态") > strings.Index(out, "模型队列") {
-		t.Errorf("上游状态应排在模型队列之前")
+	for _, title := range []string{"上游状态", "模型队列", "路由聚合"} {
+		if strings.Contains(stripANSI(out), title) {
+			t.Errorf("并入第 1 页后不该再有表标题 %q", title)
+		}
 	}
 
 	// 事件多于窗口, 再把滚动位置设成 G 键那种大数: 必须显出最后一屏, 不能空白。
@@ -444,21 +450,21 @@ func flowTitleRows(t *testing.T, out string) []int {
 	return rows
 }
 
-// 分块标题之间至少隔 2 行: 数据行区按最小行数补齐, 块之间再空一行。
+// 分块之间不加额外空行: 上一块标题后面正好是它的数据行区 (无停留时长时按 defaultMinRows)。
 func TestFlowBlockTitleSpacing(t *testing.T) {
 	openTestPTY(t, 50, 140)
 	m := newTUIModel("cfg")
 	m.tab = tabActive
 	rows := flowTitleRows(t, m.draw())
 	for i := 1; i < len(rows); i++ {
-		if gap := rows[i] - rows[i-1] - 1; gap < 2 {
-			t.Errorf("分块 %q 与 %q 之间只隔 %d 行, 至少要 2 行",
-				flowBlocks[i-1].title, flowBlocks[i].title, gap)
+		if gap := rows[i] - rows[i-1] - 1; gap != defaultMinRows[i-1] {
+			t.Errorf("分块 %q 与 %q 之间应正好 %d 行 (不留额外空行), 实际 %d 行",
+				flowBlocks[i-1].title, flowBlocks[i].title, defaultMinRows[i-1], gap)
 		}
 	}
 }
 
-// 有内容的块自带行与补齐的空行, 标题之间同样不会贴在一起。
+// 有内容的块自带行与补齐的空行, 块之间同样不留额外空行。
 func TestFlowBlockTitleSpacingWithRows(t *testing.T) {
 	openTestPTY(t, 50, 140)
 	m := newTUIModel("cfg")
@@ -470,14 +476,14 @@ func TestFlowBlockTitleSpacingWithRows(t *testing.T) {
 	}
 	rows := flowTitleRows(t, m.draw())
 	for i := 1; i < len(rows); i++ {
-		if gap := rows[i] - rows[i-1] - 1; gap < 2 {
-			t.Errorf("分块 %q 与 %q 之间只隔 %d 行, 至少要 2 行",
-				flowBlocks[i-1].title, flowBlocks[i].title, gap)
+		if gap := rows[i] - rows[i-1] - 1; gap != defaultMinRows[i-1] {
+			t.Errorf("分块 %q 与 %q 之间应正好 %d 行 (不留额外空行), 实际 %d 行",
+				flowBlocks[i-1].title, flowBlocks[i].title, defaultMinRows[i-1], gap)
 		}
 	}
 }
 
-// 第 1 页的版式: 列名整页只画一次 (在页首), 块与块之间空一行; 每块的数据行区正好
+// 第 1 页的版式: 列名整页只画一次 (在页首), 块与块之间不空行; 每块的数据行区正好
 // 留 defaultMinRows[i] 行 (没有历史停留时长时), 空块也照留。表后不再有单位说明行。
 func TestFlowSingleHeaderAndMinRows(t *testing.T) {
 	openTestPTY(t, 60, 160)
@@ -488,8 +494,8 @@ func TestFlowSingleHeaderAndMinRows(t *testing.T) {
 	}
 	out := stripANSI(m.draw())
 
-	if n := strings.Count(out, "上游/模型"); n != 1 {
-		t.Errorf("列名应整页只画一次, 实际 %d 次", n)
+	if n := strings.Count(out, "编号"); n != 1 {
+		t.Errorf("活动表列名应整页只画一次, 实际 %d 次", n)
 	}
 	if strings.Index(out, "上游/模型") > strings.Index(out, "并发池") {
 		t.Error("列名应排在第一块标题之前 (页首)")
@@ -513,12 +519,12 @@ func TestFlowSingleHeaderAndMinRows(t *testing.T) {
 	if headRow == 0 || strings.TrimSpace(lines[headRow-1]) != "" {
 		t.Errorf("列名上一行应是空行, 实际 %q", lines[headRow-1])
 	}
-	// 块间距 = 上一块标题 + 1 + 数据行区 defaultMinRows + 空行; 空块也照留, 所以位置固定。
+	// 块间距 = 上一块标题 + 1 + 数据行区 defaultMinRows (块之间不空行); 空块也照留。
 	titles := flowTitleRows(t, out)
 	for i := 1; i < len(titles); i++ {
-		want := titles[i-1] + 1 + defaultMinRows[i-1] + 1
+		want := titles[i-1] + 1 + defaultMinRows[i-1]
 		if titles[i] != want {
-			t.Errorf("分块 %q 起始行 %d, 应为 %d (上一块 %d 行数据 + 空行)",
+			t.Errorf("分块 %q 起始行 %d, 应为 %d (上一块 %d 行数据, 不留额外空行)",
 				flowBlocks[i].title, titles[i], want, defaultMinRows[i-1])
 		}
 	}
@@ -569,10 +575,12 @@ func TestFlowHeaderPinned(t *testing.T) {
 	}
 }
 
-// 第 2 页从模型视角画: 每个真实模型的队列 / 退避 / 熔断锁, 以及上游按记账组铺开的锁列。
-func TestModelsPage(t *testing.T) {
+// 第 1 页正文下半段从模型视角画: 每个真实模型的队列 / 退避 / 熔断锁, 以及上游按记账组
+// 铺开的锁列; 两张表不画标题, 列名行保留, 表与表之间空一行。
+func TestFlowModelTables(t *testing.T) {
+	openTestPTY(t, 60, 160)
 	m := newTUIModel("cfg")
-	m.tab = tabModels
+	m.tab = tabActive
 	m.pulse.Cands = []candView{{
 		ID: "ustc", InFlight: 2, SoftCap: 3, Queue: 4, NextMs: 12000, LockMs: 60000, LockWhy: "quota",
 		Groups: []candGroup{{Name: "g1", LockMs: 60000}, {Name: "g2"}},
@@ -583,24 +591,24 @@ func TestModelsPage(t *testing.T) {
 		},
 	}}
 	out := stripANSI(m.draw())
-	for _, s := range []string{"模型队列", "上游/真实模型", "ustc/deepseek-flash", "ustc/glm-5.3",
-		"ustc/kimi-k3", "上游状态", "记账", "g2", "4/12s", "01:00", "路由聚合"} {
+	for _, s := range []string{"记账", "g2", "4/12s", "01:00", "上游/模型", "连错",
+		"ustc/deepseek-flash", "ustc/glm-5.3", "ustc/kimi-k3"} {
 		if !strings.Contains(out, s) {
-			t.Errorf("models 页缺少 %q", s)
+			t.Errorf("active 页缺少 %q", s)
 		}
 	}
 	// 锁中的组用倒计时占位, 组名不再出现。
 	if strings.Contains(out, "g1") {
 		t.Error("锁中的记账组应显示倒计时, 不该再显示组名 g1")
 	}
-	// 上游状态表与下面的汇总 / 模型队列之间空一行 (表后没有单位行了)。
+	// 上游表与下面的模型表之间空一行 (两张表都不画标题)。
 	lines := strings.Split(out, "\r\n")
 	for i, ln := range lines {
-		if !strings.Contains(ln, "ustc  2(+1)/3") {
+		if !strings.Contains(ln, "4/12s") {
 			continue
 		}
 		if i+1 >= len(lines) || strings.TrimSpace(lines[i+1]) != "" {
-			t.Errorf("上游状态表后面应空一行: %q", ln)
+			t.Errorf("上游表后面应空一行: %q", ln)
 		}
 	}
 	if strings.Contains(out, "单位:") {
@@ -608,7 +616,7 @@ func TestModelsPage(t *testing.T) {
 	}
 }
 
-// 第 2 页合并表的列按类别分组: 调度状态 / 历史计数 / 流量 / 时间, 同类相邻;
+// 第 1 页模型/路由聚合表的列按类别分组: 调度状态 / 历史计数 / 流量 / 时间, 同类相邻;
 // 原来的 30 分钟小方条那列已去掉。
 func TestModelsColumnGroups(t *testing.T) {
 	got := make([]string, 0, len(modelCols()))
@@ -627,9 +635,10 @@ func TestModelsColumnGroups(t *testing.T) {
 	}
 }
 
-// 第 2 页: 队列与路由聚合成一张表, 行按 上游/真实模型 合并 (同模型多逻辑名求和),
+// 第 1 页: 队列与路由聚合成一张表, 行按 上游/真实模型 合并 (同模型多逻辑名求和),
 // 表里不出现逻辑名。
 func TestModelsMergedRow(t *testing.T) {
+	openTestPTY(t, 60, 140)
 	m := newTUIModel("cfg")
 	now := time.Now()
 	m.pulse.Cands = []candView{{
@@ -653,15 +662,38 @@ func TestModelsMergedRow(t *testing.T) {
 	if r.Reqs != 5 || r.Total != 150 || r.Queue != 4 || r.Fails != 1 || r.TtfbN != 4 {
 		t.Errorf("合并结果不对: %+v", r)
 	}
-	m.tab = tabModels
 	out := stripANSI(m.draw())
 	if !strings.Contains(out, "ustc/m1") {
 		t.Errorf("合并表里应有 ustc/m1")
 	}
 	for _, s := range []string{"alias-a", "alias-b"} {
 		if strings.Contains(out, s) {
-			t.Errorf("第 2 页不该出现逻辑名 %q", s)
+			t.Errorf("第 1 页不该出现逻辑名 %q", s)
 		}
+	}
+}
+
+// 第 1 页: 全是 0 / - 的行不显示 (配置里有模型但没请求过), 有队列或锁状态的行照常显示。
+func TestModelsSkipsBlankRows(t *testing.T) {
+	openTestPTY(t, 60, 140)
+	m := newTUIModel("cfg")
+	m.pulse.Cands = []candView{{
+		ID: "ustc", Models: []candModelLock{
+			{Model: "idle"},             // 全 0: 不显示
+			{Model: "queued", Queue: 1}, // 只有队列状态: 显示
+		},
+	}}
+	m.tab = tabActive
+	rows := m.modelRows()
+	if len(rows) != 1 || rows[0].model != "queued" {
+		t.Fatalf("应只留下有数据的 queued, 得到 %d 行: %+v", len(rows), rows)
+	}
+	out := stripANSI(m.draw())
+	if strings.Contains(out, "ustc/idle") {
+		t.Error("全 0 / - 的行不该出现在路由聚合里")
+	}
+	if !strings.Contains(out, "ustc/queued") {
+		t.Error("有队列状态的行应保留")
 	}
 }
 
@@ -696,10 +728,10 @@ func TestColorStandard(t *testing.T) {
 			}
 		}
 	}()
-	ioctlCall(f.Fd(), syscall.TIOCSWINSZ, unsafe.Pointer(&tuiWinsize{Row: 40, Col: 160}))
+	ioctlCall(f.Fd(), syscall.TIOCSWINSZ, unsafe.Pointer(&tuiWinsize{Row: 60, Col: 160}))
 
 	m := newTUIModel("cfg")
-	m.tab = tabModels
+	m.tab = tabActive
 	m.pulse.Cands = []candView{{
 		ID: "ustc", LockMs: 600000, Probing: true,
 		Groups: []candGroup{{Name: "g1", LockMs: 600000}, {Name: "g2"}},

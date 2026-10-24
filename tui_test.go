@@ -238,9 +238,9 @@ func TestUpstreamColors(t *testing.T) {
 
 // 上游名在表格里带上它的专属色 (模型部分不上色)。
 func TestUpstreamNameColored(t *testing.T) {
-	openTestPTY(t, 24, 120)
+	openTestPTY(t, 60, 120)
 	m := newTUIModel("cfg")
-	m.tab = tabModels
+	m.tab = tabActive
 	m.pulse.Cands = []candView{{ID: "ustc", SoftCap: 1, Groups: []candGroup{{Name: ""}}}}
 	raw := m.draw()
 	want := m.upColors["ustc"] + "ustc" + tuiReset

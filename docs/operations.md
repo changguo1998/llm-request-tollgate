@@ -172,7 +172,7 @@ python3 scripts/gen_tollgate_config.example.py
 
 ### 6.2 用 TUI settings 页调权重与调度参数
 
-状态台第 4 个页签 (settings) 上半是 `gate` 的 7 项调度参数 (写回 `config.local.json` 的
+状态台第 3 个页签 (settings) 上半是 `gate` 的 7 项调度参数 (写回 `config.local.json` 的
 `gate` 段, 其余字段与格式原样保留), 下半是 store (`~/fff/config/llm-models.json` 里的
 `tollgate_priority`), 右栏实时预览候选顺序. `m` / `p` / `g` 聚焦模型 / provider / 调度参数,
 `+/-` 调值, `=` 输数值, `/` 过滤, `s` 保存并热加载, `r` 重生成配置, `h` 热加载, `q` 退出.
