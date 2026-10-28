@@ -3120,7 +3120,8 @@ func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel strin
 					Delta   json.RawMessage `json:"delta"`
 					Choices []struct {
 						Delta struct {
-							Content string `json:"content"`
+							Content          string `json:"content"`
+							ReasoningContent string `json:"reasoning_content"`
 						} `json:"delta"`
 					} `json:"choices"`
 				}
@@ -3140,7 +3141,8 @@ func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel strin
 						switch chunk.Type {
 						case "response.completed", "response.failed", "response.incomplete":
 							done = true
-						case "response.output_text.delta":
+						case "response.output_text.delta", "response.reasoning_text.delta",
+							"response.reasoning_summary_text.delta":
 							var s string
 							if json.Unmarshal(chunk.Delta, &s) == nil {
 								est += estimateTokens(s)
@@ -3148,7 +3150,10 @@ func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel strin
 						}
 					}
 					for _, c := range chunk.Choices {
+						// 思考增量也算输出: 纯思考模型在 content 里一个字都没有, 只计
+						// content 会让接收中的吞吐一直显示不出来。
 						est += estimateTokens(c.Delta.Content)
+						est += estimateTokens(c.Delta.ReasoningContent)
 					}
 					// O9: 块内 model 改回逻辑名 (只改该字段, 其余字节原样)。
 					data2 := rewriteModel([]byte(data), logical)

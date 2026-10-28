@@ -78,6 +78,25 @@ func TestRelayStreamLiveProgress(t *testing.T) {
 	}
 }
 
+// 只发思考增量 (delta.reasoning_content) 的流也要计入输出, 否则接收中的吞吐恒为空。
+func TestRelayStreamCountsReasoning(t *testing.T) {
+	body := strings.NewReader(strings.Join([]string{
+		`data: {"choices":[{"delta":{"reasoning_content":"thinking hard"}}]}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n"))
+	var got []int
+	ro := relayStream(httptest.NewRecorder(), body, "m1", "real-m1", time.Now(), false,
+		func(tokens int, firstAt time.Time) { got = append(got, tokens) })
+	if len(got) == 0 || got[len(got)-1] <= 0 {
+		t.Fatalf("思考增量应计入输出 token, 得到 %v", got)
+	}
+	if ro.Usage == nil || ro.Usage.Completion <= 0 {
+		t.Errorf("没有 usage 时兜底估值也应大于 0, 得到 %+v", ro.Usage)
+	}
+}
+
 // 日志聚合层: 每笔请求的 completion token 与耗时进 1h 窗口, 非流式也算。
 func TestModelRowsOneHourTokens(t *testing.T) {
 	m := newTUIModel("cfg")
