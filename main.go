@@ -1147,8 +1147,9 @@ type logRec struct {
 	Gate         string  `json:"gate,omitempty"` // 被闸门挡下没发出去时: locked | sem_timeout | queue_timeout | backoff_timeout | canceled
 	LockSkips    int     `json:"lock_skips,omitempty"`
 	BackoffSkips int     `json:"backoff_skips,omitempty"`
-	TtfbMs       int64   `json:"ttfb_ms,omitempty"` // 首字节时延 (被动采样)
-	Tps          float64 `json:"tps,omitempty"`     // 解码吞吐 tokens/s (流式才有)
+	TtfbMs       int64   `json:"ttfb_ms,omitempty"`     // 首字节时延 (被动采样)
+	Tps          float64 `json:"tps,omitempty"`         // 解码吞吐 tokens/s (流式才有)
+	DurationMs   int64   `json:"duration_ms,omitempty"` // 请求耗时 (收到请求到写完响应), 供非空闲吞吐
 }
 
 // 不动失败计数与锁, 也不打断已建立的流 (切换只可能发生在下次请求开始时)。
@@ -1238,11 +1239,17 @@ type App struct {
 	flows    map[uint64]*flow
 	nextFlow uint64
 	// dwell 是各阶段的停留时长累计 (纳秒, 下标 = stage*), 由 flowStage/flowEnd 在
-	// flowMu 里记账。TUI 按它给第 1 页各分块分配数据行区高度: 停留久的阶段多留几行。
-	dwell  [stageCount]int64
-	evMu   sync.Mutex
-	events [viewEvents]viewEvent
-	evNext uint64 // 累计事件序号 (TUI 拿它当起点, 只取新增的那部分)
+	// flowMu 里记账; 仅随 pulse 下发供旧版 TUI 分配行数, 新版按并发水平 (conc) 分档。
+	dwell [stageCount]int64
+	// 阶段并发水平: 时间切成 concSlice 宽的片, 每片记峰值; 取用时按片的年龄做指数
+	// 衰减加权平均 (pulse.Conc)。TUI 用它给第 1 页各分块定数据行区高度。
+	concNow   [stageCount]int
+	chunkAt   time.Time
+	chunkPeak [stageCount]int
+	chunkHist [stageCount][]concChunk
+	evMu      sync.Mutex
+	events    [viewEvents]viewEvent
+	evNext    uint64 // 累计事件序号 (TUI 拿它当起点, 只取新增的那部分)
 }
 
 type aliasTarget struct {
@@ -1275,6 +1282,21 @@ const (
 	stageCount            // 阶段总数 (停留时长统计数组的长度)
 )
 
+// 阶段并发: 把时间切成 concSlice 宽的片, 每片记该阶段出现过的最高并发; 取用时按片的
+// 年龄做指数衰减加权平均 (权重 e^(-age/concDecay), 年龄从片中心算起)。只用于给第 1 页
+// 分配版面行数, 不参与调度。
+const (
+	concSlice = 10 * time.Minute // 分片宽度
+	concDecay = 10 * time.Minute // 指数衰减的时间常数 (10min 前的片权重 e^-1)
+	concKeep  = 144              // 每阶段保留的片数 (24h)
+)
+
+// concChunk 是一个已结束的时间片及其并发峰值。
+type concChunk struct {
+	at   time.Time
+	peak int
+}
+
 // flow 是一笔进行中的请求 (只用于展示, 不参与调度判断)。字段导出, 因为它要按原样
 // 进 /v1/state 的 JSON。
 type flow struct {
@@ -1287,8 +1309,10 @@ type flow struct {
 	Up        string    `json:"upstream,omitempty"` // 当前候选上游
 	Model     string    `json:"backend,omitempty"`  // 该候选的真实模型 id
 	Stage     int       `json:"stage"`
-	Attempt   int       `json:"attempt,omitempty"` // 已试过的候选数 (含当前)
-	Gate      string    `json:"gate,omitempty"`    // 在等什么 (屏幕上那句话): 已发出 / 等节拍 … / 退避 … / 额度锁 …
+	Attempt   int       `json:"attempt,omitempty"`    // 已试过的候选数 (含当前)
+	Gate      string    `json:"gate,omitempty"`       // 在等什么 (屏幕上那句话): 已发出 / 等节拍 … / 退避 … / 额度锁 …
+	RecvTok   int       `json:"recv_tok,omitempty"`   // 接收中: 已收到的输出 token 数 (流式估算)
+	RecvStart int64     `json:"recv_start,omitempty"` // 接收中: 首字节到达时刻 (Unix 毫秒)
 
 	stageAt time.Time // 进入当前阶段的时刻 (停留时长统计用, 不出 JSON)
 }
@@ -1348,7 +1372,8 @@ type pulse struct {
 	Events    []viewEvent `json:"events"`          // 序号 > 请求里的 since 的那些
 	MaxSeq    uint64      `json:"max_seq"`         // 下次轮询带它作 since
 	SlowMs    int64       `json:"slow_ms"`         // 慢请求告警线 (TUI 用同一口径)
-	Dwell     []int64     `json:"dwell,omitempty"` // 各阶段停留时长累计 (纳秒, 下标 = stage*); TUI 用它分配第 1 页各块高度
+	Dwell     []int64     `json:"dwell,omitempty"` // 各阶段停留时长累计 (纳秒, 下标 = stage*); 旧版 TUI 兼容用
+	Conc      []float64   `json:"conc,omitempty"`  // 各阶段并发水平 (10min 片峰值 + 指数衰减加权平均, 下标 = stage*)
 	MissingAt string      `json:"missing_at,omitempty"`
 }
 
@@ -1432,10 +1457,14 @@ func (a *App) flowStart(logical, source, path string, stream bool) uint64 {
 				oldest, ok = k, true
 			}
 		}
+		if f := a.flows[oldest]; f != nil && f.Stage >= 0 && f.Stage < stageCount {
+			a.concStepLocked(f.Stage, -1, now) // 被挤掉的请求也要从阶段并发里扣掉
+		}
 		delete(a.flows, oldest)
 	}
 	a.flows[id] = &flow{ID: id, Logical: logical, Source: source, Path: path,
 		Stream: stream, StartTime: now, Stage: stageParse, stageAt: now}
+	a.concStepLocked(-1, stageParse, now)
 	a.flowMu.Unlock()
 	return id
 }
@@ -1445,6 +1474,7 @@ func (a *App) flowStart(logical, source, path string, stream bool) uint64 {
 func (a *App) flowStage(id uint64, up, mod string, stage int, gate string, attempt int) {
 	a.flowMu.Lock()
 	if f := a.flows[id]; f != nil {
+		from := f.Stage
 		if !f.stageAt.IsZero() && f.Stage >= 0 && f.Stage < stageCount {
 			a.dwell[f.Stage] += time.Since(f.stageAt).Nanoseconds()
 		}
@@ -1456,6 +1486,20 @@ func (a *App) flowStage(id uint64, up, mod string, stage int, gate string, attem
 			f.Model = mod
 		}
 		f.Gate, f.Attempt = gate, attempt
+		if from != stage {
+			a.concStepLocked(from, stage, f.stageAt)
+		}
+	}
+	a.flowMu.Unlock()
+}
+
+// flowLive 刷新「接收中」这一笔已收到的输出 token 数与首字节时刻 (只写展示字段,
+// 不碰阶段与停留时长)。由 relayStream 节流回写 (约 200ms 一次); 第 1 页用这两个值
+// 算这笔自己的吞吐 (从首字节起算)。
+func (a *App) flowLive(id uint64, tokens int, firstAt time.Time) {
+	a.flowMu.Lock()
+	if f := a.flows[id]; f != nil {
+		f.RecvTok, f.RecvStart = tokens, firstAt.UnixMilli()
 	}
 	a.flowMu.Unlock()
 }
@@ -1581,12 +1625,85 @@ func durStr(d time.Duration) string {
 
 func (a *App) flowEnd(id uint64) {
 	a.flowMu.Lock()
-	if f := a.flows[id]; f != nil && !f.stageAt.IsZero() &&
-		f.Stage >= 0 && f.Stage < stageCount {
-		a.dwell[f.Stage] += time.Since(f.stageAt).Nanoseconds()
+	if f := a.flows[id]; f != nil {
+		if !f.stageAt.IsZero() && f.Stage >= 0 && f.Stage < stageCount {
+			a.dwell[f.Stage] += time.Since(f.stageAt).Nanoseconds()
+		}
+		if f.Stage >= 0 && f.Stage < stageCount {
+			a.concStepLocked(f.Stage, -1, time.Now())
+		}
 	}
 	delete(a.flows, id)
 	a.flowMu.Unlock()
+}
+
+// concStepLocked 记一次阶段迁移 (from < 0 = 新建, to < 0 = 结束), 并刷新片内峰值。
+// 调用方持 flowMu。
+func (a *App) concStepLocked(from, to int, now time.Time) {
+	a.concTouchLocked(now)
+	if from >= 0 && from < stageCount {
+		a.concNow[from]--
+	}
+	if to >= 0 && to < stageCount {
+		a.concNow[to]++
+	}
+	for s := 0; s < stageCount; s++ {
+		if a.concNow[s] > a.chunkPeak[s] {
+			a.chunkPeak[s] = a.concNow[s]
+		}
+	}
+}
+
+// concTouchLocked 把已经过完的时间片结算进历史 (每片记该片峰值), 新片从当前并发起步。
+// 调用方持 flowMu。
+func (a *App) concTouchLocked(now time.Time) {
+	if a.chunkAt.IsZero() {
+		a.chunkAt = now
+		return
+	}
+	for now.Sub(a.chunkAt) >= concSlice {
+		at := a.chunkAt
+		for s := 0; s < stageCount; s++ {
+			h := append(a.chunkHist[s], concChunk{at: at, peak: a.chunkPeak[s]})
+			if len(h) > concKeep {
+				h = h[len(h)-concKeep:]
+			}
+			a.chunkHist[s] = h
+			a.chunkPeak[s] = a.concNow[s]
+		}
+		a.chunkAt = at.Add(concSlice)
+	}
+}
+
+// concWeight 是一片的时间衰减权重: 年龄从片中心算起, w = e^(-age/concDecay)。
+func concWeight(at time.Time, now time.Time) float64 {
+	age := now.Sub(at.Add(concSlice / 2)).Seconds()
+	if age < 0 {
+		age = 0
+	}
+	return math.Exp(-age / concDecay.Seconds())
+}
+
+// concAvgsLocked 返回每个阶段的并发水平: 各片峰值的衰减加权平均 (含当前片)。
+// 调用方持 flowMu。
+func (a *App) concAvgsLocked(now time.Time) []float64 {
+	a.concTouchLocked(now)
+	out := make([]float64, stageCount)
+	for s := 0; s < stageCount; s++ {
+		num, den := 0.0, 0.0
+		for _, c := range a.chunkHist[s] {
+			w := concWeight(c.at, now)
+			num += float64(c.peak) * w
+			den += w
+		}
+		w := concWeight(a.chunkAt, now)
+		num += float64(a.chunkPeak[s]) * w
+		den += w
+		if den > 0 {
+			out[s] = num / den
+		}
+	}
+	return out
 }
 
 // flowActives 拷贝当前进行中的请求 (按开始时间升序)。
@@ -1701,14 +1818,16 @@ func (a *App) listenAddr() string {
 // snapshot 组装一份观测载荷 (since = TUI 上次拿到的 MaxSeq)。
 func (a *App) snapshot(since uint64) pulse {
 	evs, max := a.eventsSince(since)
+	now := time.Now()
 	a.flowMu.Lock()
 	dwell := append([]int64(nil), a.dwell[:]...)
+	conc := a.concAvgsLocked(now)
 	a.flowMu.Unlock()
 	return pulse{
 		Ver:    viewVer,
-		Listen: a.listenAddr(), Now: time.Now().Format(time.RFC3339Nano),
+		Listen: a.listenAddr(), Now: now.Format(time.RFC3339Nano),
 		Active: a.flowActives(), Cands: a.candViews(), Events: evs, MaxSeq: max,
-		SlowMs: 30000, Dwell: dwell,
+		SlowMs: 30000, Dwell: dwell, Conc: conc,
 	}
 }
 
@@ -2083,6 +2202,7 @@ func (a *App) probeCandidate(alias string, up *UpstreamCfg, model string, c *Pro
 		Ts: time.Now().Format(time.RFC3339Nano), Logical: alias, Upstream: up.ID, Model: model,
 		Path: "/v1/probe", Stream: true, Status: http.StatusOK, Usage: usage,
 		Missing: usage == nil, Source: "probe", TtfbMs: sample.TtfbMs, Tps: sample.Tps,
+		DurationMs: msCeil(time.Since(start)),
 	})
 }
 
@@ -2569,6 +2689,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// 观测面 (TUI): 这笔请求进"进行中"表, 每换候选/进出闸门刷一次展示状态, 结束时出表。
 	source := r.Header.Get("X-Tollgate-Source")
+	reqStart := time.Now() // 请求总耗时 (写日志时用), 与 flow 的 StartTime 同一起点
 	flowID := a.flowStart(logical, source, r.URL.Path, stream)
 	obs := &flowObs{a: a, id: flowID, logical: logical, slowMs: 30000}
 	var finalStatus int
@@ -2898,7 +3019,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if stream {
 		w.WriteHeader(status)
 		dst.Del("Content-Length")
-		ro := relayStream(w, resp.Body, logical, realModel, attemptStart, isResponses)
+		ro := relayStream(w, resp.Body, logical, realModel, attemptStart, isResponses,
+			func(tokens int, firstAt time.Time) { a.flowLive(flowID, tokens, firstAt) })
 		usage, missing, ttfbMs, decodeMs = ro.Usage, ro.Missing, ro.TtfbMs, ro.DecodeMs
 	} else {
 		buf, rerr := io.ReadAll(resp.Body)
@@ -2950,14 +3072,15 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		SemMs:  semMs,
 		Client: r.RemoteAddr, UA: r.Header.Get("User-Agent"), Source: r.Header.Get("X-Tollgate-Source"),
 		Fallbacks: failed, LockSkips: lockedSkips, BackoffSkips: backoffSkips,
-		TtfbMs: ttfbMs, Tps: tps,
+		TtfbMs: ttfbMs, Tps: tps, DurationMs: msCeil(time.Since(reqStart)),
 	})
 }
 
 // relayStream 按行透传 SSE, 期间提取流末 usage (设计 §4.9.2)。
 // 流未以 [DONE] 正常结束时, 发一个 SSE error 事件后关流, 不伪造正常结束 (F6)。
+// live 每约 200ms 回写一次已收到的输出 token 数与首字节时刻, 可为 nil。
 // 返回提取到的 usage 与是否缺失 (配合 F7 兜底)。
-func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel string, start time.Time, isResponses bool) relayOut {
+func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel string, start time.Time, isResponses bool, live func(tokens int, firstAt time.Time)) relayOut {
 	flusher, _ := w.(http.Flusher)
 	sc := bufio.NewScanner(body)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
@@ -2965,6 +3088,7 @@ func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel strin
 	est := 0
 	done := false
 	var firstAt, lastAt time.Time // 首字节 / 末字节时刻 (被动时延采样)
+	var lastLive time.Time        // 上次回写实时吞吐的时刻 (节流用)
 
 	write := func(s string) {
 		if _, err := io.WriteString(w, s); err != nil {
@@ -3039,6 +3163,11 @@ func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel strin
 			}
 		}
 		write(line + "\n")
+		// 实时吞吐: 最多 200ms 回写一次, 不每行都去抢 flowMu。
+		if live != nil && !firstAt.IsZero() && now.Sub(lastLive) >= 200*time.Millisecond {
+			lastLive = now
+			live(est, firstAt)
+		}
 	}
 	if !done {
 		// 流未正常结束: 用流内约定形态表达错误 (设计 §2.2 / F6)。

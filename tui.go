@@ -275,6 +275,47 @@ const (
 	tuiScanWindow = 24 * time.Hour
 )
 
+// 模型/路由表的吞吐: 最近 1h 窗口内的总输出 token 除以这些请求的耗时之和 (空闲不计)。
+const tuiTokWindow = time.Hour
+
+// tokPoint 是一笔请求的输出 token 与耗时采样。
+type tokPoint struct {
+	ts  time.Time
+	tok int
+	dur int64 // 请求耗时 (毫秒)
+}
+
+// tokRate 算 1h 窗口内的吞吐 (tokens/s): 平均 = 窗口内总输出 token 除以这些请求的
+// 耗时之和 (空闲不计), 峰值 = 单笔请求里最高的那笔 (同一口径: 该笔 token / 该笔耗时)。
+// 窗口内没有可用样本时 ok=false。
+func tokRate(pts []tokPoint, now time.Time) (avg, peak float64, ok bool) {
+	tok, dur := 0, int64(0)
+	for _, p := range pts {
+		if now.Sub(p.ts) > tuiTokWindow || p.dur <= 0 {
+			continue
+		}
+		tok += p.tok
+		dur += p.dur
+		if v := float64(p.tok) / (float64(p.dur) / 1000); v > peak {
+			peak = v
+		}
+	}
+	if tok <= 0 || dur <= 0 {
+		return 0, 0, false
+	}
+	return float64(tok) / (float64(dur) / 1000), peak, true
+}
+
+// addTok 追加一个采样, 并裁掉超出 1h 窗口的旧样本。
+func addTok(pts []tokPoint, p tokPoint, now time.Time) []tokPoint {
+	pts = append(pts, p)
+	start := 0
+	for start < len(pts) && now.Sub(pts[start].ts) > tuiTokWindow {
+		start++
+	}
+	return pts[start:]
+}
+
 // ---------- 视图模型 ----------
 
 // routeRow 是「逻辑名 x 上游 x 真实模型」的一行聚合 (来自日志)。
@@ -284,8 +325,7 @@ type routeRow struct {
 	Prompt, Cached, Total    int
 	TtfbSum                  int64
 	TtfbN                    int
-	TpsSum                   float64
-	TpsN                     int
+	Tok                      []tokPoint
 	First, Last              time.Time
 }
 
@@ -481,14 +521,14 @@ func (m *tuiModel) absorb(line []byte) {
 		row.Prompt += r.Usage.Prompt
 		row.Cached += r.Usage.Cached
 		row.Total += total
+		if r.Usage.Completion > 0 && r.DurationMs > 0 {
+			row.Tok = addTok(row.Tok,
+				tokPoint{ts: ts, tok: r.Usage.Completion, dur: r.DurationMs}, time.Now())
+		}
 	}
 	if r.TtfbMs > 0 {
 		row.TtfbSum += r.TtfbMs
 		row.TtfbN++
-	}
-	if r.Tps > 0 {
-		row.TpsSum += r.Tps
-		row.TpsN++
 	}
 	if row.First.IsZero() || ts.Before(row.First) {
 		row.First = ts
@@ -995,15 +1035,28 @@ var flowBlocks = []struct {
 	{"已失败", []int{stageFailed}},
 }
 
-// defaultMinRows 是各块数据行区的缺省档: 停留时长统计还没数据 (新起的 TUI, 或对端
-// 观测面没有 dwell 字段) 时用这一档。
+// defaultMinRows 是各块数据行区的缺省档: 并发水平还没算出来 (新起的 TUI, 或对端观测面
+// 没有 conc 字段) 时用这一档。
 var defaultMinRows = []int{4, 4, 2, 4, 2, 2}
 
-// flowMinRows 按各阶段的历史停留时长给每个分块定数据行区高度: 占时越长的阶段行越多
-// (1 至 6 行封顶, 至少 1 行撑版式)。停留时长由服务侧按阶段精确累计 (pulse.Dwell,
-// 比 TUI 轮询采样准: 采样会把一闪而过的阶段也记成约一个采样周期)。
+// flowMinRows 按各阶段的并发水平给每个分块定数据行区高度 (1 至 6 行封顶, 至少 1 行撑
+// 版式)。并发水平由服务侧算好 (pulse.Conc): 10min 分片取峰值, 再按片的年龄做指数衰减
+// 加权平均, 所以最近忙的阶段多留行。块内多个阶段互斥, 相加即该块要占的行数。
+// 旧对端没有 Conc 时退回按停留时长占比分配 (pulse.Dwell)。
 func (m *tuiModel) flowMinRows() []int {
 	out := append([]int(nil), defaultMinRows...)
+	if len(m.pulse.Conc) >= stageCount {
+		for i, b := range flowBlocks {
+			v := 0.0
+			for _, st := range b.stages {
+				if st >= 0 && st < stageCount {
+					v += m.pulse.Conc[st]
+				}
+			}
+			out[i] = clampRows(int(math.Round(v)))
+		}
+		return out
+	}
 	dwell := m.pulse.Dwell
 	if len(dwell) < stageCount {
 		return out
@@ -1022,16 +1075,20 @@ func (m *tuiModel) flowMinRows() []int {
 				sum += float64(dwell[st])
 			}
 		}
-		n := int(math.Round(sum/total*14)) + 1 // 均分 ~3 行, 占大头顶到 6, 极少落回 1
-		if n < 1 {
-			n = 1
-		}
-		if n > 6 {
-			n = 6
-		}
-		out[i] = n
+		out[i] = clampRows(int(math.Round(sum/total*14)) + 1) // 均分 ~3 行, 占大头顶到 6
 	}
 	return out
+}
+
+// clampRows 把行数夹进 1 至 6 行: 至少 1 行撑版式, 最多 6 行不占满屏。
+func clampRows(n int) int {
+	if n < 1 {
+		return 1
+	}
+	if n > 6 {
+		return 6
+	}
+	return n
 }
 
 func stageIn(st int, list []int) bool {
@@ -1049,6 +1106,13 @@ func (m *tuiModel) flowCells(f flow) []string {
 	if f.Stream {
 		tag = "是"
 	}
+	status := stageName(f)
+	if f.Stage == stageRecv && f.RecvTok > 0 && f.RecvStart > 0 {
+		// 接收中: 状态列写这笔的吞吐 = 已收到的输出 token / 首字节到达至今的秒数。
+		if el := time.Since(time.UnixMilli(f.RecvStart)).Seconds(); el > 0 {
+			status = ftoa(float64(f.RecvTok)/el, 1) + " t/s"
+		}
+	}
 	return []string{
 		flowIDCell(f.ID),
 		durStr(time.Since(f.StartTime)),
@@ -1057,7 +1121,7 @@ func (m *tuiModel) flowCells(f flow) []string {
 		tag,
 		f.Source,
 		f.Path,
-		stageName(f),
+		status,
 	}
 }
 
@@ -1328,8 +1392,9 @@ func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 		if r.TtfbN > 0 {
 			ttfb = durStr(time.Duration(r.TtfbSum/int64(r.TtfbN)) * time.Millisecond)
 		}
-		if r.TpsN > 0 {
-			tps = ftoa(r.TpsSum/float64(r.TpsN), 1)
+		if avg, peak, ok := tokRate(r.Tok, time.Now()); ok {
+			// 一个格子里放两个数: 1h 平均 / 单笔峰值 (同一口径)。
+			tps = ftoa(avg, 1) + "/" + ftoa(peak, 1)
 		}
 		// 与 modelCols 的顺序一一对应 (dropEmptyCols 按下标裁列)。
 		mrows = append(mrows, []string{
@@ -1373,8 +1438,7 @@ type modelRow struct {
 	Total, Cached    int
 	TtfbSum          int64
 	TtfbN            int
-	TpsSum           float64
-	TpsN             int
+	Tok              []tokPoint
 	Last             time.Time
 }
 
@@ -1383,7 +1447,7 @@ type modelRow struct {
 func (r *modelRow) blank() bool {
 	return r.Queue == 0 && r.Fails == 0 && r.PausedMs == 0 && r.LockMs == 0 &&
 		r.Reqs == 0 && r.Errs == 0 && r.Fallbacks == 0 &&
-		r.Total == 0 && r.Cached == 0 && r.TtfbN == 0 && r.TpsN == 0 &&
+		r.Total == 0 && r.Cached == 0 && r.TtfbN == 0 && len(r.Tok) == 0 &&
 		r.Last.IsZero()
 }
 
@@ -1418,8 +1482,7 @@ func (m *tuiModel) modelRows() []*modelRow {
 		r.Cached += rr.Cached
 		r.TtfbSum += rr.TtfbSum
 		r.TtfbN += rr.TtfbN
-		r.TpsSum += rr.TpsSum
-		r.TpsN += rr.TpsN
+		r.Tok = append(r.Tok, rr.Tok...)
 		if rr.Last.After(r.Last) {
 			r.Last = rr.Last
 		}

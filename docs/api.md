@@ -175,7 +175,14 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 - 载荷: `ver` (观测面版本), `listen`, `now`, `active` (进行中请求数组), `cands`
   (每上游一条: 队列长 / 在飞 / 并发上限 / 是否在试探 / 连续错误数 / 退避剩余 / 锁剩余
   / 锁原因 / 各记账组的额度锁 (`groups`: 组名 + 锁剩余, 按配置顺序) / 模型级熔断锁
-  / 距下次节拍), `events` (事件数组), `max_seq`, `slow_ms`.
+  / 距下次节拍), `events` (事件数组), `max_seq`, `slow_ms`, `conc` (各阶段并发水平,
+  下标 = 阶段: 时间切成 10min 的片, 每片取片内峰值, 片间按年龄做指数衰减加权平均
+  (时间常数 10min, 保留最近 24h); TUI 用它给第 1 页各分块分配行数), `dwell` (各阶段
+  停留时长累计, 旧版 TUI 兼容用).
+- `active` 每笔: `id` / `logical` / `source` / `path` / `stream` / `start` / `upstream` /
+  `backend` / `stage` / `attempt` / `gate`; 接收中的流式请求另带 `recv_tok` (已收到的
+  输出 token 估计数) 与 `recv_start` (首字节到达时刻, Unix 毫秒), 后者用来算这笔的
+  实时吞吐 (从首字节起算).
 - 事件 `kind`: `start` / `lock` / `unlock` / `fallback` / `gate` / `error` / `slow` /
   `ok` / `reload`.
 - 其余方法返回 405.
@@ -218,6 +225,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 | `gate` | 被闸门挡下未发出时的原因 (见 5.2) |
 | `lock_skips` / `backoff_skips` | 候选被锁 / 在退避而被跳过的次数 |
 | `ttfb_ms` / `tps` | 首字节时延 / 解码吞吐 (流式才有 tps) |
+| `duration_ms` | 请求耗时 (收到请求到写完响应), 供不把空闲计入分母的吞吐 |
 
 明细事实来源是日志 (观测面重启即清空, 设计 D12); `-summary` 与 `-usage` 两个离线子命
 令都能跨归档读, 见 [operations.md](operations.md) §7.
