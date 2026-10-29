@@ -182,7 +182,9 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 - `active` 每笔: `id` / `logical` / `source` / `path` / `stream` / `start` / `upstream` /
   `backend` / `stage` / `attempt` / `gate`; 接收中的流式请求另带 `recv_tok` (已收到的
   输出 token 估计数) 与 `recv_start` (首字节到达时刻, Unix 毫秒), 后者用来算这笔的
-  实时吞吐 (从首字节起算).
+  实时吞吐 (从首字节起算); 耗时列另带 `segs` (各阶段已结算的累计耗时, 秒, 下标 =
+  `stage`)、`cur_at` (当前阶段进入时刻, Unix 毫秒, TUI 用它现算正在走的那一段) 与
+  `max_stage` (到过的最远阶段, TUI 据此决定写几段).
 - 事件 `kind`: `start` / `lock` / `unlock` / `fallback` / `gate` / `error` / `slow` /
   `ok` / `reload`.
 - 其余方法返回 405.

@@ -235,11 +235,11 @@ func TestAutoColsFillsToBoundary(t *testing.T) {
 	}
 }
 
-// active 页主表在 120 列终端上不该再丢列: 用截断次要列换全部 8 列可见。
+// active 页主表在 120 列终端上不该再丢列: 用截断次要列换全部 6 列可见。
 func TestActiveTableKeepsAllColsAt120(t *testing.T) {
 	rows := [][]string{{
-		"12345", "1m02s", "claude-3-5-sonnet", "group/claude-sonnet-4-5-20250929",
-		"是", "claude-code", "/v1/messages", "额度锁 09:12",
+		"12345", "claude-3-5-sonnet", "是",
+		"3s(0.1s/0.1s/0s/2.8s)", "group/claude-sonnet-4-5-20250929", "额度锁 09:12",
 	}}
 	cols := autoCols(activeCols, rows, 120)
 	if w := tableWidth(cols); w > 120 {
@@ -252,25 +252,76 @@ func TestActiveTableKeepsAllColsAt120(t *testing.T) {
 	}
 }
 
-// 回归: 中间列整列为空被 colKeep 丢掉 (如全部请求都没有来源) 之后, 后面的
-// 路径列不能再按错位的 cell 算宽 —— 曾经列宽停在基准值, 长路径被提前截断,
-// 终端明明够宽也打出 ~。现在行列按同一份 keep 对齐, 宽终端下路径应完整显示。
+// 回归: 中间列整列为空被 colKeep 丢掉 (如这批请求都还没选中上游) 之后, 后面的
+// 状态列不能再按错位的 cell 算宽 —— 曾经列宽停在基准值, 长内容被提前截断,
+// 终端明明够宽也打出 ~。现在行列按同一份 keep 对齐, 宽终端下状态应完整显示。
 func TestFlowDroppedColKeepsLaterColWidth(t *testing.T) {
 	openTestPTY(t, 40, 160)
 	m := newTUIModel("cfg")
 	m.tab = tabActive
 	now := time.Now()
-	path := strings.Repeat("p", 60)
+	long := "额度锁 " + strings.Repeat("x", 60)
 	m.pulse.Active = []flow{{
-		ID: 7, Logical: "claude-3-5-sonnet", Up: "group", Model: "claude-sonnet-4-5-20250929",
-		Stage: stageSend, StartTime: now, Path: path,
+		ID: 7, Logical: "claude-3-5-sonnet", Stage: stageQueue,
+		Gate: long, StartTime: now,
 	}}
 	out := stripANSI(m.draw())
 	if strings.Contains(out, "~") {
 		t.Errorf("宽终端下第 1 页不该出现截断符 ~:\n%v", out)
 	}
-	if !strings.Contains(out, path) {
-		t.Errorf("长路径应完整显示, 实际被截断:\n%v", out)
+	if !strings.Contains(out, long) {
+		t.Errorf("长状态应完整显示, 实际被截断:\n%v", out)
+	}
+}
+
+// 耗时列: 总耗时, 括号里是从第一段写到手边这一段的分段耗时, 没到过的阶段不补 0,
+// 当前段按 CurAt 现算; 前三段 (并发池 / 频率队列 / 状态锁) 合计不超过 3s 时并成一段
+// 「发送前」, 只写 发送前 / 等待中 / 接收中; 超过 3s 才按 5 段摊开。对端不带分段数据
+// (老版本服务) 时只写总耗时。
+func TestFlowDurCellSegments(t *testing.T) {
+	m := newTUIModel("cfg")
+	now := time.Now()
+	// 发送前 0.5s (并成一段) + 等响应头 2.5s。
+	send := flow{
+		ID: 1, Logical: "m", Stage: stageSend, MaxStage: stageSend,
+		StartTime: now.Add(-3 * time.Second),
+		CurAt:     now.Add(-2500 * time.Millisecond).UnixMilli(),
+		Segs:      []float64{0.3, 0.1, 0.1, 0, 0, 0},
+	}
+	if got := m.durCell(send); got != "3s(0.5s/2.5s)" {
+		t.Errorf("已发送 (发送前 <= 3s): 期望 3s(0.5s/2.5s), 得到 %q", got)
+	}
+	// 发送前 0.5s + 等响应头 1s + 接收 1.5s: 短等待并段后正好三段。
+	recv := flow{
+		ID: 2, Logical: "m", Stage: stageRecv, MaxStage: stageRecv,
+		StartTime: now.Add(-3 * time.Second),
+		CurAt:     now.Add(-1500 * time.Millisecond).UnixMilli(),
+		Segs:      []float64{0.3, 0.1, 0.1, 0, 1, 0},
+	}
+	if got := m.durCell(recv); got != "3s(0.5s/1s/1.5s)" {
+		t.Errorf("接收中 (发送前 <= 3s): 期望 3s(0.5s/1s/1.5s), 得到 %q", got)
+	}
+	// 发送前合计 3.7s: 超过门槛, 三段不并, 按 5 段摊开。
+	slow := flow{
+		ID: 3, Logical: "m", Stage: stageSend, MaxStage: stageSend,
+		StartTime: now.Add(-3700 * time.Millisecond),
+		CurAt:     now.UnixMilli(),
+		Segs:      []float64{0.1, 0.1, 0, 3.5, 0, 0},
+	}
+	if got := m.durCell(slow); got != "3.7s(0.2s/0s/3.5s/0s)" {
+		t.Errorf("已发送 (发送前 > 3s): 期望 3.7s(0.2s/0s/3.5s/0s), 得到 %q", got)
+	} // 并发池里只有「发送前」一段, 合并前后写法一致。
+	pool := flow{
+		ID: 4, Logical: "m", Stage: stageSem, MaxStage: stageSem,
+		StartTime: now.Add(-time.Second), CurAt: now.UnixMilli(),
+		Segs: []float64{0.1, 0, 0, 0, 0, 0},
+	}
+	if got := m.durCell(pool); got != "1s(0.1s)" {
+		t.Errorf("并发池: 期望 1s(0.1s), 得到 %q", got)
+	}
+	old := flow{ID: 5, Logical: "m", Stage: stageSend, StartTime: now.Add(-3 * time.Second)}
+	if got := m.durCell(old); got != "3s" {
+		t.Errorf("老对端没有分段数据时应只写总耗时, 得到 %q", got)
 	}
 }
 
@@ -572,7 +623,7 @@ func TestFlowHeaderAlwaysShown(t *testing.T) {
 	m := newTUIModel("cfg")
 	m.tab = tabActive
 	out := stripANSI(m.draw())
-	for _, name := range []string{"编号", "耗时", "逻辑名", "上游/模型", "流式", "来源", "路径"} {
+	for _, name := range []string{"编号", "逻辑名", "流式", "耗时", "上游/模型", "状态"} {
 		if !strings.Contains(out, name) {
 			t.Errorf("空表也应显示列名 %q", name)
 		}

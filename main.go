@@ -1313,8 +1313,15 @@ type flow struct {
 	Gate      string    `json:"gate,omitempty"`       // 在等什么 (屏幕上那句话): 已发出 / 等节拍 … / 退避 … / 额度锁 …
 	RecvTok   int       `json:"recv_tok,omitempty"`   // 接收中: 已收到的输出 token 数 (流式估算)
 	RecvStart int64     `json:"recv_start,omitempty"` // 接收中: 首字节到达时刻 (Unix 毫秒)
+	// 耗时列的分段数据: Segs 是各阶段已结算的累计耗时 (秒, 下标 = stage*), 当前阶段
+	// 还没结算 (只记在 stageAt 里), TUI 用 CurAt 现算这一段; MaxStage 是到过的最远
+	// 阶段, TUI 据此决定括号里写几段 (没到过的阶段不补 0)。
+	Segs     []float64 `json:"segs,omitempty"`
+	CurAt    int64     `json:"cur_at,omitempty"`
+	MaxStage int       `json:"max_stage,omitempty"`
 
-	stageAt time.Time // 进入当前阶段的时刻 (停留时长统计用, 不出 JSON)
+	stageAt  time.Time         // 进入当前阶段的时刻 (停留时长统计用, 不出 JSON)
+	stageDur [stageCount]int64 // 各阶段已结算的累计耗时 (纳秒, 下标 = stage*)
 }
 
 // viewEvent 是事件流的一条: 调度器动作 + 每笔请求的结局 (由引擎侧发出, 不经日志回读)。
@@ -1463,7 +1470,7 @@ func (a *App) flowStart(logical, source, path string, stream bool) uint64 {
 		delete(a.flows, oldest)
 	}
 	a.flows[id] = &flow{ID: id, Logical: logical, Source: source, Path: path,
-		Stream: stream, StartTime: now, Stage: stageParse, stageAt: now}
+		Stream: stream, StartTime: now, Stage: stageParse, MaxStage: stageParse, stageAt: now}
 	a.concStepLocked(-1, stageParse, now)
 	a.flowMu.Unlock()
 	return id
@@ -1475,10 +1482,18 @@ func (a *App) flowStage(id uint64, up, mod string, stage int, gate string, attem
 	a.flowMu.Lock()
 	if f := a.flows[id]; f != nil {
 		from := f.Stage
+		now := time.Now()
 		if !f.stageAt.IsZero() && f.Stage >= 0 && f.Stage < stageCount {
-			a.dwell[f.Stage] += time.Since(f.stageAt).Nanoseconds()
+			d := now.Sub(f.stageAt).Nanoseconds()
+			a.dwell[f.Stage] += d
+			f.stageDur[f.Stage] += d
 		}
-		f.Stage, f.stageAt = stage, time.Now()
+		f.Stage, f.stageAt = stage, now
+		// 已失败不是流程上的阶段 (候选链走完的结局), 不参与"到过哪一段"的记账;
+		// 回退到更早的阶段 (换候选) 也不该让已到过的段数缩回去。
+		if stage >= 0 && stage < stageCount && stage != stageFailed && stage > f.MaxStage {
+			f.MaxStage = stage
+		}
 		if up != "" {
 			f.Up = up
 		}
@@ -1706,12 +1721,21 @@ func (a *App) concAvgsLocked(now time.Time) []float64 {
 	return out
 }
 
-// flowActives 拷贝当前进行中的请求 (按开始时间升序)。
+// flowActives 拷贝当前进行中的请求 (按开始时间升序), 顺手把耗时列要的分段数据换成
+// 秒 (JSON 里的 stageDur 是内部纳秒记账, 不出原始数组)。
 func (a *App) flowActives() []flow {
 	a.flowMu.Lock()
 	out := make([]flow, 0, len(a.flows))
 	for _, f := range a.flows {
-		out = append(out, *f)
+		v := *f
+		v.Segs = make([]float64, stageCount)
+		for st := 0; st < stageCount; st++ {
+			v.Segs[st] = time.Duration(v.stageDur[st]).Seconds()
+		}
+		if !v.stageAt.IsZero() {
+			v.CurAt = v.stageAt.UnixMilli()
+		}
+		out = append(out, v)
 	}
 	a.flowMu.Unlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].StartTime.Before(out[j].StartTime) })

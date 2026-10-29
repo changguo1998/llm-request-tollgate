@@ -988,7 +988,7 @@ func cutRank(hide int) int {
 // autoCols 按内容与可用宽度分配列宽: 每列先占住基准宽 (下限), 余量按"要得少的先补齐"
 // 分给各列 (差得一样多时重要的先), 一直补到该列的内容宽为止。列宽不写死上限, 上限就是
 // 终端右边界: 内容长的列一路顶到边界, 顶满之后还有的内容才截断。这样能补齐的列最多,
-// 贪吃的那列 (通常是模型名或路径) 吃剩下的余量; 连基准宽都放不下才原样返回,
+// 贪吃的那列 (通常是模型名或耗时) 吃剩下的余量; 连基准宽都放不下才原样返回,
 // 交给 fitCols 按老规矩丢列。
 func autoCols(cols []tuiCol, rows [][]string, width int) []tuiCol {
 	out := append([]tuiCol(nil), cols...)
@@ -1055,12 +1055,108 @@ func alignRow(cols []tuiCol, cells []string, vis []bool) []string {
 	return out
 }
 
-// 更宽时按内容涨, 顶到终端右边界为止。上游与真实模型合成一格, 写法 "上游/模型"
-// (与 -usage 的 key 一致, 如 ustc/gpt-5-codex)。
+// 列宽在放得下时按内容涨, 顶到终端右边界为止。上游与真实模型合成一格, 写法 "上游/模型"
+// (与 -usage 的 key 一致, 如 ustc/gpt-5-codex)。列序按流程从左到右: 编号 → 逻辑名 →
+// 流式 → 耗时 → 上游 → 状态; 路径与来源不进表 (路径太长, 又对辨认一笔请求没帮助)。
 var activeCols = []tuiCol{
-	{"编号", 4, true, true, 1}, {"耗时", 6, true, true, 0}, {"逻辑名", 10, true, false, 0},
-	{"上游/模型", 18, true, false, 0}, {"流式", 4, false, false, 2},
-	{"来源", 8, true, false, 1}, {"路径", 12, true, false, 3}, {"状态", 10, true, false, 0},
+	{"编号", 4, true, true, 1}, {"逻辑名", 10, true, false, 0},
+	{"流式", 4, false, false, 2}, {"耗时", 14, true, true, 0},
+	{"上游/模型", 18, true, false, 0}, {"状态", 10, true, false, 0},
+}
+
+// flowSegs 是耗时列括号里的分段: 与第 1 页分块同序, 只去掉「已失败」(它是结局不是
+// 阶段)。并发池把解析与取信号量合为一段, 与分块口径一致。
+var flowSegs = [][]int{
+	{stageParse, stageSem},
+	{stageQueue},
+	{stageModelWait},
+	{stageSend},
+	{stageRecv},
+}
+
+// segMergeMax 是合并前段 (并发池 / 频率队列 / 状态锁) 的门槛: 三段合计不超过它时,
+// 发出去之前的等待不值得逐段看, 并成一段「发送前」, 耗时列只写 发送前 / 等待中 /
+// 接收中 三段; 超过它才按 5 段摊开, 让人一眼看出时间耗在哪一步。
+const segMergeMax = 3 * time.Second
+
+// segOf 是阶段所属的分段下标 (-1 = 不在任何分段里, 如已失败)。
+func segOf(stage int) int {
+	for i, seg := range flowSegs {
+		if stageIn(stage, seg) {
+			return i
+		}
+	}
+	return -1
+}
+
+// flowSegDurs 是耗时列括号里各段的秒数: 从第一段写到手边这一段, 没到过的阶段不补 0。
+// 已结算的段读 Segs (服务端在离开阶段时入账), 当前段用 CurAt 现算 —— 对端每秒才刷新
+// 一次, 直接读 Segs 会让正在走的这一段晚一拍。
+// 前三段 (并发池 / 频率队列 / 状态锁) 合计不超过 segMergeMax 时并成一段「发送前」,
+// 剩下的依次是「等待中」(等响应头) 与「接收中」。
+func flowSegDurs(f flow) []float64 {
+	if len(f.Segs) == 0 { // 老版本服务不下发分段数据
+		return nil
+	}
+	last := segOf(f.MaxStage)
+	if last < 0 {
+		return nil
+	}
+	out := make([]float64, last+1)
+	for i := 0; i <= last && i < len(flowSegs); i++ {
+		for _, st := range flowSegs[i] {
+			if st < len(f.Segs) {
+				out[i] += f.Segs[st]
+			}
+		}
+	}
+	if cur := segOf(f.Stage); cur >= 0 && cur <= last && f.CurAt > 0 {
+		out[cur] += time.Since(time.UnixMilli(f.CurAt)).Seconds()
+	}
+	return mergePreSend(out)
+}
+
+// mergePreSend 把前三段 (并发池 / 频率队列 / 状态锁) 并进一段「发送前」: 三段合计
+// (按屏幕上的 0.1s 精度) 不超过 segMergeMax 才并, 超过就原样返回。
+func mergePreSend(segs []float64) []float64 {
+	pre := 0.0
+	for i := 0; i < len(segs) && i < 3; i++ {
+		pre += segs[i]
+	}
+	if math.Round(pre*10)/10 > segMergeMax.Seconds() {
+		return segs
+	}
+	out := append([]float64{pre}, segs[min(3, len(segs)):]...)
+	return out
+}
+
+// durCell 是耗时格: 总耗时, 括号里是各段耗时 (如 3s(0.1s/0.1s/0s/2.8s))。对端不提供
+// 分段数据 (老版本服务) 时只写总耗时。总耗时与分段同样按 0.1s 取整, 不然括号里的和会
+// 比总数差一截 (如 3.7s 印成 3s)。
+func (m *tuiModel) durCell(f flow) string {
+	el := time.Since(f.StartTime)
+	segs := flowSegDurs(f)
+	if len(segs) == 0 {
+		return durStr(el)
+	}
+	parts := make([]string, len(segs))
+	for i, s := range segs {
+		parts[i] = segStr(s)
+	}
+	return segStr(el.Seconds()) + "(" + strings.Join(parts, "/") + ")"
+}
+
+// segStr 写一段耗时: 按 0.1s 四舍五入 (整秒不写小数点, 如 2.8s / 3s / 0s), 超过一分钟
+// 走 durStr 的 mm:ss 写法。
+func segStr(sec float64) string {
+	if sec < 60 {
+		v := math.Round(max(0, sec)*10) / 10
+		if v == math.Trunc(v) {
+			return strconv.Itoa(int(v)) + "s"
+		}
+		return strconv.FormatFloat(v, 'f', 1, 64) + "s"
+	}
+	return durStr(time.Duration(sec * float64(time.Second)))
 }
 
 // flowBlocks 是第 1 页的分块: 顺序就是请求在调度器里的流程顺序。
@@ -1169,7 +1265,8 @@ func stageIn(st int, list []int) bool {
 	return false
 }
 
-// flowCells 是一笔活动连接的表格行 (列与旧版一致: 时间、逻辑名、上游/模型…) 。
+// flowCells 是一笔活动连接的表格行, 列序与 activeCols 一致 (编号 / 逻辑名 / 流式 /
+// 耗时 / 上游 / 状态)。
 func (m *tuiModel) flowCells(f flow) []string {
 	tag := "否"
 	if f.Stream {
@@ -1184,12 +1281,10 @@ func (m *tuiModel) flowCells(f flow) []string {
 	}
 	return []string{
 		flowIDCell(f.ID),
-		durStr(time.Since(f.StartTime)),
 		f.Logical,
-		m.upModel(f.Up, f.Model),
 		tag,
-		f.Source,
-		f.Path,
+		m.durCell(f),
+		m.upModel(f.Up, f.Model),
 		status,
 	}
 }
@@ -1227,10 +1322,10 @@ func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 		}
 		all = append(all, grouped[i]...)
 	}
-	// 整列都空的列 (这批请求都没有来源 / 路径) 一起丢掉, 各块才能对齐。
+	// 整列都空的列 (这批请求都还没选中上游) 一起丢掉, 各块才能对齐。
 	keep := colKeep(activeCols, all)
 	// 状态列恒保留: 阶段已由块标题说明, 状态列多为细节 (退避 / 熔断锁 / 额度锁), 整列
-	// 同时为空时不能像 来源/路径 那样丢列, 否则列会闪跳、各块对不齐。
+	// 同时为空时不能像 上游/模型 那样丢列, 否则列会闪跳、各块对不齐。
 	for i, c := range activeCols {
 		if c.title == "状态" {
 			keep[i] = true
@@ -1307,7 +1402,7 @@ func pickRows(keep []bool, rows [][]string) [][]string {
 	return out
 }
 
-// dropEmptyCols 去掉整列都是空串的列 (例如这批请求都没有来源 / 路径时)。
+// dropEmptyCols 去掉整列都是空串的列 (例如这批请求都还没选中上游时)。
 // 单张表用这一对函数就够了; 一页多块共用一份表头时, 直接用 colKeep / pickRows。
 func dropEmptyCols(cols []tuiCol, rows [][]string) ([]tuiCol, [][]string) {
 	keep := colKeep(cols, rows)
