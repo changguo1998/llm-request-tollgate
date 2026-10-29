@@ -1057,11 +1057,11 @@ func alignRow(cols []tuiCol, cells []string, vis []bool) []string {
 
 // 列宽在放得下时按内容涨, 顶到终端右边界为止。上游与真实模型合成一格, 写法 "上游/模型"
 // (与 -usage 的 key 一致, 如 ustc/gpt-5-codex)。列序按流程从左到右: 编号 → 逻辑名 →
-// 流式 → 耗时 → 上游 → 状态; 路径与来源不进表 (路径太长, 又对辨认一笔请求没帮助)。
+// 流式 → 上游 → 耗时 → 状态; 路径与来源不进表 (路径太长, 又对辨认一笔请求没帮助)。
 var activeCols = []tuiCol{
 	{"编号", 4, true, true, 1}, {"逻辑名", 10, true, false, 0},
-	{"流式", 4, false, false, 2}, {"耗时", 14, true, true, 0},
-	{"上游/模型", 18, true, false, 0}, {"状态", 10, true, false, 0},
+	{"流式", 4, false, false, 2}, {"上游/模型", 18, true, false, 0},
+	{"耗时", 14, true, true, 0}, {"状态", 10, true, false, 0},
 }
 
 // flowSegs 是耗时列括号里的分段: 与第 1 页分块同序, 只去掉「已失败」(它是结局不是
@@ -1077,7 +1077,7 @@ var flowSegs = [][]int{
 // segMergeMax 是合并前段 (并发池 / 频率队列 / 状态锁) 的门槛: 三段合计不超过它时,
 // 发出去之前的等待不值得逐段看, 并成一段「发送前」, 耗时列只写 发送前 / 等待中 /
 // 接收中 三段; 超过它才按 5 段摊开, 让人一眼看出时间耗在哪一步。
-const segMergeMax = 3 * time.Second
+const segMergeMax = 4 * time.Second
 
 // segOf 是阶段所属的分段下标 (-1 = 不在任何分段里, 如已失败)。
 func segOf(stage int) int {
@@ -1130,7 +1130,7 @@ func mergePreSend(segs []float64) []float64 {
 	return out
 }
 
-// durCell 是耗时格: 总耗时, 括号里是各段耗时 (如 3s(0.1s/0.1s/0s/2.8s))。对端不提供
+// durCell 是耗时格: 总耗时, 括号里是各段耗时 (如 3s(0.1s+0.1s+0s+2.8s))。对端不提供
 // 分段数据 (老版本服务) 时只写总耗时。总耗时与分段同样按 0.1s 取整, 不然括号里的和会
 // 比总数差一截 (如 3.7s 印成 3s)。
 func (m *tuiModel) durCell(f flow) string {
@@ -1143,7 +1143,7 @@ func (m *tuiModel) durCell(f flow) string {
 	for i, s := range segs {
 		parts[i] = segStr(s)
 	}
-	return segStr(el.Seconds()) + "(" + strings.Join(parts, "/") + ")"
+	return segStr(el.Seconds()) + "(" + strings.Join(parts, "+") + ")"
 }
 
 // segStr 写一段耗时: 按 0.1s 四舍五入 (整秒不写小数点, 如 2.8s / 3s / 0s), 超过一分钟
@@ -1266,7 +1266,7 @@ func stageIn(st int, list []int) bool {
 }
 
 // flowCells 是一笔活动连接的表格行, 列序与 activeCols 一致 (编号 / 逻辑名 / 流式 /
-// 耗时 / 上游 / 状态)。
+// 上游 / 耗时 / 状态)。
 func (m *tuiModel) flowCells(f flow) []string {
 	tag := "否"
 	if f.Stream {
@@ -1283,8 +1283,8 @@ func (m *tuiModel) flowCells(f flow) []string {
 		flowIDCell(f.ID),
 		f.Logical,
 		tag,
-		m.durCell(f),
 		m.upModel(f.Up, f.Model),
+		m.durCell(f),
 		status,
 	}
 }
