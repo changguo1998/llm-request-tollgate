@@ -1022,9 +1022,9 @@ var activeCols = []tuiCol{
 
 // flowBlocks 是第 1 页的分块: 顺序就是请求在调度器里的流程顺序。
 // 解析与并发池合成第一块 (解析是瞬时状态, 单独一块只会闪一下)。
-// 各块的数据行区高度按历史停留时长动态分档 (flowMinRows): 停留久的阶段多留几行
-// (内容多、盯的重点), 一闪而过的阶段少留几行; 行不够就补空行, 请求换阶段、块空了,
-// 底下的块也不会往上跳。
+// 各块的数据行区高度由 flowMinRows 按「窗口内最大并发」与「阶段停留时长」一起定:
+// 两个信号都强的阶段多留几行, 每个阶段至少留 1 行撑住版式; 行不够就补空行, 请求换
+// 阶段、块空了, 底下的块也不会往上跳。
 var flowBlocks = []struct {
 	title  string
 	stages []int
@@ -1037,38 +1037,62 @@ var flowBlocks = []struct {
 	{"已失败", []int{stageFailed}},
 }
 
-// defaultMinRows 是各块数据行区的缺省档: 并发水平还没算出来 (新起的 TUI, 或对端观测面
-// 没有 conc 字段) 时用这一档。
+// defaultMinRows 是各块数据行区的缺省档: 两个信号都还没算出来 (新起的 TUI, 或对端观测面
+// 没有 conc / dwell 字段) 时用这一档。
 var defaultMinRows = []int{4, 4, 2, 4, 2, 2}
 
-// flowMinRows 按各阶段的并发水平给每个分块定数据行区高度 (1 至 6 行封顶, 至少 1 行撑
-// 版式)。并发水平由服务侧算好 (pulse.Conc): 10min 分片取峰值, 再按片的年龄做指数衰减
-// 加权平均, 所以最近忙的阶段多留行。块内多个阶段互斥, 相加即该块要占的行数。
-// 旧对端没有 Conc 时退回按停留时长占比分配 (pulse.Dwell)。
+// flowMinRows 给每个分块定数据行区高度 (每个阶段保底 1 行, 6 行封顶)。两个信号相加:
+//   - 并发水平 (pulse.Conc): 一定时间窗口内的峰值再按片年龄做指数衰减加权, 反映最近有
+//     多忙; 先取平方根再除以各块最大值, 压住"并发池一家独大";
+//   - 停留时长 (pulse.Dwell): 该阶段累计停留占总停留的比例, 反映请求在这一步耗多久。
+//
+// 两者按 0.6 / 0.4 加权后映射到 1 至 6 行。只有停留时长 (旧对端) 时退回按占比分配。
 func (m *tuiModel) flowMinRows() []int {
 	out := append([]int(nil), defaultMinRows...)
+	share, hasDwell := m.blockDwellShare()
 	if len(m.pulse.Conc) >= stageCount {
+		concs := make([]float64, len(flowBlocks))
+		maxConc := 0.0
 		for i, b := range flowBlocks {
-			v := 0.0
 			for _, st := range b.stages {
 				if st >= 0 && st < stageCount {
-					v += m.pulse.Conc[st]
+					concs[i] += m.pulse.Conc[st]
 				}
 			}
-			out[i] = clampRows(int(math.Round(v)))
+			if concs[i] > maxConc {
+				maxConc = concs[i]
+			}
 		}
-		return out
+		if maxConc > 0 {
+			for i := range flowBlocks {
+				score := 0.6*math.Sqrt(concs[i]/maxConc) + 0.4*share[i]
+				out[i] = clampRows(1 + int(math.Round(5*score)))
+			}
+			return out
+		}
 	}
+	if hasDwell {
+		for i := range flowBlocks {
+			out[i] = clampRows(1 + int(math.Round(14*share[i]))) // 均分 ~3 行, 占大头顶到 6
+		}
+	}
+	return out
+}
+
+// blockDwellShare 是各块累计停留时长占全部停留的比例 (块内阶段互斥, 相加即该块);
+// 第二个返回值 = 是否有可用的停留数据 (没有时代码保持缺省档)。
+func (m *tuiModel) blockDwellShare() ([]float64, bool) {
+	share := make([]float64, len(flowBlocks))
 	dwell := m.pulse.Dwell
 	if len(dwell) < stageCount {
-		return out
+		return share, false
 	}
 	total := 0.0
 	for _, d := range dwell[:stageCount] {
 		total += float64(d)
 	}
 	if total <= 0 {
-		return out
+		return share, false
 	}
 	for i, b := range flowBlocks {
 		sum := 0.0
@@ -1077,9 +1101,9 @@ func (m *tuiModel) flowMinRows() []int {
 				sum += float64(dwell[st])
 			}
 		}
-		out[i] = clampRows(int(math.Round(sum/total*14)) + 1) // 均分 ~3 行, 占大头顶到 6
+		share[i] = sum / total
 	}
-	return out
+	return share, true
 }
 
 // clampRows 把行数夹进 1 至 6 行: 至少 1 行撑版式, 最多 6 行不占满屏。

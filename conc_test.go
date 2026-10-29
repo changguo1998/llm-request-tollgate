@@ -67,7 +67,8 @@ func TestConcWeightedAvg(t *testing.T) {
 	}
 }
 
-// 第 1 页块高度按并发水平定: 块内阶段相加 (互斥), 四舍五入后夹进 1 至 6 行。
+// 第 1 页块高度同时用「窗口内最大并发」与「阶段停留时长」: 并发先取平方根再除以各块
+// 最大值 (压住并发池), 与停留占比按 0.6 / 0.4 加权, 每个块保底 1 行。
 func TestFlowMinRowsConc(t *testing.T) {
 	m := newTUIModel("cfg")
 	m.pulse.Conc = make([]float64, stageCount)
@@ -77,11 +78,26 @@ func TestFlowMinRowsConc(t *testing.T) {
 	if len(rows) != len(flowBlocks) {
 		t.Fatalf("行数应与分块数一致, 得到 %d", len(rows))
 	}
-	want := map[int]int{0: 1, 1: 1, 2: 1, 3: 1, 4: 2, 5: 1}
+	// 没有停留时长时: 并发占比 0.6 权重, 空块保底 1 行。
+	want := map[int]int{0: 1, 1: 1, 2: 1, 3: 3, 4: 4, 5: 1}
 	for i, w := range want {
 		if rows[i] != w {
 			t.Errorf("第 %d 块应为 %d 行, 得到 %d (%v)", i, w, rows[i], rows)
 		}
+	}
+	// 停留时长参与加权: 已发送占 80%, 接收中占 20%。
+	m.pulse.Dwell = make([]int64, stageCount)
+	m.pulse.Dwell[stageSend] = 400
+	m.pulse.Dwell[stageRecv] = 100
+	rows = m.flowMinRows()
+	if rows[3] != 5 || rows[4] != 4 {
+		t.Errorf("停留时长应把已发送抬到 5 行, 接收中 4 行, 得到 %v", rows)
+	}
+	// 并发一家独大时也不顶满: 并发池按平方根压缩后落 4 行。
+	m.pulse.Conc = make([]float64, stageCount)
+	m.pulse.Conc[stageSem] = 20
+	if got := m.flowMinRows()[0]; got != 4 {
+		t.Errorf("并发池应被压到 4 行, 得到 %d", got)
 	}
 	// 旧对端没有 Conc 时退回缺省档。
 	m.pulse.Conc = nil
