@@ -231,11 +231,12 @@ const (
 	tuiYell  = "\x1b[33m"
 )
 
-// upPalette 是上游的专属色: 红 / 黄 / 绿留给状态色, 这里只用青 / 品红 / 蓝系
-// (含亮色变体), 按上游在第 1 页上游表的固定顺序轮流分配, 各页同色。
+// upPalette 是上游的专属色: 状态用红 / 黄 / 绿的正色 (31 / 32 / 33), 这里用青 / 品红 /
+// 蓝系 (含亮色变体) 与亮红 / 亮绿 / 亮黄, 按上游在第 1 页上游表的固定顺序轮流分配, 各页同色。
 var upPalette = []string{
 	"\x1b[36m", "\x1b[35m", "\x1b[34m",
 	"\x1b[96m", "\x1b[95m", "\x1b[94m",
+	"\x1b[91m", "\x1b[92m", "\x1b[93m",
 }
 
 // 颜色标准 (全 TUI 一套, 新增画面前先对照这张表):
@@ -674,7 +675,8 @@ func (m *tuiModel) draw() string {
 	}
 	c := &tuiCanvas{cols: m.cols}
 	// 版式: 标题 / 状态 (含路由聚合汇总) / 页签 / 内容 / ... / 键位 (贴底);
-	// 上游状态并进第 1 页正文。上游专属色按上游表的固定顺序分配, 各页同色; 红黄绿留给状态。
+	// 上游状态并进第 1 页正文。上游专属色按上游表的固定顺序分配, 各页同色; 红黄绿的正色
+	// 留给状态, 上游用的是它们的亮色变体。
 	m.upColors = make(map[string]string, len(m.pulse.Cands))
 	for i, cand := range m.sortedCands() {
 		m.upColors[cand.ID] = upPalette[i%len(upPalette)]
