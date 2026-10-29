@@ -146,6 +146,42 @@ func openTestPTY(t *testing.T, rows, cols int) {
 	ioctlCall(f.Fd(), syscall.TIOCSWINSZ, unsafe.Pointer(&tuiWinsize{Row: uint16(rows), Col: uint16(cols)}))
 }
 
+// packPieces 按可见宽度拼行: 放不下就换行, 换行后的片段去掉前导分隔, 每行不超过宽度。
+func TestPackPieces(t *testing.T) {
+	lines := packPieces([]string{"状态 live", "   进行中 3", "   已读日志 128 条", "   运行 12m3s"}, 16)
+	if len(lines) < 2 {
+		t.Fatalf("宽度 16 应折成多行, 得到 %q", lines)
+	}
+	for i, ln := range lines {
+		if w := tuiWidth(ln); w > 16 {
+			t.Errorf("第 %d 行宽 %d 超过 16: %q", i+1, w, ln)
+		}
+		if i > 0 && strings.HasPrefix(ln, " ") {
+			t.Errorf("折行后的行不该带前导空格: %q", ln)
+		}
+	}
+	// 单段自己就超宽时截断成一行。
+	one := packPieces([]string{strings.Repeat("x", 40)}, 10)
+	if len(one) != 1 || tuiWidth(one[0]) > 10 {
+		t.Errorf("超宽单段应截断成一行, 得到 %q", one)
+	}
+}
+
+// 窄终端: 状态行折行, 内容区相应缩小, 键位仍贴底。
+func TestStatusLineWrapsAndHintStays(t *testing.T) {
+	openTestPTY(t, 24, 80)
+	m := newTUIModel("cfg")
+	m.pulse.Cands = []candView{{ID: "ustc", SoftCap: 1}}
+	out := m.draw()
+	if m.statusRows < 2 {
+		t.Errorf("80 列时状态行应折成多行, 得到 %d 行", m.statusRows)
+	}
+	hintRow := strings.Count(out[:strings.Index(out, "q 退出")], "\r\n") + 1
+	if hintRow != 24 {
+		t.Errorf("键位应贴底 (第 24 行), 实际第 %d 行", hintRow)
+	}
+}
+
 // autoCols 的分配规则: 列宽按内容涨 (下限 w, 上限是终端宽), 余量先补齐差得少的列;
 // 余量不够时是内容被截断, 而不是整列消失。
 func TestAutoColsAllocatesByContent(t *testing.T) {
@@ -567,8 +603,9 @@ func TestFlowHeaderPinned(t *testing.T) {
 	if headRow < 0 {
 		t.Fatal("滚动后列名不见了")
 	}
-	if headRow > 4 {
-		t.Errorf("列名应固定在页签下方, 实际在第 %d 行", headRow+1)
+	// 状态行在窄终端会折行: 列名位置 = 标题 + 状态折行数 + 页签 + 空行 (下标从 0 起)。
+	if want := 3 + m.statusRows; headRow != want {
+		t.Errorf("列名应固定在页签下方 (第 %d 行), 实际在第 %d 行", want+1, headRow+1)
 	}
 	if strings.Contains(out, "并发池") {
 		t.Error("滚动后分块内容应已上移 (第一块不在窗口里)")

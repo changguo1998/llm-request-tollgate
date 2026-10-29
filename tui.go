@@ -362,14 +362,15 @@ type tuiModel struct {
 	scannedFiles map[string]bool   // 归档已整读, 不再重复扫
 	scanned      int
 
-	tab       int
-	scroll    [3]int // 每页各自的滚动位置: m.scroll[m.tab]
-	cols      int
-	rows      int
-	refreshed time.Time // 上次重读日志/取观测的时刻 (按键连发时别每次都重读)
-	pageTotal int       // 第 1 页 (分块 + 两张模型表) 的总行数 (滚动用)
-	pageTop   int       // 该页当前窗口的第一行
-	pageWin   int       // 该页当前窗口的数据行数 (提示行里的 a-b 按它算)
+	tab        int
+	scroll     [3]int // 每页各自的滚动位置: m.scroll[m.tab]
+	cols       int
+	rows       int
+	statusRows int       // 状态行折行后的物理行数 (窄终端会多行), 内容区高度按它扣
+	refreshed  time.Time // 上次重读日志/取观测的时刻 (按键连发时别每次都重读)
+	pageTotal  int       // 第 1 页 (分块 + 两张模型表) 的总行数 (滚动用)
+	pageTop    int       // 该页当前窗口的第一行
+	pageWin    int       // 该页当前窗口的数据行数 (提示行里的 a-b 按它算)
 
 	prio     *tuiEditor   // settings 页 (调度参数 + 权重编辑), runTUI 里装载
 	reloadFn func() error // 同进程模式的热加载回调; 空 = 走 deploy/tollgate.sh hup
@@ -702,10 +703,10 @@ func (m *tuiModel) draw() string {
 	return "\x1b[H" + c.clip(m.rows)
 }
 
-// bodyRows 是内容区行数: 固定占 4 行 (标题、状态、页签、键位), 其余全部给内容。
+// bodyRows 是内容区行数: 固定区占 标题 + 状态 (可能折行) + 页签 + 键位, 其余全部给内容。
 // 布局不用空行做分隔, 屏幕上每一行都是内容或键位。
 func (m *tuiModel) bodyRows() int {
-	if body := m.rows - 4; body >= 3 {
+	if body := m.rows - 3 - m.statusRows; body >= 3 {
 		return body
 	}
 	return 3
@@ -796,15 +797,57 @@ func (m *tuiModel) drawHeader(c *tuiCanvas) {
 	c.line(tuiIndent + tuiBold + "tollgate tui" + tuiReset + "  观测 " + src +
 		"   监听 " + m.listen + "   日志 " + m.logPath)
 	act := len(m.pulse.Active)
-	line := "状态 " + live + "   进行中 " + strconv.Itoa(act) +
-		"   已读日志 " + strconv.Itoa(m.scanned) + " 条   运行 " + durStr(time.Since(m.start))
+	// 各段自带前导分隔: 换行到下一行时由 packPieces 去掉, 段间间距保持原样。
+	pieces := []string{
+		"状态 " + live,
+		"   进行中 " + strconv.Itoa(act),
+		"   已读日志 " + strconv.Itoa(m.scanned) + " 条",
+		"   运行 " + durStr(time.Since(m.start)),
+	}
 	if e := m.lastError(); e != "" {
-		line += "   " + tuiYell + e + tuiReset
+		pieces = append(pieces, "   "+tuiYell+e+tuiReset)
 	}
 	// 路由聚合的整体状态 (窗口 / 请求 / 错误 / 换候选 / token / 首字节) 接在状态行末尾;
-	// 排在错误提示之后, 免得长行先把报错截掉。
-	line += "   " + m.routeSummary(m.routeRows())
-	c.line(tuiIndent + line)
+	// 排在错误提示之后, 免得长行先把报错截掉。按空格切段, 太长时在词边界换行。
+	for i, f := range strings.Fields(m.routeSummary(m.routeRows())) {
+		if i == 0 {
+			pieces = append(pieces, "   "+f)
+			continue
+		}
+		pieces = append(pieces, " "+f)
+	}
+	lines := packPieces(pieces, m.cols-len(tuiIndent))
+	for _, ln := range lines {
+		c.line(tuiIndent + ln)
+	}
+	m.statusRows = len(lines)
+}
+
+// packPieces 把带前导分隔的片段按可见宽度拼成若干行: 放不下就换行并去掉该片段的前导
+// 空格; 单段自己就超宽时至多占一行 (截断), 段内不拆, 免得切断词或 ANSI 序列。
+func packPieces(pieces []string, width int) []string {
+	var lines []string
+	cur, curW := "", 0
+	for _, p := range pieces {
+		if p == "" {
+			continue
+		}
+		w := tuiWidth(p)
+		if cur != "" && width > 0 && curW+w > width {
+			lines = append(lines, cur)
+			p, cur, curW = strings.TrimLeft(p, " "), "", 0
+			w = tuiWidth(p)
+		}
+		if width > 0 && w > width {
+			p, w = tuiTrunc(p, width), width
+		}
+		cur += p
+		curW += w
+	}
+	if cur != "" || len(lines) == 0 {
+		lines = append(lines, cur)
+	}
+	return lines
 }
 
 // drawTabs 画页签行; 上游状态不放在顶端, 并进第 1 页正文。
