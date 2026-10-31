@@ -12,7 +12,7 @@ cp config.example.json config.local.json
 ./llm-request-tollgate -config config.local.json
 ```
 
-前置: 无第三方依赖 (标准库单文件 Go); 需要 Go 工具链构建.
+前置: 无第三方依赖 (标准库 Go); 需要 Go 工具链构建.
 
 ## 2. 常驻部署 (systemd 用户服务)
 

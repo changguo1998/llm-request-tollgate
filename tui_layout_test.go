@@ -276,8 +276,7 @@ func TestFlowDroppedColKeepsLaterColWidth(t *testing.T) {
 
 // 耗时列: 总耗时, 括号里是从第一段写到手边这一段的分段耗时 (以 + 相连), 没到过的阶段
 // 不补 0, 当前段按 CurAt 现算; 前三段 (并发池 / 频率队列 / 状态锁) 合计不超过 4s 时并成
-// 一段「发送前」, 只写 发送前 / 等待中 / 接收中; 超过 4s 才按 5 段摊开。对端不带分段
-// 数据 (老版本服务) 时只写总耗时。
+// 一段「发送前」, 只写 发送前 / 等待中 / 接收中; 超过 4s 才按 5 段摊开。
 func TestFlowDurCellSegments(t *testing.T) {
 	m := newTUIModel("cfg")
 	now := time.Now()
@@ -329,10 +328,6 @@ func TestFlowDurCellSegments(t *testing.T) {
 	}
 	if got := m.durCell(pool); got != "1s(0.1s)" {
 		t.Errorf("并发池: 期望 1s(0.1s), 得到 %q", got)
-	}
-	old := flow{ID: 6, Logical: "m", Stage: stageSend, StartTime: now.Add(-3 * time.Second)}
-	if got := m.durCell(old); got != "3s" {
-		t.Errorf("老对端没有分段数据时应只写总耗时, 得到 %q", got)
 	}
 }
 

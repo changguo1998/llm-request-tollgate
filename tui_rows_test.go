@@ -5,40 +5,11 @@ import (
 	"time"
 )
 
-// 统计窗口里还没有样本时退回服务端下发的 conc / dwell: 并发先取平方根再除以各块最大值
-// (压住并发池), 与停留占比按 0.6 / 0.4 加权, 每块保底 1 行。
+// 统计窗口里还没有样本时退回缺省档。
 func TestFlowMinRowsFallback(t *testing.T) {
 	m := newTUIModel("cfg")
-	m.pulse.Conc = make([]float64, stageCount)
-	m.pulse.Conc[stageSend] = 1.2
-	m.pulse.Conc[stageRecv] = 2.4
-	rows := m.flowMinRows()
-	if len(rows) != len(flowBlocks) {
-		t.Fatalf("行数应与分块数一致, 得到 %d", len(rows))
-	}
-	// 没有停留时长时: 并发占 0.6 权重, 空块保底 1 行。
-	want := []int{1, 1, 1, 3, 4, 1}
-	if !sameInts(rows, want) {
-		t.Errorf("按 conc 分档应为 %v, 得到 %v", want, rows)
-	}
-	// 停留时长参与加权: 已发送占 80%, 接收中占 20%。
-	m.pulse.Dwell = make([]int64, stageCount)
-	m.pulse.Dwell[stageSend] = 400
-	m.pulse.Dwell[stageRecv] = 100
-	rows = m.flowMinRows()
-	if rows[3] != 5 || rows[4] != 4 {
-		t.Errorf("停留时长应把已发送抬到 5 行, 接收中 4 行, 得到 %v", rows)
-	}
-	// 并发一家独大时也不顶满: 并发池按平方根压缩后落 4 行。
-	m.pulse.Conc = make([]float64, stageCount)
-	m.pulse.Conc[stageSem] = 20
-	if got := m.flowMinRows()[0]; got != 4 {
-		t.Errorf("并发池应被压到 4 行, 得到 %d", got)
-	}
-	// 旧对端 conc 与 dwell 都没有时退回缺省档。
-	m.pulse.Conc, m.pulse.Dwell = nil, nil
 	if got := m.flowMinRows(); !sameInts(got, defaultMinRows) {
-		t.Errorf("没有 conc / dwell 时应退回缺省档 %v, 得到 %v", defaultMinRows, got)
+		t.Errorf("没有样本时应退回缺省档 %v, 得到 %v", defaultMinRows, got)
 	}
 }
 

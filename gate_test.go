@@ -459,13 +459,13 @@ func TestGateStateRoundTrip(t *testing.T) {
 		t.Fatalf("两把锁同时在时该报模型锁: locked=%v left=%s reason=%s", locked, left, reason)
 	}
 
-	// 过期记录不恢复; 组锁记录按键里的组名恢复; 只有模型锁时不该传导给同家别的模型。
+	// 过期记录不恢复; 组锁只锁本组; 未知上游的记录跳过。
 	modelOnly := filepath.Join(t.TempDir(), "gate-state.json")
 	state := gateState{Locks: map[string]gateLockRec{
-		"u1/m1":       {UntilMs: time.Now().Add(-time.Minute).UnixMilli(), Reason: "breaker"},
-		"u1/m2":       {UntilMs: time.Now().Add(time.Hour).UnixMilli(), Reason: "breaker"},
-		"u1/group:g1": {UntilMs: time.Now().Add(time.Hour).UnixMilli(), Reason: "quota"},
-		"ghost":       {UntilMs: time.Now().Add(time.Hour).UnixMilli(), Reason: "quota"},
+		"u1/m1":       {UntilMs: time.Now().Add(-time.Minute).UnixMilli(), Reason: "breaker", Upstream: "u1", Model: "m1"},
+		"u1/m2":       {UntilMs: time.Now().Add(time.Hour).UnixMilli(), Reason: "breaker", Upstream: "u1", Model: "m2"},
+		"u1/group:g1": {UntilMs: time.Now().Add(time.Hour).UnixMilli(), Reason: "quota", Upstream: "u1", Group: "g1"},
+		"ghost":       {UntilMs: time.Now().Add(time.Hour).UnixMilli(), Reason: "quota", Upstream: "ghost"},
 	}}
 	b, err := json.Marshal(state)
 	if err != nil {
@@ -480,35 +480,13 @@ func TestGateStateRoundTrip(t *testing.T) {
 		t.Fatal("已过期的锁不该恢复")
 	}
 	if locked, left, reason := again.cands["u1"].locked("m2", ""); !locked || reason != "breaker" || left < 50*time.Minute {
-		t.Fatalf("按键解析该恢复 u1/m2 的锁: locked=%v left=%s reason=%s", locked, left, reason)
+		t.Fatalf("该恢复 u1/m2 的熔断锁: locked=%v left=%s reason=%s", locked, left, reason)
 	}
 	if locked, _, reason := again.cands["u1"].locked("m3", "g1"); !locked || reason != "quota" {
-		t.Fatalf("按键解析该恢复 u1/group:g1 的组锁: locked=%v reason=%s", locked, reason)
+		t.Fatalf("该恢复 u1 的 g1 组锁: locked=%v reason=%s", locked, reason)
 	}
 	if locked, _, _ := again.cands["u1"].locked("m3", "g2"); locked {
 		t.Fatal("恢复的组锁只该管住同一个组")
-	}
-
-	// 兼容老格式: 记录里没有 upstream / model 字段, 键是 "<上游>" 或 "<上游>/<模型>"。
-	legacyPath := filepath.Join(t.TempDir(), "gate-state.json")
-	legacy := gateState{Locks: map[string]gateLockRec{
-		"u1":    {UntilMs: time.Now().Add(time.Hour).UnixMilli(), Reason: "quota"},
-		"u1/m9": {UntilMs: time.Now().Add(2 * time.Hour).UnixMilli(), Reason: "breaker"},
-	}}
-	b, err = json.Marshal(legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(legacyPath, b, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	old := &App{cands: map[string]*cand{"u1": newCand("u1")}, gatePath: legacyPath}
-	old.loadGateState()
-	if locked, _, reason := old.cands["u1"].locked("m3", defaultGroup); !locked || reason != "quota" {
-		t.Fatalf("旧格式的键 \"u1\" 该当成默认组锁恢复: locked=%v reason=%s", locked, reason)
-	}
-	if locked, left, reason := old.cands["u1"].locked("m9", defaultGroup); !locked || reason != "breaker" || left < 90*time.Minute {
-		t.Fatalf("旧格式的键 \"u1/m9\" 该按模型锁恢复: locked=%v left=%s reason=%s", locked, left, reason)
 	}
 }
 

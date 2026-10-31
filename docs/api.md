@@ -175,10 +175,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 - 载荷: `ver` (观测面版本), `listen`, `now`, `active` (进行中请求数组), `cands`
   (每上游一条: 队列长 / 在飞 / 并发上限 / 是否在试探 / 连续错误数 / 退避剩余 / 锁剩余
   / 锁原因 / 各记账组的额度锁 (`groups`: 组名 + 锁剩余, 按配置顺序) / 模型级熔断锁
-  / 距下次节拍), `events` (事件数组), `max_seq`, `slow_ms`, `conc` (各阶段并发水平,
-  下标 = 阶段: 时间切成 10min 的片, 每片取片内峰值, 片间按年龄做指数衰减加权平均
-  (时间常数 10min, 保留最近 24h); TUI 在行数统计窗口还没样本时用它给第 1 页各分块
-  定参考行数), `dwell` (各阶段停留时长累计, 同上作退路兼旧版 TUI 兼容用).
+  / 距下次节拍), `events` (事件数组), `max_seq`, `slow_ms`.
 - `active` 每笔: `id` / `logical` / `source` / `path` / `stream` / `start` / `upstream` /
   `backend` / `stage` / `attempt` / `gate`; 接收中的流式请求另带 `recv_tok` (已收到的
   输出 token 估计数) 与 `recv_start` (首字节到达时刻, Unix 毫秒), 后者用来算这笔的
