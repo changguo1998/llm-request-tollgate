@@ -68,7 +68,8 @@ func toUsage(u *openaiUsage) *Usage {
 }
 
 // estimateTokens 按字符口径粗估: 非 ASCII 1 token/字符, 其余 4 字符 1 token。
-// 流式请求由 relayStream 逐块累加 (思考增量也算输出), 非流式只看响应体里的生成文本。
+// 流式请求由 relayStream 逐块累加, 非流式由 estimateUsageFromBody 读响应体; 两路都
+// 把思考内容算输出。
 func estimateTokens(s string) int {
 	ascii, other := 0, 0
 	for _, r := range s {
@@ -91,20 +92,26 @@ func extractUsage(buf []byte) *Usage {
 	return toUsage(resp.Usage)
 }
 
-// estimateUsageFromBody 取响应体生成文本 (content / output_text), 用于非流式缺 usage 时的
-// 兜底估算; 思考块不在生成文本里, 这一路不计。
+// estimateUsageFromBody 取响应体里的生成文本与思考内容 (message.content /
+// message.reasoning_content / output[].content[].text / output[].summary[].text), 用于
+// 非流式缺 usage 时的兜底估算; 口径与流式逐块累加的那一路一致 —— 思考也算输出。
 func estimateUsageFromBody(buf []byte) int {
 	var resp struct {
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
 			} `json:"message"`
 		} `json:"choices"`
-		// /v1/responses: 生成文本在 output[].content[].text。
+		// /v1/responses: 生成文本在 output[].content[].text, reasoning 项的可见思考
+		// 在 output[].summary[].text。
 		Output []struct {
 			Content []struct {
 				Text string `json:"text"`
 			} `json:"content"`
+			Summary []struct {
+				Text string `json:"text"`
+			} `json:"summary"`
 		} `json:"output"`
 	}
 	if err := json.Unmarshal(buf, &resp); err != nil {
@@ -113,10 +120,14 @@ func estimateUsageFromBody(buf []byte) int {
 	n := 0
 	for _, c := range resp.Choices {
 		n += estimateTokens(c.Message.Content)
+		n += estimateTokens(c.Message.ReasoningContent)
 	}
 	for _, o := range resp.Output {
 		for _, c := range o.Content {
 			n += estimateTokens(c.Text)
+		}
+		for _, s := range o.Summary {
+			n += estimateTokens(s.Text)
 		}
 	}
 	return n
