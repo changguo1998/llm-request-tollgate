@@ -93,7 +93,7 @@ func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel strin
 					}
 					for _, c := range chunk.Choices {
 						// 思考增量也算输出: 纯思考模型在 content 里一个字都没有, 只计
-						// content 会让接收中的吞吐一直显示不出来。
+						// content 会让接收中的吞吐一直显示不出来, 兜底的 completion 也会是 0。
 						est += estimateTokens(c.Delta.Content)
 						est += estimateTokens(c.Delta.ReasoningContent)
 					}

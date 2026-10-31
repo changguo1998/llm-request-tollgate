@@ -21,7 +21,7 @@ type logRec struct {
 	Stream       bool    `json:"stream"`
 	Status       int     `json:"status"`
 	Usage        *Usage  `json:"usage,omitempty"`
-	Missing      bool    `json:"missing_usage"`
+	Missing      bool    `json:"missing_usage"` // 上游没回 usage, 走了字符粗估
 	Queued       bool    `json:"queued"`
 	QueueMs      int64   `json:"queue_ms"`
 	SemMs        int64   `json:"sem_ms,omitempty"` // 等并发信号量的时长

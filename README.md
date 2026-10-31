@@ -16,8 +16,9 @@
     候选的槽位; 候选链试完仍没发出去, 就合成错误说明原因 (被锁 / 退避带 `Retry-After`)。
 03. 请求转发: 密钥集中在代理 (客户端凭据一律替换), SSE 逐块原样透传不缓冲。
 04. 用量记账: 强写 `stream_options.include_usage`, 从流末 usage / 非流式响应体
-    提取 token 用量 (含缓存命中 token, 四种上游字段名都认); 缺 usage 按字符粗估 (F7)
-    并记 `missing_usage`。`-usage` 按 上游/模型 × 窗口 列出 token 分解。
+    提取 token 用量 (含缓存命中 token, 四种上游字段名都认); 缺 usage 按字符粗估 (F7,
+    非 ASCII 1 token/字符, 其余 4 字符 1 token; 流式把思考增量也算输出) 并记
+    `missing_usage`。`-usage` 按 上游/模型 × 窗口 列出 token 分解。
 05. 限制反应 (设计 §5.5.2/§5.5.3): 每个上游可用 `errors` 规则 (状态码 + body 关键词)
     把报错分成并发 / 额度 / 其他三类; 命中额度 -> 只锁该模型所属的**记账组**
     `gate.quota_lock_ms` (10min, 一个上游可以有多组, 不锁整家), 其他 -> 按

@@ -81,7 +81,9 @@ key):
 - 流式 (SSE) 逐块原样透传不缓冲; 每块 `model` 改回逻辑名; 以 `[DONE]` 正常结束.
 - 记账: 强写 `stream_options.include_usage`, 从流末 usage chunk / 非流式响应体提取
   token 用量 (含缓存命中 token, 四种上游字段名都认); 缺 usage 按字符粗估并记
-  `missing_usage`.
+  `missing_usage`. 粗估口径: 非 ASCII 1 token/字符, 其余 4 字符 1 token; 流式逐块累加,
+  思考增量 (`reasoning_content` / `reasoning_text.delta`) 也算输出, 所以纯思考模型的
+  `completion` 不会为 0.
 
 ### 3.2 POST /v1/responses
 

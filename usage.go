@@ -68,6 +68,7 @@ func toUsage(u *openaiUsage) *Usage {
 }
 
 // estimateTokens 按字符口径粗估: 非 ASCII 1 token/字符, 其余 4 字符 1 token。
+// 流式请求由 relayStream 逐块累加 (思考增量也算输出), 非流式只看响应体里的生成文本。
 func estimateTokens(s string) int {
 	ascii, other := 0, 0
 	for _, r := range s {
@@ -90,7 +91,8 @@ func extractUsage(buf []byte) *Usage {
 	return toUsage(resp.Usage)
 }
 
-// estimateUsageFromBody 取响应体生成文本, 用于缺 usage 时的兜底估算。
+// estimateUsageFromBody 取响应体生成文本 (content / output_text), 用于非流式缺 usage 时的
+// 兜底估算; 思考块不在生成文本里, 这一路不计。
 func estimateUsageFromBody(buf []byte) int {
 	var resp struct {
 		Choices []struct {
