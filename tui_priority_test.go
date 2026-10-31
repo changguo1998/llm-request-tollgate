@@ -609,3 +609,71 @@ func TestModelsCandsNoStoreKeepsOrder(t *testing.T) {
 		t.Fatalf("store 读不到应保持原序, 得到 %q", got)
 	}
 }
+
+// 光标移动: moveFocus / jump 在每个面板里都夹在有效范围内, visibleRows 给出翻页步长。
+func TestEditorNavFocus(t *testing.T) {
+	_, cfg := prioFixture(t)
+	e := newTuiEditor(cfg)
+	if !e.usable() {
+		t.Fatalf("store 装载失败: %v", e.err)
+	}
+	models := len(e.filtered())
+	if models < 2 {
+		t.Fatalf("夹具里应至少有 2 个模型, 得到 %d", models)
+	}
+
+	// 模型面板。
+	e.focus, e.modelSel = 0, 0
+	e.moveFocus(1)
+	if e.modelSel != 1 {
+		t.Errorf("下移一行应到 1, 得到 %d", e.modelSel)
+	}
+	e.moveFocus(-5)
+	if e.modelSel != 0 {
+		t.Errorf("上移不能越过第 0 行, 得到 %d", e.modelSel)
+	}
+	e.jump(1 << 10)
+	if e.modelSel != models-1 {
+		t.Errorf("跳到末尾应为 %d, 得到 %d", models-1, e.modelSel)
+	}
+
+	// provider 面板。
+	e.focus, e.provSel = 1, 0
+	e.moveFocus(1)
+	if e.provSel != 1 || len(e.providers) < 2 {
+		t.Errorf("provider 下移应到 1 (共 %d 个), 得到 %d", len(e.providers), e.provSel)
+	}
+	e.jump(1 << 10)
+	if e.provSel != len(e.providers)-1 {
+		t.Errorf("provider 跳到末尾应为 %d, 得到 %d", len(e.providers)-1, e.provSel)
+	}
+	e.moveFocus(-1 << 10)
+	if e.provSel != 0 {
+		t.Errorf("provider 上移不能越过 0, 得到 %d", e.provSel)
+	}
+
+	// 调度参数面板。
+	e.focus, e.gateSel = 2, 0
+	e.moveFocus(2)
+	if e.gateSel != 2 {
+		t.Errorf("gate 下移两行应到 2, 得到 %d", e.gateSel)
+	}
+	e.jump(1 << 10)
+	if e.gateSel != len(gateLabels)-1 {
+		t.Errorf("gate 跳到末尾应为 %d, 得到 %d", len(gateLabels)-1, e.gateSel)
+	}
+	e.moveFocus(-1 << 10)
+	if e.gateSel != 0 {
+		t.Errorf("gate 上移不能越过 0, 得到 %d", e.gateSel)
+	}
+
+	// 翻页步长: 还没渲染过 (vis=0) 时用 10, 渲染后按实际行数。
+	e.vis = 0
+	if got := e.visibleRows(); got != 10 {
+		t.Errorf("还没渲染时步长应为 10, 得到 %d", got)
+	}
+	e.vis = 4
+	if got := e.visibleRows(); got != 4 {
+		t.Errorf("渲染后步长应为 4, 得到 %d", got)
+	}
+}

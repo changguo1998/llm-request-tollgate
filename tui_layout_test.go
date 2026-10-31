@@ -548,42 +548,39 @@ func flowTitleRows(t *testing.T, out string) []int {
 	return rows
 }
 
-// 分块之间不加额外空行: 上一块标题后面正好是它的数据行区 (无停留时长时按 defaultMinRows)。
+// 分块之间不加额外空行: 上一块标题后面正好是它的数据行区 (还没有样本时按 defaultMinRows),
+// 空块与有请求的块都一样。
 func TestFlowBlockTitleSpacing(t *testing.T) {
 	openTestPTY(t, 50, 140)
-	m := newTUIModel("cfg")
-	m.tab = tabActive
-	rows := flowTitleRows(t, m.draw())
-	for i := 1; i < len(rows); i++ {
-		if gap := rows[i] - rows[i-1] - 1; gap != defaultMinRows[i-1] {
-			t.Errorf("分块 %q 与 %q 之间应正好 %d 行 (不留额外空行), 实际 %d 行",
-				flowBlocks[i-1].title, flowBlocks[i].title, defaultMinRows[i-1], gap)
-		}
-	}
-}
-
-// 有内容的块自带行与补齐的空行, 块之间同样不留额外空行。
-func TestFlowBlockTitleSpacingWithRows(t *testing.T) {
-	openTestPTY(t, 50, 140)
-	m := newTUIModel("cfg")
-	m.tab = tabActive
 	now := time.Now()
-	m.pulse.Active = []flow{
-		{ID: 1, Logical: "queue-me", Up: "ustc", Model: "m1", Stage: stageQueue, StartTime: now},
-		{ID: 2, Logical: "recv-me", Up: "ustc", Model: "m1", Stage: stageRecv, StartTime: now},
+	cases := []struct {
+		name   string
+		active []flow
+	}{
+		{"空表", nil},
+		{"有请求", []flow{
+			{ID: 1, Logical: "queue-me", Up: "ustc", Model: "m1", Stage: stageQueue, StartTime: now},
+			{ID: 2, Logical: "recv-me", Up: "ustc", Model: "m1", Stage: stageRecv, StartTime: now},
+		}},
 	}
-	rows := flowTitleRows(t, m.draw())
-	for i := 1; i < len(rows); i++ {
-		if gap := rows[i] - rows[i-1] - 1; gap != defaultMinRows[i-1] {
-			t.Errorf("分块 %q 与 %q 之间应正好 %d 行 (不留额外空行), 实际 %d 行",
-				flowBlocks[i-1].title, flowBlocks[i].title, defaultMinRows[i-1], gap)
-		}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := newTUIModel("cfg")
+			m.tab = tabActive
+			m.pulse.Active = c.active
+			rows := flowTitleRows(t, m.draw())
+			for i := 1; i < len(rows); i++ {
+				if gap := rows[i] - rows[i-1] - 1; gap != defaultMinRows[i-1] {
+					t.Errorf("分块 %q 与 %q 之间应正好 %d 行 (不留额外空行), 实际 %d 行",
+						flowBlocks[i-1].title, flowBlocks[i].title, defaultMinRows[i-1], gap)
+				}
+			}
+		})
 	}
 }
 
-// 第 1 页的版式: 列名整页只画一次 (在页首), 块与块之间不空行; 每块的数据行区正好
-// 留 defaultMinRows[i] 行 (没有历史停留时长时), 空块也照留。表后不再有单位说明行。
-func TestFlowSingleHeaderAndMinRows(t *testing.T) {
+// 第 1 页的版式: 列名整页只画一次 (页签下方空一行再画), 排在第一块标题之前, 表后不画单位说明。
+func TestFlowSingleHeaderOrder(t *testing.T) {
 	openTestPTY(t, 60, 160)
 	m := newTUIModel("cfg")
 	m.tab = tabActive
@@ -603,7 +600,6 @@ func TestFlowSingleHeaderAndMinRows(t *testing.T) {
 	}
 
 	lines := strings.Split(out, "\r\n")
-	// 页首: 空一行再画列名 (列名不顶在页签下面), 且列名在第一块标题之前。
 	headRow := -1
 	for i, ln := range lines {
 		if strings.Contains(ln, "编号") {
@@ -616,15 +612,6 @@ func TestFlowSingleHeaderAndMinRows(t *testing.T) {
 	}
 	if headRow == 0 || strings.TrimSpace(lines[headRow-1]) != "" {
 		t.Errorf("列名上一行应是空行, 实际 %q", lines[headRow-1])
-	}
-	// 块间距 = 上一块标题 + 1 + 数据行区 defaultMinRows (块之间不空行); 空块也照留。
-	titles := flowTitleRows(t, out)
-	for i := 1; i < len(titles); i++ {
-		want := titles[i-1] + 1 + defaultMinRows[i-1]
-		if titles[i] != want {
-			t.Errorf("分块 %q 起始行 %d, 应为 %d (上一块 %d 行数据, 不留额外空行)",
-				flowBlocks[i].title, titles[i], want, defaultMinRows[i-1])
-		}
 	}
 }
 
