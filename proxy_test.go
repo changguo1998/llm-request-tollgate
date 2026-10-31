@@ -211,6 +211,49 @@ func TestProxyQuotaRuleLocksCandidate(t *testing.T) {
 	}
 }
 
+// TestProxyPerKeyRateLimitLocksGroup 覆盖 ustc 的每 key 限流 (429 + "Rate limit exceeded
+// for api_key"): 归额度类, 锁该组 10min 并透传上游 429; 锁内后续请求直接 429
+// upstream_locked, 不再走通用兜底退避到熔断 (配置文件里 ustc 的 quota 规则即这两条文案)。
+func TestProxyPerKeyRateLimitLocksGroup(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"Rate limit exceeded for api_key: abc123. Limit type: requests. Current limit: 20, Remaining: 0.","type":"rate_limit_error"}}`)
+	}))
+	defer up.Close()
+	rules := &ErrRules{Quota: []ErrRule{{Status: []int{400, 422, 429}, Contains: []string{
+		"budget_exceeded", "Rate limit exceeded for api_key", "Limit type: requests",
+	}}}}
+	app := newTestApp(t, up.URL, GateCfg{IntervalMs: 5, SemWaitMs: 200, QueueWaitMs: 200}, rules)
+	proxy := httptest.NewServer(app)
+	defer proxy.Close()
+	url := proxy.URL + "/v1/chat/completions"
+
+	status, body := postJSON(t, url, `{"model":"m1","messages":[]}`)
+	if status != http.StatusTooManyRequests || !strings.Contains(string(body), "Rate limit exceeded") {
+		t.Fatalf("应透传上游 429 原文, 实为 %d %s", status, body)
+	}
+	locked, left, reason := app.cands["u1"].locked("real-1", "")
+	if !locked || reason != "quota" || left < 9*time.Minute {
+		t.Fatalf("每 key 限流应锁该组: locked=%v left=%s reason=%s", locked, left, reason)
+	}
+
+	status, body = postJSON(t, url, `{"model":"m1","messages":[]}`)
+	if status != http.StatusTooManyRequests || !strings.Contains(string(body), "upstream_locked") {
+		t.Fatalf("锁内应给 upstream_locked 的 429, 实为 %d %s", status, body)
+	}
+	mu.Lock()
+	n := calls
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("锁内不该真发, 上游被调用 %d 次", n)
+	}
+}
+
 // TestProxyQuotaLockStaysInGroup 覆盖记账组: 同一上游两个组, 一组命中额度锁后同家
 // 另一个组照常真发 (额度锁不锁整个上游)。
 func TestProxyQuotaLockStaysInGroup(t *testing.T) {
