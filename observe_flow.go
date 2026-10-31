@@ -138,8 +138,11 @@ func (o *flowObs) gateNow() string {
 	now := time.Now()
 	if locked, left, reason := c.locked(o.model, o.group); locked {
 		why := "额度"
-		if reason == "breaker" {
+		switch reason {
+		case "breaker":
 			why = "熔断"
+		case lowTpsReason:
+			why = "低流量"
 		}
 		return why + "锁 " + durStr(left)
 	}

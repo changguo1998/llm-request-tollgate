@@ -71,6 +71,8 @@ func (s *serveState) forward() {
 	}
 	if s.stream && decodeMs > 0 && completion > 0 {
 		tps = float64(completion) / (float64(decodeMs) / 1000)
+		// 低流量锁的样本: 只有能拆出解码段的流式成功请求才进。
+		a.noteDecodeTps(s.servedUp.ID, realModel, completion, decodeMs)
 	}
 	if ttfbMs > 0 {
 		window := 5

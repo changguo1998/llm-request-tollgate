@@ -25,8 +25,13 @@
     `gate.retry_backoff_ms` (10/20/30s) 退避、连续 4 次熔断锁 `gate.breaker_lock_ms`
     (5min)。**熔断按 `上游/模型` 粒度**: 只锁出错的那个真实模型, 同家别的模型照常发送
     (退避与连续错误计数也一样按模型分开记; 选候选时看到某模型正在退避就直接跳过, 不让
-    请求在它的队列里白等)。锁内不真发, 排队的请求整队迁移到下一个候选; 锁落
-    `var/gate-state.json` (重启仍生效)。服务不记账也不提前拦截, 只写日志。
+    请求在它的队列里白等)。另有一把**低流量锁** (同样按 `上游/模型`): 最近
+    `gate.lowtps_window_ms` (10min) 内解码吞吐的峰值低于 `gate.lowtps_peak_max` (5 t/s)
+    且平均低于 `gate.lowtps_avg_max` (1 t/s) 时锁 `gate.lowtps_lock_ms` (5min) ——
+    模型慢到没有实用价值就暂时不用它 (平均 = 输出 token 总量 / 解码段总时长, 空闲不计;
+    峰值 = 单笔最高的那笔; 样本只取能拆出解码段的流式成功请求, 不足 2 笔不判)。锁内不真发,
+    排队的请求整队迁移到下一个候选; 锁落 `var/gate-state.json` (重启仍生效)。服务不记账
+    也不提前拦截, 只写日志。
 06. 响应整形: 非流 / 流式 chunk 里的 `model` 字段改回请求的逻辑名,
     对外隐藏真实上游 id。
 07. 运维面: `GET /v1/models` 返回逻辑名清单; 请求头 `X-Tollgate-Source`
@@ -36,7 +41,7 @@
     下一个; 全部失败保留最近一次错误 (状态码/头/体) 原样透传; 其余 4xx 不重试。
 09. 定时锁: 锁内跳过该候选/该模型不再真发 (日志 `lock_skips`), 候选全在锁里时返 429
     `upstream_locked` + `Retry-After`, 锁到期自动恢复。额度锁只锁 `上游/记账组`,
-    熔断锁只锁出错的那个 `上游/模型`。
+    熔断锁与低流量锁只锁对应的那个 `上游/模型`。
 10. 日志按天轮转: 跨本地日期 (或隔天启动) 时把上一段日志归档为
     `<base>-YYYY-MM-DD.jsonl` (同名不覆盖, 依次加 -1/-2); `-summary` 与 `-usage`
     都跨归档读, 归档不自动删除 (留存交给外部)。
@@ -164,8 +169,11 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 - `timeouts`: 建连 / 等响应头 / 流空闲 (等待上限已经收进 `gate`)。
 - `gate` (v2, 所有上游共用): `interval_ms` 出队节拍 (缺省 500ms), `sem_wait_ms` 等信号量
   上限 (5s), `queue_wait_ms` 排队上限 (10s), `concurrency_lock_ms` / `quota_lock_ms` /
-  `breaker_lock_ms` 两把锁的时长 (1h / 10min / 5min), `retry_backoff_ms` 通用兜底的退避
-  序列 ([10000,20000,30000])。并发上限不在配置里 (起点固定 1, 每次重启重新爬)。
+  `breaker_lock_ms` / `lowtps_lock_ms` 各把锁的时长 (1h / 10min / 5min / 5min),
+  `lowtps_window_ms` 低流量锁的判定窗口 (10min) 与两道门槛 `lowtps_peak_max` (5) /
+  `lowtps_avg_max` (1) —— 单位都是 tokens/s, 峰值与平均都在这两条线以下才触发;
+  `retry_backoff_ms` 通用兜底的退避序列 ([10000,20000,30000])。并发上限不在配置里
+  (起点固定 1, 每次重启重新爬)。
 - `upstreams`: 每个上游一条记录 (id / base_url / auth_header / key 或 key_env / headers /
   include_usage / errors), 调度状态按 id 分组 (一个上游一把 key, 即「上游 + 凭据」分组)。
   `errors` 是错误分类规则 (逐家规则见 [docs/providers-api.md](docs/providers-api.md),
@@ -262,8 +270,8 @@ token) 与 `-usage` (上游 + 模型 × 窗口的 token 分解)。
 
 - `*.go` 代理本体, 按职责分文件: `main.go` 入口, `config.go` 配置, `errclass.go` 报错分类,
   `gate*.go` 调度与锁, `serve*.go` 转发主链路, `relay.go` SSE 透传, `observe*.go` 观测面,
-  `probe*.go` 探测, `log.go` / `usage.go` 日志与用量, `summary.go` 汇总命令
-  (含假上游自测所需的全部实现)。
+  `probe*.go` 探测, `log.go` / `usage.go` 日志与用量, `rate.go` 吞吐口径, `summary.go`
+  汇总命令 (含假上游自测所需的全部实现)。
 - `test/fakeupstream/` 假上游: 回放思考块 / 文本 / 工具调用 / usage 的 SSE,
   支持中途断流 (验证 F6)。
 - `test/run_selftest.sh` 自测: 17 组用例 131 项断言, 对本地假上游跑代理。
@@ -283,7 +291,7 @@ token) 与 `-usage` (上游 + 模型 × 窗口的 token 分解)。
   `tui_settings*.go` / `tui_gate.go` / `tui_store.go` / `tui_prio*.go` settings 页调 gate
   参数与权重 (写配置与 store, 候选顺序实时预览, 界面内即可保存 / 重生成配置 / 热加载)。
 - `gate_test.go` / `proxy_test.go` / `tui_*_test.go` 单元与端到端测试 (`go test .`): 调度
-  核心 (排队节拍、试探放宽、三类锁、错误归类、退避熔断、锁落盘)、经代理转发的完整链路,
+  核心 (排队节拍、试探放宽、四类锁、错误归类、退避熔断、锁落盘)、经代理转发的完整链路,
   以及状态台版式与 settings 页存盘。
 - `test/tmp/` 与 `var/` 是运行产物 (自测二进制/假上游日志; 请求日志与 `gate-state.json`
   等状态), 都在 `.gitignore` 内。

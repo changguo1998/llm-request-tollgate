@@ -201,7 +201,7 @@ python3 scripts/gen_tollgate_config.example.py
 | 文件 | 内容 | 生命周期 |
 |---|---|---|
 | `requests.jsonl` 与归档 | 每笔请求明细 | 永久保留, 外部清理 |
-| `gate-state.json` | 两把锁 (额度 / 熔断) 的到期时间与原因 | 锁内存在, 重启恢复 |
+| `gate-state.json` | 定时锁 (额度 / 熔断 / 低流量) 的到期时间与原因 | 锁内存在, 重启恢复 |
 | `probe.json` | 探测 / 被动延迟采样 | 启用 probe 时写, 重启恢复 |
 | `tui-pulse.json` | 每秒观测快照 (同进程 `-tui` 时) | 仅 `-tui` 时 |
 

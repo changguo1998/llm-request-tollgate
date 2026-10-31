@@ -144,7 +144,7 @@ func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 		if r.TtfbN > 0 {
 			ttfb = durStr(time.Duration(r.TtfbSum/int64(r.TtfbN)) * time.Millisecond)
 		}
-		if avg, peak, ok := tokRate(r.Tok, time.Now()); ok {
+		if avg, peak, ok := tokRate(r.Tok, time.Now(), tuiTokWindow); ok {
 			// 一个格子里放两个数: 1h 平均 / 单笔峰值 (同一口径)。
 			tps = ftoa(avg, 1) + "/" + ftoa(peak, 1)
 		}

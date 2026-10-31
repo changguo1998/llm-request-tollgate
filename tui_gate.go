@@ -16,7 +16,9 @@ import (
 // 最后一项是退避序列, 只能用 = 按逗号输入。
 var gateLabels = []string{
 	"interval_ms", "sem_wait_ms", "queue_wait_ms",
-	"concurrency_lock_ms", "quota_lock_ms", "breaker_lock_ms", "retry_backoff_ms",
+	"concurrency_lock_ms", "quota_lock_ms", "breaker_lock_ms",
+	"lowtps_window_ms", "lowtps_peak_max", "lowtps_avg_max", "lowtps_lock_ms",
+	"retry_backoff_ms",
 }
 
 // gateStep 是 +/- 一次调整的步长 (退避序列返回 0 = 不用加减键)。
@@ -26,8 +28,10 @@ func gateStep(i int) int {
 		return 100
 	case 1, 2:
 		return 500
-	case 3, 4, 5:
+	case 3, 4, 5, 6, 9:
 		return 60000
+	case 7, 8:
+		return 1
 	}
 	return 0
 }
@@ -48,11 +52,20 @@ func (e *tuiEditor) gateField(i int) int {
 		return g.QuotaLockMs
 	case 5:
 		return g.BreakerLockMs
+	case 6:
+		return g.LowTpsWindowMs
+	case 7:
+		return g.LowTpsPeakMax
+	case 8:
+		return g.LowTpsAvgMax
+	case 9:
+		return g.LowTpsLockMs
 	}
 	return 0
 }
 
-// gateText 是设置页里那一行的值 (退避序列写成逗号串, 与输入格式一致)。
+// gateText 是设置页里那一行的值 (退避序列写成逗号串, 与输入格式一致;
+// 两个门槛的单位是 tokens/s, 其余是毫秒)。
 func (e *tuiEditor) gateText(i int) string {
 	if i == len(gateLabels)-1 {
 		parts := make([]string, 0, len(e.gate.RetryBackoffMs))
@@ -60,6 +73,9 @@ func (e *tuiEditor) gateText(i int) string {
 			parts = append(parts, strconv.Itoa(v))
 		}
 		return strings.Join(parts, ",") + " ms"
+	}
+	if i == 7 || i == 8 {
+		return strconv.Itoa(e.gateField(i)) + " t/s"
 	}
 	return strconv.Itoa(e.gateField(i)) + " ms"
 }
@@ -110,6 +126,18 @@ func (e *tuiEditor) adjustGate(delta int) {
 	case 5:
 		v = clampInt(v, 1000, 86400000)
 		e.gate.BreakerLockMs = v
+	case 6:
+		v = clampInt(v, 1000, 86400000)
+		e.gate.LowTpsWindowMs = v
+	case 7:
+		v = clampInt(v, 1, 100000)
+		e.gate.LowTpsPeakMax = v
+	case 8:
+		v = clampInt(v, 1, 100000)
+		e.gate.LowTpsAvgMax = v
+	case 9:
+		v = clampInt(v, 1000, 86400000)
+		e.gate.LowTpsLockMs = v
 	}
 	e.gateDirty = true
 	e.message = gateLabels[i] + " = " + strconv.Itoa(v)
@@ -159,6 +187,14 @@ func (e *tuiEditor) setGatePrompt(i int, text string) {
 		e.gate.QuotaLockMs = n
 	case 5:
 		e.gate.BreakerLockMs = n
+	case 6:
+		e.gate.LowTpsWindowMs = n
+	case 7:
+		e.gate.LowTpsPeakMax = n
+	case 8:
+		e.gate.LowTpsAvgMax = n
+	case 9:
+		e.gate.LowTpsLockMs = n
 	}
 	e.gateDirty = true
 	e.message = gateLabels[i] + " = " + strconv.Itoa(n)

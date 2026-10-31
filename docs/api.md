@@ -107,8 +107,12 @@ key):
 - 全部候选失败: 保留最近一次错误 (状态码 / 头 / 体) 原样透传; 如果请求根本没发出去
   (被锁 / 排队超时 / 信号量超时), 就合成 429 说明原因 (见 5.2).
 - 锁的粒度: 额度锁该模型所属的记账组 (`quota_lock_ms`, 缺省 10min, 额度按组共享,
-  一个上游可以有多组); 熔断只锁出错的 `上游/模型` (`breaker_lock_ms`, 缺省 5min),
-  同家别的模型照常发送. 锁与退避落盘到日志同目录 `gate-state.json`, 重启仍生效.
+  一个上游可以有多组); 熔断只锁出错的 `上游/模型` (`breaker_lock_ms`, 缺省 5min);
+  低流量锁 (`lowtps_lock_ms`, 缺省 5min) 同样只锁 `上游/模型` —— 最近
+  `lowtps_window_ms` (缺省 10min) 内解码吞吐的峰值低于 `lowtps_peak_max` (缺省 5 t/s)
+  且平均低于 `lowtps_avg_max` (缺省 1 t/s) 时触发 (平均 = 输出 token 总量 / 解码段总时长,
+  峰值 = 单笔最高; 样本只取能拆出解码段的流式成功请求, 窗口内不足 2 笔不判). 同家别的
+  模型照常发送. 锁与退避落盘到日志同目录 `gate-state.json`, 重启仍生效.
 
 ## 5. 代理合成的错误
 
@@ -176,8 +180,9 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 - 查询参数 `since`: 只要序号大于它的新增事件, 返回里同时给 `max_seq`, 下次轮询带上.
 - 载荷: `ver` (观测面版本), `listen`, `now`, `active` (进行中请求数组), `cands`
   (每上游一条: 队列长 / 在飞 / 并发上限 / 是否在试探 / 连续错误数 / 退避剩余 / 锁剩余
-  / 锁原因 / 各记账组的额度锁 (`groups`: 组名 + 锁剩余, 按配置顺序) / 模型级熔断锁
-  / 距下次节拍), `events` (事件数组), `max_seq`, `slow_ms`.
+  / 锁原因 / 各记账组的额度锁 (`groups`: 组名 + 锁剩余, 按配置顺序) / 模型级定时锁
+  (`models[].why`: `breaker` 熔断 / `lowtps` 低流量) / 距下次节拍), `events` (事件数组),
+  `max_seq`, `slow_ms`.
 - `active` 每笔: `id` / `logical` / `source` / `path` / `stream` / `start` / `upstream` /
   `backend` / `stage` / `attempt` / `gate`; 接收中的流式请求另带 `recv_tok` (已收到的
   输出 token 估计数) 与 `recv_start` (首字节到达时刻, Unix 毫秒), 后者用来算这笔的

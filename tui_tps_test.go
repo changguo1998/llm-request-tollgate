@@ -18,14 +18,14 @@ func TestTokRate(t *testing.T) {
 		{ts: now.Add(-10 * time.Minute), tok: 1800, dur: 30000},   // 60 t/s
 		{ts: now.Add(-5 * time.Minute), tok: 600, dur: 5000},      // 120 t/s
 	}
-	avg, peak, ok := tokRate(pts, now)
+	avg, peak, ok := tokRate(pts, now, tuiTokWindow)
 	if !ok || avg != 4200.0/65 || peak != 120 {
 		t.Errorf("应为 平均 %.2f / 峰值 120, 得到 (%v, %v, %v)", 4200.0/65, avg, peak, ok)
 	}
-	if _, _, ok := tokRate([]tokPoint{{ts: now.Add(-2 * time.Hour), tok: 100, dur: 1000}}, now); ok {
+	if _, _, ok := tokRate([]tokPoint{{ts: now.Add(-2 * time.Hour), tok: 100, dur: 1000}}, now, tuiTokWindow); ok {
 		t.Error("窗口内没有样本时应 ok=false")
 	}
-	if _, _, ok := tokRate([]tokPoint{{ts: now, tok: 100}}, now); ok {
+	if _, _, ok := tokRate([]tokPoint{{ts: now, tok: 100}}, now, tuiTokWindow); ok {
 		t.Error("没有耗时的样本不能让分母为 0")
 	}
 }
@@ -111,7 +111,7 @@ func TestModelRowsOneHourTokens(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("应有一行, 得到 %d", len(rows))
 	}
-	avg, peak, ok := tokRate(rows[0].Tok, now.Add(2*time.Minute))
+	avg, peak, ok := tokRate(rows[0].Tok, now.Add(2*time.Minute), tuiTokWindow)
 	if !ok || avg != 75 || peak != 100 {
 		t.Errorf("300 token / 4s 应为 平均 75 / 峰值 100, 得到 (%v, %v, %v)", avg, peak, ok)
 	}

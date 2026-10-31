@@ -40,8 +40,8 @@ const (
 	queueModel                  // 该模型的队列 (熔断锁 / 退避的等待口)
 )
 
-// cand 是每个上游的调度状态: 两层队列 + 自适应并发上限 + 三类锁。
-// 退避、熔断计数与熔断锁按模型分开记 (modelGates), 所以同家一个模型坏了不挡其它模型;
+// cand 是每个上游的调度状态: 两层队列 + 自适应并发上限 + 四类锁。
+// 退避、熔断计数与定时锁按模型分开记 (modelGates), 所以同家一个模型坏了不挡其它模型;
 // 额度锁按额度组分开记 (groupLocks), 所以一个组额度用完不挡同家的其它组。
 type cand struct {
 	id string
@@ -62,11 +62,12 @@ type cand struct {
 	wake       chan struct{}
 }
 
-// modelGate 是一个 upstream/model 的失败状态。
+// modelGate 是一个 upstream/model 的失败状态与吞吐采样。
 type modelGate struct {
-	fails       int       // 连续错误计数, 成功清零
-	pausedUntil time.Time // 退避到什么时候: 退避期间该模型不出队
-	lock        lockState // 熔断锁 (5min): 只锁该 upstream/model
+	fails       int        // 连续错误计数, 成功清零
+	pausedUntil time.Time  // 退避到什么时候: 退避期间该模型不出队
+	lock        lockState  // 定时锁 (熔断 / 低流量): 只锁该 upstream/model
+	tps         []tokPoint // 低流量锁的判定样本: 窗口内每笔的解码吞吐
 }
 
 func newCand(id string) *cand {

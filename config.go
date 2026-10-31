@@ -52,13 +52,18 @@ type Config struct {
 
 // GateCfg 是所有上游共用的门控参数。
 type GateCfg struct {
-	IntervalMs        int   `json:"interval_ms"`
-	SemWaitMs         int   `json:"sem_wait_ms"`
-	QueueWaitMs       int   `json:"queue_wait_ms"`
-	ConcurrencyLockMs int   `json:"concurrency_lock_ms"`
-	QuotaLockMs       int   `json:"quota_lock_ms"`
-	BreakerLockMs     int   `json:"breaker_lock_ms"`
-	RetryBackoffMs    []int `json:"retry_backoff_ms"`
+	IntervalMs        int `json:"interval_ms"`
+	SemWaitMs         int `json:"sem_wait_ms"`
+	QueueWaitMs       int `json:"queue_wait_ms"`
+	ConcurrencyLockMs int `json:"concurrency_lock_ms"`
+	QuotaLockMs       int `json:"quota_lock_ms"`
+	BreakerLockMs     int `json:"breaker_lock_ms"`
+	// 低流量锁: 窗口内解码吞吐的峰值与平均都低于阈值时锁住该模型。
+	LowTpsWindowMs int   `json:"lowtps_window_ms"`
+	LowTpsPeakMax  int   `json:"lowtps_peak_max"` // 峰值上限 (tokens/s)
+	LowTpsAvgMax   int   `json:"lowtps_avg_max"`  // 平均上限 (tokens/s)
+	LowTpsLockMs   int   `json:"lowtps_lock_ms"`
+	RetryBackoffMs []int `json:"retry_backoff_ms"`
 }
 
 // gateIntervalMs 是出队节拍的缺省值。
@@ -84,6 +89,18 @@ func normGate(g GateCfg) GateCfg {
 	if g.BreakerLockMs <= 0 {
 		g.BreakerLockMs = 300000
 	}
+	if g.LowTpsWindowMs <= 0 {
+		g.LowTpsWindowMs = 600000
+	}
+	if g.LowTpsPeakMax <= 0 {
+		g.LowTpsPeakMax = 5
+	}
+	if g.LowTpsAvgMax <= 0 {
+		g.LowTpsAvgMax = 1
+	}
+	if g.LowTpsLockMs <= 0 {
+		g.LowTpsLockMs = 300000
+	}
 	if len(g.RetryBackoffMs) == 0 {
 		g.RetryBackoffMs = []int{10000, 20000, 30000}
 	}
@@ -104,6 +121,14 @@ func (g GateCfg) quotaLock() time.Duration {
 }
 func (g GateCfg) breakerLock() time.Duration {
 	return time.Duration(g.BreakerLockMs) * time.Millisecond
+}
+
+// 低流量锁的窗口 / 门槛 / 锁时长 (门槛是整数 tokens/s)。
+func (g GateCfg) lowTpsWindow() time.Duration {
+	return time.Duration(g.LowTpsWindowMs) * time.Millisecond
+}
+func (g GateCfg) lowTpsLock() time.Duration {
+	return time.Duration(g.LowTpsLockMs) * time.Millisecond
 }
 
 // backoff 返回第 n 次连续失败该暂停多久; 超出序列长度返回 0 (那一次该进熔断)。

@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// gateLockRec 是落盘的一条定时锁。Model 非空 = 该模型的熔断锁; 否则是额度组锁,
-// Group 给出组名 (空 = 默认组)。
+// gateLockRec 是落盘的一条定时锁。Model 非空 = 该模型的定时锁 (熔断 / 低流量);
+// 否则是额度组锁, Group 给出组名 (空 = 默认组)。
 type gateLockRec struct {
 	UntilMs  int64  `json:"until_unix_ms"`
 	Reason   string `json:"reason"`
@@ -49,6 +49,14 @@ func (a *App) addLockGroup(c *cand, group, reason string, dur time.Duration) {
 func (a *App) addLockModel(c *cand, model, reason string, dur time.Duration) {
 	a.evAdd("lock", "", c.id, model, "加锁 连续错误到阈值, 熔断 "+durStr(dur))
 	c.lockModel(model, reason, dur)
+	a.saveGateState()
+}
+
+// addLockLowTps 给 upstream/model 加低流量锁并落盘 (作用域同熔断锁: 只锁该模型)。
+func (a *App) addLockLowTps(c *cand, model string, peak, avg float64, dur time.Duration) {
+	a.evAdd("lock", "", c.id, model,
+		"加锁 吞吐过低 (峰值 "+ftoa(peak, 1)+" / 平均 "+ftoa(avg, 1)+" t/s) "+durStr(dur))
+	c.lockModel(model, lowTpsReason, dur)
 	a.saveGateState()
 }
 
