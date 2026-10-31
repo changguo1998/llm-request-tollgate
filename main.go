@@ -3056,7 +3056,13 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			buf = []byte(`{"error":{"message":` + strconv.Quote(rerr.Error()) + `}}`)
 			dst.Set("Content-Type", "application/json")
 		}
-		buf = rewriteModel(buf, logical)
+		// /v1/responses 的 model 嵌在 response 对象里 (与流式事件同形), 按已知的真实 id 换;
+		// 聊天接口只需换顶层字段。
+		if isResponses {
+			buf = rewriteModelKnown(buf, realModel, logical)
+		} else {
+			buf = rewriteModel(buf, logical)
+		}
 		usage = extractUsage(buf)
 		missing = usage == nil
 		if missing {

@@ -15,68 +15,8 @@ import (
 	"time"
 )
 
-// newTestAppCfg 用现成的 Config 起 App: 补上日志路径、监听地址与超时 (测试里必备的非零值)。
-func newTestAppCfg(t *testing.T, cfg *Config) *App {
-	t.Helper()
-	cfg.Listen = "127.0.0.1:0"
-	if cfg.LogPath == "" {
-		cfg.LogPath = filepath.Join(t.TempDir(), "requests.jsonl")
-	}
-	if cfg.Timeouts.StreamIdleMs == 0 {
-		// 超时不能留零值: 连接包装器会把每次读的死线设成 "现在", 读立刻超时。
-		cfg.Timeouts = Timeouts{ConnectMs: 5000, ResponseHeaderMs: 5000, StreamIdleMs: 5000}
-	}
-	app, err := newApp(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return app
-}
-
-// newTestApp 起一个指向假上游的单候选 App, 日志写在临时目录里。
-func newTestApp(t *testing.T, upstreamURL string, gate GateCfg, rules *ErrRules) *App {
-	t.Helper()
-	return newTestAppCfg(t, &Config{
-		Gate: gate,
-		Upstreams: []UpstreamCfg{{
-			ID: "u1", BaseURL: upstreamURL, AuthHeader: "Authorization", Key: "k",
-			IncludeUsage: true, Errors: rules,
-		}},
-		Aliases: map[string][][2]string{"m1": {{"u1", "real-1"}}},
-	})
-}
-
-func postJSON(t *testing.T, url, body string) (int, []byte) {
-	t.Helper()
-	resp, err := http.Post(url, "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	return resp.StatusCode, b
-}
-
-// lastLogRec 读最后一行请求日志。
-func lastLogRec(t *testing.T, app *App) logRec {
-	t.Helper()
-	app.logMu.Lock()
-	path := app.logW.Name()
-	app.logMu.Unlock()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
-	var rec logRec
-	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &rec); err != nil {
-		t.Fatalf("日志解析失败: %v", err)
-	}
-	return rec
-}
-
 // TestProxyForwardsAndRewritesModel 覆盖正常转发: 认证头替换, 上游收到真实模型 id,
-// 响应里的 model 改回逻辑名, 日志记下用量, 白名单外仍 404。
+// 响应里的 model 改回逻辑名, 日志记下用量。(未知模型 / 坏请求体这些路由级错误见 api_http_test.go。)
 func TestProxyForwardsAndRewritesModel(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer k" {
@@ -114,10 +54,6 @@ func TestProxyForwardsAndRewritesModel(t *testing.T) {
 		t.Fatalf("日志不符: %+v", rec)
 	}
 
-	status, _ = postJSON(t, url, `{"model":"nope","messages":[]}`)
-	if status != http.StatusNotFound {
-		t.Fatalf("白名单外的模型名应 404, 实为 %d", status)
-	}
 }
 
 // TestProxyOvershootGrowsConcurrency 覆盖并发满时的超发试探: 起点 1 的上限下面能有两笔
