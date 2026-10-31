@@ -1239,10 +1239,11 @@ type App struct {
 	flows    map[uint64]*flow
 	nextFlow uint64
 	// dwell 是各阶段的停留时长累计 (纳秒, 下标 = stage*), 由 flowStage/flowEnd 在
-	// flowMu 里记账; 仅随 pulse 下发供旧版 TUI 分配行数, 新版按并发水平 (conc) 分档。
+	// flowMu 里记账; 仅随 pulse 下发, TUI 给第 1 页分块定行数时当退路 (它自己窗口里
+	// 还没攒到样本时才用), 兼旧版 TUI 兼容。
 	dwell [stageCount]int64
 	// 阶段并发水平: 时间切成 concSlice 宽的片, 每片记峰值; 取用时按片的年龄做指数
-	// 衰减加权平均 (pulse.Conc)。TUI 用它给第 1 页各分块定数据行区高度。
+	// 衰减加权平均 (pulse.Conc)。同上是 TUI 分块行数的退路。
 	concNow   [stageCount]int
 	chunkAt   time.Time
 	chunkPeak [stageCount]int

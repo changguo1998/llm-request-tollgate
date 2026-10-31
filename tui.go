@@ -381,6 +381,12 @@ type tuiModel struct {
 
 	// 上游专属色 (每帧按上游表顺序重算), 各页的 上游/模型 单元格共用。
 	upColors map[string]string
+
+	// 第 1 页各分块的行数统计: 每次取到观测面后记一笔样本 (各块在飞笔数), 行数的参考值
+	// 用窗口内的样本算; durSum / durN 是全部能读到的请求的耗时合计与笔数 (定权重的时间尺度)。
+	rowHist []rowSample
+	durSum  int64
+	durN    int64
 }
 
 // errf 记下最近一次取数失败 (可能来自别的 goroutine, 加锁)。
@@ -501,6 +507,11 @@ func (m *tuiModel) absorb(line []byte) {
 	if ts.IsZero() {
 		ts = time.Now()
 	}
+	// 平均停留时长按全部能读到的请求算 (不按回看窗口), 只用于第 1 页分块行数的权重。
+	if r.DurationMs > 0 {
+		m.durSum += r.DurationMs
+		m.durN++
+	}
 	if age := time.Since(ts); age > m.window {
 		return // 窗口外的记录不算 (日志文件按 mtime 已粗筛过, 这里再按时间精筛)
 	}
@@ -620,6 +631,7 @@ func (m *tuiModel) pollState(app *App, since uint64) uint64 {
 	if app != nil {
 		p := app.snapshot(since)
 		m.pulse, m.live, m.lastErr = p, true, ""
+		m.noteRows(time.Now())
 		m.mergeEvents(p.Events)
 		return p.MaxSeq
 	}
@@ -644,6 +656,7 @@ func (m *tuiModel) pollState(app *App, since uint64) uint64 {
 		return since
 	}
 	m.pulse, m.live, m.lastErr = p, true, ""
+	m.noteRows(time.Now())
 	m.mergeEvents(p.Events)
 	return p.MaxSeq
 }
@@ -1161,9 +1174,8 @@ func segStr(sec float64) string {
 
 // flowBlocks 是第 1 页的分块: 顺序就是请求在调度器里的流程顺序。
 // 解析与并发池合成第一块 (解析是瞬时状态, 单独一块只会闪一下)。
-// 各块的数据行区高度由 flowMinRows 按「窗口内最大并发」与「阶段停留时长」一起定:
-// 两个信号都强的阶段多留几行, 每个阶段至少留 1 行撑住版式; 行不够就补空行, 请求换
-// 阶段、块空了, 底下的块也不会往上跳。
+// 各块的数据行区高度由 flowMinRows 定: 先按窗口内各块在飞笔数的累计占比分配「总并发峰值」,
+// 得到每块的参考行数, 再用此刻的笔数校准; 块的位置只随统计变, 不随单笔请求进出走。
 var flowBlocks = []struct {
 	title  string
 	stages []int
@@ -1176,17 +1188,169 @@ var flowBlocks = []struct {
 	{"已失败", []int{stageFailed}},
 }
 
-// defaultMinRows 是各块数据行区的缺省档: 两个信号都还没算出来 (新起的 TUI, 或对端观测面
-// 没有 conc / dwell 字段) 时用这一档。
+// defaultMinRows 是各块数据行区的缺省档: 统计窗口里还没有样本, 对端也没下发 conc / dwell
+// (旧二进制) 时用这一档。
 var defaultMinRows = []int{4, 4, 2, 4, 2, 2}
 
-// flowMinRows 给每个分块定数据行区高度 (每个阶段保底 1 行, 6 行封顶)。两个信号相加:
+// 行数统计的权重与样本上限 (取观测面每秒一拍; 样本按高斯权重衰减, 2h 的样本留在内存里)。
+// 高斯的时间尺度 t0 是实测的平均停留时长: 停留这么久的样本权重 0.8, 2 倍处 0.41, 3 倍处
+// 0.13 (公式 0.8^((age/t0)²)); 权重低于 gaussKeep 的样本 (约 5.6 倍 t0 之前) 不再参与统计。
+// 还没测到停留时长时用 rowStatTau0 兜底。
+const (
+	rowStatTau0 = 35 * time.Second
+	gaussAtTau  = 0.8
+	gaussKeep   = 1e-3
+	rowHistMax  = 7200
+)
+
+// rowSample 是一次采样: 各块的在飞笔数, 以及这些请求的耗时合计与笔数 (求平均停留时长)。
+type rowSample struct {
+	at  time.Time
+	cnt []int
+}
+
+// flowMinRows 给每个分块定数据行区高度: 参考行数来自一段时间的统计, 最后用此刻的笔数校准。
+// 参考行数 (blockRefRows): 每个样本先算各块笔数占该样本在飞笔数的比例, 再按高斯权重对各
+// 样本的比例取加权平均 (近的重、远的轻, 于是某一段时间挂着很多笔不会独占统计), 乘以「同时在飞
+// 笔数峰值」(总并发数), 四舍五入成参考行数, 1 至 6 行。
+// 校准: 行数 = max(此刻笔数, 参考行数, 1)。笔数超过参考值时按实际留, 有空行的块也不把
+// 请求藏起来; 空块最少留 1 行撑住版式。
+func (m *tuiModel) flowMinRows() []int {
+	cur := m.blockCounts()
+	ref, ok := m.blockRefRows(time.Now())
+	if !ok {
+		ref = m.pulseMinRows()
+	}
+	out := make([]int, len(flowBlocks))
+	for i := range out {
+		out[i] = max(cur[i], ref[i], 1)
+	}
+	return out
+}
+
+// blockCounts 是各块此刻的请求数 (校准用)。
+func (m *tuiModel) blockCounts() []int {
+	out := make([]int, len(flowBlocks))
+	for _, f := range m.pulse.Active {
+		if b := blockOfStage(f.Stage); b >= 0 {
+			out[b]++
+		}
+	}
+	return out
+}
+
+// blockOfStage 返回该阶段属于哪个分块 (不属于任何块时 -1)。
+func blockOfStage(stage int) int {
+	for i, b := range flowBlocks {
+		if stageIn(stage, b.stages) {
+			return i
+		}
+	}
+	return -1
+}
+
+// noteRows 采一次样 (每次取到观测面后调用), 顺手丢掉太老的样本。
+func (m *tuiModel) noteRows(now time.Time) {
+	s := rowSample{at: now, cnt: make([]int, len(flowBlocks))}
+	for _, f := range m.pulse.Active {
+		if b := blockOfStage(f.Stage); b >= 0 {
+			s.cnt[b]++
+		}
+	}
+	m.rowHist = append(m.rowHist, s)
+	if len(m.rowHist) > rowHistMax {
+		m.rowHist = append([]rowSample(nil), m.rowHist[len(m.rowHist)-rowHistMax:]...)
+	}
+}
+
+// blockRefRows 用最近一段的样本算参考行数: 每个样本先算各块笔数占该样本在飞笔数的比例,
+// 再按高斯权重 (离参看时刻越远越轻) 对各样本的比例取加权平均, 最后乘「同时在飞笔数峰值」
+// (总并发数), 四舍五入成参考行数。
+// 权重的时间尺度 t0 = 实测平均停留时长 (从开始请求信号量到请求结束): 停留 t0 那么久的样本
+// 权重 0.8, 见 gaussWeight。
+// 参看时刻: 此刻有进行中的请求就用当前时间, 没有就用最后一次请求结束的时刻 (最后一个非空
+// 样本), 于是空闲一阵之后仍然沿用上一段有请求的数据, 版式不塌回缺省档。权重低于 gaussKeep
+// 的样本直接跳过, 没有硬截断, 只是越远的样本越轻。第二个返回值 = 有没有可用的样本。
+func (m *tuiModel) blockRefRows(now time.Time) ([]int, bool) {
+	k := len(flowBlocks)
+	refAt, end := now, len(m.rowHist) // end = 可以用来算权重的样本个数 (到参看时刻为止)
+	if blockTotal(m.blockCounts()) == 0 {
+		end, refAt = -1, time.Time{}
+		for i := len(m.rowHist) - 1; i >= 0; i-- {
+			if blockTotal(m.rowHist[i].cnt) > 0 && !m.rowHist[i].at.After(now) {
+				end, refAt = i+1, m.rowHist[i].at
+				break
+			}
+		}
+		if end < 0 {
+			return nil, false
+		}
+	}
+	tau := m.rowTau()
+	share := make([]float64, k)
+	weight, peak := 0.0, 0.0
+	for _, s := range m.rowHist[:end] {
+		n := blockTotal(s.cnt)
+		if n <= 0 {
+			continue // 空样本没有占比可言, 不参与加权
+		}
+		w := gaussWeight(s.at, refAt, tau)
+		if w < gaussKeep {
+			continue
+		}
+		weight += w
+		peak = math.Max(peak, float64(n))
+		for i := 0; i < k && i < len(s.cnt); i++ {
+			share[i] += w * float64(s.cnt[i]) / float64(n)
+		}
+	}
+	if weight <= 0 || peak <= 0 {
+		return nil, false
+	}
+	out := make([]int, k)
+	for i := 0; i < k; i++ {
+		out[i] = clampRows(int(math.Round(share[i] / weight * peak)))
+	}
+	return out, true
+}
+
+// rowTau 是全部能读到的请求的平均耗时 (从开始请求信号量到请求结束), 作高斯权重的时间尺度;
+// 日志里还没有请求时用 rowStatTau0 兜底。
+func (m *tuiModel) rowTau() time.Duration {
+	if m.durN <= 0 || m.durSum <= 0 {
+		return rowStatTau0
+	}
+	return time.Duration(m.durSum/m.durN) * time.Millisecond
+}
+
+// gaussWeight 是样本的高斯权重: 停留 t0 那么久时为 0.8, 越远越轻, 写作 0.8^((age/t0)²)
+// (指数的底换成 e: exp((age/t0)² · ln 0.8))。
+func gaussWeight(at, ref time.Time, tau time.Duration) float64 {
+	t := tau.Seconds()
+	if t <= 0 {
+		return 1
+	}
+	d := at.Sub(ref).Seconds() / t
+	return math.Exp(d * d * math.Log(gaussAtTau))
+}
+
+// blockTotal 是一个样本里各块笔数之和 (同时在飞的笔数)。
+func blockTotal(cnt []int) int {
+	n := 0
+	for _, v := range cnt {
+		n += v
+	}
+	return n
+}
+
+// pulseMinRows 是按服务端下发的 conc / dwell 算的参考行数 (统计窗口里还没有样本时用)。两个
+// 信号相加:
 //   - 并发水平 (pulse.Conc): 一定时间窗口内的峰值再按片年龄做指数衰减加权, 反映最近有
 //     多忙; 先取平方根再除以各块最大值, 压住"并发池一家独大";
 //   - 停留时长 (pulse.Dwell): 该阶段累计停留占总停留的比例, 反映请求在这一步耗多久。
 //
 // 两者按 0.6 / 0.4 加权后映射到 1 至 6 行。只有停留时长 (旧对端) 时退回按占比分配。
-func (m *tuiModel) flowMinRows() []int {
+func (m *tuiModel) pulseMinRows() []int {
 	out := append([]int(nil), defaultMinRows...)
 	share, hasDwell := m.blockDwellShare()
 	if len(m.pulse.Conc) >= stageCount {
@@ -1301,8 +1465,8 @@ func flowIDCell(id uint64) string {
 // drawFlow 是第 1 页: 活动连接按流程阶段分块, 每块内按编号倒序 (大的在上)。列名固定在
 // 页签下方, 不随内容滚走;
 // 分块内容单独滚动 (up/down 只动分块), 块与块之间不再空行 (标题自带分隔); 每块的数据
-// 行区高度按历史停留时长动态定 (flowMinRows): 停留久的阶段多留 (4 至 6 行), 停留短的
-// 少留 (1 行), 空块也照留, 于是各块位置相对稳定。
+// 行区高度按窗口统计定参考、再用此刻笔数校准 (flowMinRows): 笔数多按实际留, 空块最少
+// 1 行, 有空行时也不超过 6 行, 于是各块位置相对稳定。
 // 列按全部请求一起算: 表头只有一份, 各块必须同列同宽。
 // 分块下面是上游状态与模型/路由聚合两张表 (drawModelsBody), 与分块一起滚动。
 func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
@@ -1347,7 +1511,7 @@ func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 	c.line("") // 表头上一行空着, 不顶在页签下面
 	c.line(tableHead(cols, vis))
 	full := &tuiCanvas{cols: c.cols}
-	minRows := m.flowMinRows() // 各块数据行区高度: 按历史停留时长分档
+	minRows := m.flowMinRows() // 各块数据行区高度: 窗口统计定参考, 此刻笔数校准
 	for i, b := range flowBlocks {
 		rows := pickRows(keep, grouped[i])
 		full.line(tuiDim + tuiIndent + b.title + " (" + strconv.Itoa(len(rows)) + ")" + tuiReset)
