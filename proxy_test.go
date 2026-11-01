@@ -254,6 +254,50 @@ func TestProxyPerKeyRateLimitLocksGroup(t *testing.T) {
 	}
 }
 
+// TestProxy422QuotaLocksGroup 覆盖非 429 的额度类: 上游回 422 + budget_exceeded,
+// 规则里 422 属额度档, 应锁该组并把 422 原文透传; 锁内后续请求不再真发。
+func TestProxy422QuotaLocksGroup(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error":{"message":"Budget has been exceeded! Max budget: 30.0","type":"budget_exceeded","code":"422"}}`)
+	}))
+	defer up.Close()
+	rules := &ErrRules{Quota: []ErrRule{{Status: []int{400, 422, 429}, Contains: []string{
+		"budget_exceeded", "Budget has been exceeded!",
+	}}}}
+	app := newTestApp(t, up.URL, GateCfg{IntervalMs: 5, SemWaitMs: 200, QueueWaitMs: 200}, rules)
+	proxy := httptest.NewServer(app)
+	defer proxy.Close()
+	url := proxy.URL + "/v1/chat/completions"
+
+	// 第一笔: 422 与上游 body 原样透传, 同时该模型所属的组被锁。
+	status, body := postJSON(t, url, `{"model":"m1","messages":[]}`)
+	if status != http.StatusUnprocessableEntity || !strings.Contains(string(body), "Budget has been exceeded") {
+		t.Fatalf("上游 422 应原样透传, 实为 %d %s", status, body)
+	}
+	locked, left, reason := app.cands["u1"].locked("real-1", "")
+	if !locked || reason != "quota" || left < 9*time.Minute {
+		t.Fatalf("422 命中额度规则后该组应被锁: locked=%v left=%s reason=%s", locked, left, reason)
+	}
+
+	// 第二笔不再真发: 候选全被锁 → 429 说明是锁而不是上游错误。
+	status, body = postJSON(t, url, `{"model":"m1","messages":[]}`)
+	if status != http.StatusTooManyRequests || !strings.Contains(string(body), "upstream_locked") {
+		t.Fatalf("锁内应给 upstream_locked 的 429, 实为 %d %s", status, body)
+	}
+	mu.Lock()
+	n := calls
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("锁内不该真发, 上游被调用 %d 次", n)
+	}
+}
+
 // TestProxyQuotaLockStaysInGroup 覆盖记账组: 同一上游两个组, 一组命中额度锁后同家
 // 另一个组照常真发 (额度锁不锁整个上游)。
 func TestProxyQuotaLockStaysInGroup(t *testing.T) {

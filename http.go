@@ -19,10 +19,11 @@ var clientAuthHeaders = []string{
 	"Authorization", "Api-Key", "X-Api-Key", "api-key", "X-Goog-Api-Key", "Proxy-Authorization",
 }
 
-// shouldFallback: 该状态码值得换下一个候选重试 (首字节前)。429 与 5xx 可重试;
-// 其余 4xx (模型不存在 / 参数错 / 鉴权错) 不重试, 直接透传。
+// shouldFallback: 该响应是否进候选分支 (换下一个候选或按类上锁)。只有 200 算服务成功;
+// 其余状态码 (含 3xx / 4xx / 429 / 5xx) 一律交给 classifyFailure 按上游规则判类,
+// 免得额度类的 400 / 402 / 403 / 422 被当成成功直接透传、既不上锁也不计数。
 func shouldFallback(status int) bool {
-	return status == http.StatusTooManyRequests || status >= 500
+	return status != http.StatusOK
 }
 
 // buildAttemptPayload 按候选上游生成转发请求体: 真实模型 id + 按上游开关注入

@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// attemptLoop 按候选顺序尝试, 只在还没给客户端写任何字节前 (传输失败 / 上游 429 或 5xx)
-// 换下一个候选; 全部失败时保留最近一次错误, 由 writeFailure 决定应答。
+// attemptLoop 按候选顺序尝试, 只在还没给客户端写任何字节前换下一个候选 (传输失败 /
+// 上游非 200); 全部失败时保留最近一次错误, 由 writeFailure 决定应答。
 func (s *serveState) attemptLoop() {
 	for _, at := range s.attempts {
 		// 进入这个候选: 展示状态跟着走 (换候选时 mark 收到失败码, 顺手记一条 fallback 事件)。
