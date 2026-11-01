@@ -597,15 +597,16 @@ EOF
         pass "日志 usage 与上游一致" || fail "日志 usage 不一致"
 
     # 2) 流式走 include_usage=false 的上游 -> 无 usage, 按字符口径兜底:
-    #    思考块 "thinking step one" (17 字符 -> 5) + "Hello " (6 -> 2) + "world!" (6 -> 2), 合计 9
+    #    思考块 "thinking step one" (17 字符 -> 5) + "Hello " (6 -> 2) + "world!" (6 -> 2)
+    #    + 工具调用 name "get_weather" (11 -> 3) + arguments (18 -> 5), 合计 17
     post_stream 18803 '{"model":"no-usage-model","messages":[{"role":"user","content":"hi"}],"stream":true}' > /dev/null
     if grep -q '"usage"' "$TMP/resp.txt"; then
         fail "no-usage 上游不应有 usage chunk"
     else
         pass "no-usage 上游无 usage chunk"
     fi
-    grep '"upstream":"fnu"' "$LOG" | tail -1 | grep -q '"usage":{"prompt":0,"completion":9,"total":9}' &&
-        pass "字符口径兜底估算 completion=9" || fail "兜底估算缺失或数值不对"
+    grep '"upstream":"fnu"' "$LOG" | tail -1 | grep -q '"usage":{"prompt":0,"completion":17,"total":17}' &&
+        pass "字符口径兜底估算 completion=17 (含工具调用)" || fail "兜底估算缺失或数值不对"
     grep '"upstream":"fnu"' "$LOG" | tail -1 | grep -q '"missing_usage":true' &&
         pass "missing_usage 计数" || fail "missing_usage 未记"
 

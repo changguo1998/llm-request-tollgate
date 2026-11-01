@@ -69,7 +69,7 @@ func toUsage(u *openaiUsage) *Usage {
 
 // estimateTokens 按字符口径粗估: 非 ASCII 1 token/字符, 其余 4 字符 1 token。
 // 流式请求由 relayStream 逐块累加, 非流式由 estimateUsageFromBody 读响应体; 两路都
-// 把思考内容算输出。
+// 走 countOutput, 口径一致 —— 思考、工具调用参数、多模态段都算输出。
 func estimateTokens(s string) int {
 	ascii, other := 0, 0
 	for _, r := range s {
@@ -82,6 +82,83 @@ func estimateTokens(s string) int {
 	return other + (ascii+3)/4
 }
 
+// outMetaKeys 是下行内容里的结构 / 标识字段: 不承载输出内容, 不计入吞吐。
+var outMetaKeys = map[string]bool{
+	"role": true, "finish_reason": true, "index": true, "logprobs": true,
+	"id": true, "object": true, "created": true, "model": true, "type": true,
+	"status": true, "call_id": true, "event_id": true, "sequence_number": true,
+	"system_fingerprint": true,
+}
+
+// isBinarySegment 判定一段内容是二进制 / 链接片段 (data URI、URL, 或长且只含 base64
+// 字符集的无空白串): 这类片段按字符算会把图片音频放大几个量级。
+func isBinarySegment(s string) bool {
+	t := strings.TrimSpace(s)
+	switch {
+	case t == "":
+		return false
+	case strings.HasPrefix(t, "data:"), strings.HasPrefix(t, "http://"),
+		strings.HasPrefix(t, "https://"):
+		return true
+	case len(t) < 256:
+		return false
+	}
+	for _, r := range t {
+		ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
+			r == '+' || r == '/' || r == '=' || r == '-'
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// estimateSegment 估一段输出内容的 token: 文本走字符口径, 二进制 / 链接片段每段记 1。
+func estimateSegment(s string) int {
+	if isBinarySegment(s) {
+		return 1
+	}
+	return estimateTokens(s)
+}
+
+// countOutput 累加一段下行内容的输出 token: 字符串直接估, 数组 / 对象递归累加,
+// 对象里只跳过结构字段 (outMetaKeys), 其余一律计入 —— content / reasoning_content /
+// tool_calls 的 name 与 arguments / 多模态容器都在这一条路上。
+func countOutput(v any) int {
+	switch x := v.(type) {
+	case string:
+		return estimateSegment(x)
+	case []any:
+		n := 0
+		for _, e := range x {
+			n += countOutput(e)
+		}
+		return n
+	case map[string]any:
+		n := 0
+		for k, e := range x {
+			if outMetaKeys[k] {
+				continue
+			}
+			n += countOutput(e)
+		}
+		return n
+	}
+	return 0 // 数字 / 布尔 / null: 不是输出内容
+}
+
+// countOutputJSON 是 countOutput 的 JSON 入口 (解不开就当没有输出内容)。
+func countOutputJSON(raw []byte) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return 0
+	}
+	return countOutput(v)
+}
+
 func extractUsage(buf []byte) *Usage {
 	var resp struct {
 		Usage *openaiUsage `json:"usage"`
@@ -92,43 +169,26 @@ func extractUsage(buf []byte) *Usage {
 	return toUsage(resp.Usage)
 }
 
-// estimateUsageFromBody 取响应体里的生成文本与思考内容 (message.content /
-// message.reasoning_content / output[].content[].text / output[].summary[].text), 用于
-// 非流式缺 usage 时的兜底估算; 口径与流式逐块累加的那一路一致 —— 思考也算输出。
+// estimateUsageFromBody 是缺 usage 时对整份响应体的兜底估算, 与流式逐块累加同一口径
+// (都走 countOutput): chat 看 choices[].message, /v1/responses 看 output[] 每一项,
+// 结构字段跳过, 生成文本 / 思考 / 工具调用参数 / 多模态段都算输出。
 func estimateUsageFromBody(buf []byte) int {
 	var resp struct {
 		Choices []struct {
-			Message struct {
-				Content          string `json:"content"`
-				ReasoningContent string `json:"reasoning_content"`
-			} `json:"message"`
+			Message json.RawMessage `json:"message"`
 		} `json:"choices"`
-		// /v1/responses: 生成文本在 output[].content[].text, reasoning 项的可见思考
-		// 在 output[].summary[].text。
-		Output []struct {
-			Content []struct {
-				Text string `json:"text"`
-			} `json:"content"`
-			Summary []struct {
-				Text string `json:"text"`
-			} `json:"summary"`
-		} `json:"output"`
+		// /v1/responses: 生成文本在 output[].content[].text, 思考在 output[].summary[].text。
+		Output []json.RawMessage `json:"output"`
 	}
 	if err := json.Unmarshal(buf, &resp); err != nil {
 		return 0
 	}
 	n := 0
 	for _, c := range resp.Choices {
-		n += estimateTokens(c.Message.Content)
-		n += estimateTokens(c.Message.ReasoningContent)
+		n += countOutputJSON(c.Message)
 	}
 	for _, o := range resp.Output {
-		for _, c := range o.Content {
-			n += estimateTokens(c.Text)
-		}
-		for _, s := range o.Summary {
-			n += estimateTokens(s.Text)
-		}
+		n += countOutputJSON(o)
 	}
 	return n
 }

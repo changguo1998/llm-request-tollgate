@@ -326,7 +326,7 @@ SSE, 真 agent 指向代理；接上真上游后重跑同一套 (D9)。
 | F4 | 判定顺序 | 别名解析 → 取候选表 → 逐候选：被锁 / 退避跳过 → 备请求体 → **取该候选的信号量 (5s, 满了且未锁则试探) → 进该上游的流量队列 (10s) → 进该模型的队列 → 发送**；报错按「并发 / 额度 / 通用兜底」分流 (v2, §5.5) |
 | F5 | 日志 | JSONL 追加写, 逐笔明细；不落盘聚合账本 |
 | F6 | 流中失败 | 流已开始时代理自身失败, 发一个 SSE error 事件后关流, 不伪造正常结束 (§2 第 2 条) |
-| F7 | 缺 usage 的字符兜底 | 非 ASCII 字符按 1 token、其余按 4 字符 1 token 粗估；比一律 4:1 更贴近中文, 后者会低估 3 到 4 倍。流式逐块累加与非流式读响应体都把思考内容算输出 (`reasoning_content` / `output[].summary[].text` 等) |
+| F7 | 缺 usage 的字符兜底 | 非 ASCII 字符按 1 token、其余按 4 字符 1 token 粗估；比一律 4:1 更贴近中文, 后者会低估 3 到 4 倍。流式逐块累加与非流式读响应体共用一套 walker: 结构字段 (`role` / `finish_reason` / `id` / `type` 等) 不计, 其余字符串递归计入 —— 思考 (`reasoning_content` / `output[].summary[].text`)、工具调用的 `name` 与 `arguments`、多模态段都算输出; base64 / data URI / URL 段每段记 1 token, 免得图片音频把吞吐放大几个量级 |
 | F8 | 监听与日志路径 | 默认监听 `127.0.0.1:8787`, 默认日志 `var/requests.jsonl`；两者都可配 (§4.8) |
 | F9 | 头部与自产响应 | 头部除认证头、hop-by-hop 头与 `Accept-Encoding` 外原样透传, 不新增头部 (不经 `ReverseProxy`, 故无 `X-Forwarded-For`)；自产 4xx 用 OpenAI 兼容 error JSON 体, 429 另带 `Retry-After` |
 | F10 | 日志轮转 | 按本地日历天：跨天或隔天启动时归档为 `<base>-YYYY-MM-DD.jsonl`, 同名不覆盖；汇总与窗口聚合跨归档读；不自动删除或压缩 |

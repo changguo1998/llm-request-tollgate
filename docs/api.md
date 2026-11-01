@@ -81,10 +81,13 @@ key):
 - 流式 (SSE) 逐块原样透传不缓冲; 每块 `model` 改回逻辑名; 以 `[DONE]` 正常结束.
 - 记账: 强写 `stream_options.include_usage`, 从流末 usage chunk / 非流式响应体提取
   token 用量 (含缓存命中 token, 四种上游字段名都认); 缺 usage 按字符粗估并记
-  `missing_usage`. 粗估口径: 非 ASCII 1 token/字符, 其余 4 字符 1 token; 两路都把思考
-  算输出 —— 流式逐块累加 `reasoning_content` / `reasoning_text.delta` /
-  `reasoning_summary_text.delta`, 非流式读响应体的 `message.reasoning_content` 与
-  `output[].summary[].text`, 所以纯思考模型的 `completion` 不会为 0.
+  `missing_usage`. 粗估口径: 非 ASCII 1 token/字符, 其余 4 字符 1 token; 流式与
+  非流式同一口径 (结构字段 `role` / `finish_reason` / `id` / `type` 等不计):
+  - 文字: `content` / `reasoning_content` / `output[].content[].text` /
+    `output[].summary[].text`, 以及 responses 里所有 `*.delta` 事件;
+  - 工具调用: `tool_calls[].function.name` 与 `arguments`、`function_call_arguments.delta`;
+  - 多模态: 文本伴随字段按字符计, base64 / data URI / URL 段每段记 1 token.
+  纯思考模型与纯工具调用流的 `completion` 都不会为 0.
 
 ### 3.2 POST /v1/responses
 

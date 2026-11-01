@@ -61,10 +61,7 @@ func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel strin
 					} `json:"response"`
 					Delta   json.RawMessage `json:"delta"`
 					Choices []struct {
-						Delta struct {
-							Content          string `json:"content"`
-							ReasoningContent string `json:"reasoning_content"`
-						} `json:"delta"`
+						Delta json.RawMessage `json:"delta"`
 					} `json:"choices"`
 				}
 				if json.Unmarshal([]byte(data), &chunk) == nil {
@@ -83,19 +80,19 @@ func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel strin
 						switch chunk.Type {
 						case "response.completed", "response.failed", "response.incomplete":
 							done = true
-						case "response.output_text.delta", "response.reasoning_text.delta",
-							"response.reasoning_summary_text.delta":
-							var s string
-							if json.Unmarshal(chunk.Delta, &s) == nil {
-								est += estimateTokens(s)
-							}
+						}
+						// 所有带内容的 *.delta 都计入 (文本 / 思考 / 工具参数 / 音频等多模态),
+						// 只看 type 后缀, 结构事件与元数据不算。
+						if strings.HasSuffix(chunk.Type, ".delta") {
+							est += countOutputJSON(chunk.Delta)
 						}
 					}
 					for _, c := range chunk.Choices {
-						// 思考增量也算输出: 纯思考模型在 content 里一个字都没有, 只计
-						// content 会让接收中的吞吐一直显示不出来, 兜底的 completion 也会是 0。
-						est += estimateTokens(c.Delta.Content)
-						est += estimateTokens(c.Delta.ReasoningContent)
+						// 整个 delta 交给同一份口径: content / reasoning_content / 工具调用
+						// (name 与 arguments) / 多模态容器都算输出, role / finish_reason 这类
+						// 结构字段不算。思考增量必须计入 —— 纯思考模型 content 里一个字都
+						// 没有, 只数 content 会让接收中的吞吐一直显示不出来。
+						est += countOutputJSON(c.Delta)
 					}
 					// 块内 model 改回逻辑名 (只改该字段, 其余字节原样)。
 					data2 := rewriteModel([]byte(data), logical)
