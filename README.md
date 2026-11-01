@@ -178,8 +178,9 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
   include_usage / errors), 调度状态按 id 分组 (一个上游一把 key, 即「上游 + 凭据」分组)。
   `errors` 是错误分类规则 (逐家规则见 [docs/providers-api.md](docs/providers-api.md),
   缺省空表 = 全部走通用兜底): 每类一个规则数组, 单条规则
-  `{ "status": [429], "contains": ["quota exceeded"] }` —— 状态码在列表内 (缺省 = 任意状态码)
-  **且** 匹配文本 (`error.type` + `error.code` + `error.message`) 里出现关键词才算命中;
+  `{ "status": [429], "contains": ["quota exceeded"] }` —— 先看 `contains` 任一关键词是否
+  出现在匹配文本 (`error.type` + `error.code` + `error.message`) 里, 命中即定类 (与状态码
+  无关); 关键词都判不出来时, 才用只写了 `status` 的规则按状态码兜底。
   判定顺序 `quota → concurrency → 其他`。
   `key_env` 只存环境变量名, 真 key 启动时从环境取 (密钥不落盘, 见「常驻与升级」)。
   `key_prefix` 是认证头里的 scheme: 缺省对 `Authorization` 用 `Bearer `, 其他头不带

@@ -54,26 +54,8 @@ func errMatchText(body []byte) string {
 	return strings.ToLower(string(body))
 }
 
-// match 判定一条规则是否命中 (status 与 contains 是与关系); 空规则恒不命中。
-func (r ErrRule) match(status int, text string) bool {
-	if len(r.Status) == 0 && len(r.Contains) == 0 {
-		return false // 空规则: 别当成"命中一切"
-	}
-	if len(r.Status) > 0 {
-		hit := false
-		for _, s := range r.Status {
-			if s == status {
-				hit = true
-				break
-			}
-		}
-		if !hit {
-			return false
-		}
-	}
-	if len(r.Contains) == 0 {
-		return true // 只写状态码的规则: 语义明确, 但额度类不该这么配
-	}
+// matchKeyword 判定规则的关键词是否命中; 没写关键词的规则恒不命中 (它只用于状态码兜底)。
+func (r ErrRule) matchKeyword(text string) bool {
 	for _, kw := range r.Contains {
 		if kw != "" && strings.Contains(text, strings.ToLower(kw)) {
 			return true
@@ -82,20 +64,47 @@ func (r ErrRule) match(status int, text string) bool {
 	return false
 }
 
-// classify 按该上游自己的规则给报错归类; 没配规则就是通用兜底。
-// 额度类先判: 它不可重试, 必须先于并发/限流类 (docs/providers-api.md §3.2 第 1 条)。
-func (u *UpstreamCfg) classify(status int, body []byte) errClass {
-	if u.Errors != nil {
-		text := errMatchText(body)
-		for _, r := range u.Errors.Quota {
-			if r.match(status, text) {
-				return classQuota
-			}
+// matchStatus 是关键词一条都没命中时的兜底: 只认没写关键词的纯状态码规则,
+// 写了关键词的规则不再用状态码命中 (429 这类混用码不能单凭状态码判类)。
+func (r ErrRule) matchStatus(status int) bool {
+	if len(r.Contains) > 0 {
+		return false
+	}
+	for _, s := range r.Status {
+		if s == status {
+			return true
 		}
-		for _, r := range u.Errors.Concurrency {
-			if r.match(status, text) {
-				return classConcurrency
-			}
+	}
+	return false
+}
+
+// classify 按该上游自己的规则给报错归类; 没配规则就是通用兜底。
+// 先搜关键词: 各家状态码跨版本漂移, body 文案才是稳定信号; 关键词都判不出来时,
+// 才用纯状态码规则兜底。两档里额度都先于并发 (额度不可重试, 必须先判,
+// docs/providers-api.md §3.2 第 1 条)。
+func (u *UpstreamCfg) classify(status int, body []byte) errClass {
+	if u.Errors == nil {
+		return classOther
+	}
+	text := errMatchText(body)
+	for _, r := range u.Errors.Quota {
+		if r.matchKeyword(text) {
+			return classQuota
+		}
+	}
+	for _, r := range u.Errors.Concurrency {
+		if r.matchKeyword(text) {
+			return classConcurrency
+		}
+	}
+	for _, r := range u.Errors.Quota {
+		if r.matchStatus(status) {
+			return classQuota
+		}
+	}
+	for _, r := range u.Errors.Concurrency {
+		if r.matchStatus(status) {
+			return classConcurrency
 		}
 	}
 	return classOther

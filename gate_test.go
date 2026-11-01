@@ -130,8 +130,8 @@ func TestConcurrencyLockBlocksProbe(t *testing.T) {
 	}
 }
 
-// TestClassifyRules 核对规则语义: 状态码与关键词是与关系, 额度类先于并发类判定,
-// 匹配文本取自 error 对象, 没规则一律兜底。
+// TestClassifyRules 核对规则语义: 关键词优先 (与状态码无关), 关键词判不出来时才用
+// 纯状态码规则兜底, 两档里都是额度类先于并发类, 没规则一律兜底。
 func TestClassifyRules(t *testing.T) {
 	if got := (&UpstreamCfg{}).classify(429, []byte("rate limited")); got != classOther {
 		t.Fatalf("空规则表应走通用兜底, 实为 %v", got)
@@ -144,13 +144,13 @@ func TestClassifyRules(t *testing.T) {
 			{Status: []int{429}, Contains: []string{"max parallel"}},
 		},
 	}}
-	// 状态码对上但关键词没出现: 不能当额度 (429 是限流与额度共用的码)。
+	// 状态码对上但关键词没出现: 写了关键词的规则不按状态码命中 (429 是限流与额度共用的码)。
 	if got := u.classify(429, []byte(`{"error":{"message":"rate limit reached"}}`)); got != classOther {
-		t.Fatalf("只有状态码命中应走兜底, 实为 %v", got)
+		t.Fatalf("只有状态码对上应走兜底, 实为 %v", got)
 	}
-	// 状态码不在列表里但关键词命中: 也不能命中 (status 是必要条件)。
-	if got := u.classify(500, []byte(`{"error":{"message":"insufficient balance"}}`)); got != classOther {
-		t.Fatalf("状态码不在列表内不该命中, 实为 %v", got)
+	// 关键词命中就定类, 状态码不再必要 (跨版本漂移的状态码不该拦着)。
+	if got := u.classify(500, []byte(`{"error":{"message":"insufficient balance"}}`)); got != classQuota {
+		t.Fatalf("关键词命中即应判额度, 实为 %v", got)
 	}
 	if got := u.classify(402, []byte(`{"error":{"message":"Insufficient Balance"}}`)); got != classQuota {
 		t.Fatalf("状态码加关键词命中应判额度, 实为 %v", got)
@@ -174,6 +174,25 @@ func TestClassifyRules(t *testing.T) {
 	// 非 JSON body (纯文本) 退回整段 body 匹配。
 	if got := u.classify(429, []byte("insufficient balance")); got != classQuota {
 		t.Fatalf("纯文本 body 也应能命中, 实为 %v", got)
+	}
+	// 关键词一条都没命中时, 才轮到纯状态码规则兜底。
+	st := &UpstreamCfg{Errors: &ErrRules{
+		Quota:       []ErrRule{{Status: []int{402}}},
+		Concurrency: []ErrRule{{Status: []int{429}}},
+	}}
+	if got := st.classify(402, []byte(`{"error":{"message":"payment required"}}`)); got != classQuota {
+		t.Fatalf("纯状态码规则应兜底判额度, 实为 %v", got)
+	}
+	if got := st.classify(429, []byte(`{"error":{"message":"slow down"}}`)); got != classConcurrency {
+		t.Fatalf("纯状态码规则应兜底判并发, 实为 %v", got)
+	}
+	// 关键词优先于纯状态码规则: 同一笔 429, 关键词判并发就不该被状态码兜底成额度。
+	mixed := &UpstreamCfg{Errors: &ErrRules{
+		Quota:       []ErrRule{{Status: []int{429}}},
+		Concurrency: []ErrRule{{Contains: []string{"max parallel"}}},
+	}}
+	if got := mixed.classify(429, []byte(`{"error":{"message":"max parallel reached"}}`)); got != classConcurrency {
+		t.Fatalf("关键词应优先于状态码兜底, 实为 %v", got)
 	}
 }
 

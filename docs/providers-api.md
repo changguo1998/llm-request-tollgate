@@ -36,7 +36,8 @@
 3. **拼匹配文本** = `type + code + message`, 统一转小写。不要只挑一个字段 —— 有的上游关键词只在
    `type` (LiteLLM), 有的只在 `code` (方舟, 其 `type` 常为空串), 有的只在 `message` (group)。
 4. **按 `quota → concurrency → rate → other` 顺序匹配**, 首条命中即止。单条规则语义：
-   `status ∈ 列表`（缺省 = 任意状态码）**且** `contains` 任一子串命中。
+   先看 `contains`：任一子串命中即定类 (此时不看状态码)；关键词都没命中时, 只有**没写
+   `contains`** 的纯状态码规则才按 `status ∈ 列表` 兜底。
 5. **命中即定动作**：
    - `quota` → 锁该模型所属的记账组 10min + 整队迁移, 换下一个候选（该组不可重试）
    - `concurrency` → 并发上限锁 1h（只锁超发试探）, 本笔按普通错误继续走
@@ -45,12 +46,15 @@
 
 ## 1.3 状态码使用规矩
 
-1. **只做必要条件, 不做充分条件**：`status` 是每条规则的第一道闸, 但不允许出现「只看状态码就锁供应商」的规则。
+1. **关键词优先, 状态码只兜底**：先搜 `contains`, 命中即定类, 与状态码无关 (状态码跨版本漂移);
+   关键词都判不出来时, 只有**没写 `contains`** 的纯状态码规则才生效。给额度档配纯状态码规则
+   要克制：429 这类混用码单凭状态码会误锁整组。
 2. **额度类要放宽状态码**：`{400, 402, 403, 422, 429}` 按上游取子集一起收, 靠关键词区分 ——
    LiteLLM 的 `budget_exceeded` 历史用过 400 / 422 / 429, 新版权威值是 422 而 USTC 实测 429。
-3. **状态码列表必须与关键词配套**：`403` 在方舟是额度信号 (`AccountOverdueError`), 在 ustc 只是
-   模型无权限 (`key_model_access_denied`) —— 所以 ustc 的额度规则不带 403, 方舟的带。
-4. **空 body 不算命中**：`arkap` 的 `/models` 404、`group` 的部分 404 是空 body, 直接落 `other`。
+3. **写了关键词的规则, 状态码列表只作说明**：`403` 在方舟是额度信号 (`AccountOverdueError`),
+   在 ustc 只是模型无权限 (`key_model_access_denied`) —— 靠关键词区分, 不靠状态码。
+4. **空 body 不算命中**：`arkap` 的 `/models` 404、`group` 的部分 404 是空 body, 关键词判不出,
+   又没配纯状态码规则时直接落 `other`。
 
 ## 1.4 字段可信度（按上游选判定依据）
 
@@ -210,8 +214,8 @@ LiteLLM 形 / 方舟形 / CLIProxyAPI 形；第五家 `deepseek` 是官方直连
 | 500 / 401 | Server Error / Authentication Fails | 服务端 / 鉴权 | `Server Error` / `Authentication Fails` |
 | 400 / 422 | Invalid Format / Invalid Parameters | 请求错误 | `Invalid Format` / `Invalid Parameters` |
 
-- 402 / 429 的 body 原文仍未实测到, 上表关键词来自官方措辞；配进规则表时状态码是必要条件,
-  关键词不命中就退回通用退避, 不会误锁。
+- 402 / 429 的 body 原文仍未实测到, 上表关键词来自官方措辞；关键词优先, 不命中就退回通用
+  退避 (纯状态码规则只在该上游确实只能靠状态码判时才配), 不会误锁。
 - 响应头：`server: openresty`、`x-ds-trace-id`；401 / 400 上无 `Retry-After` / `x-ratelimit-*`
   （官方亦无记载, 429 未验证）。
 - 支持 `stream_options.include_usage`：开启后每个 chunk 都带 `usage` 字段（只有末块非 null）,
