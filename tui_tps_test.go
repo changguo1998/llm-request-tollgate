@@ -30,30 +30,36 @@ func TestTokRate(t *testing.T) {
 	}
 }
 
-// 第 1 页「接收中」的行在状态列写吞吐 = 已收到的输出 token / 首字节到达至今的秒数
-// (排队与等首字节的时间不算在内)。
+// 第 1 页「接收中」的行在状态列写两种吞吐, 都从首字节起算: token 吞吐 = 已收到的
+// 输出 token / 首字节到达至今的秒数, 字节吞吐 = 已转发的响应字节 / 同一段时长。
 func TestFlowCellLiveTps(t *testing.T) {
 	m := newTUIModel("cfg")
-	recv := flow{ID: 1, Logical: "m1", Stage: stageRecv, RecvTok: 6000,
+	recv := flow{ID: 1, Logical: "m1", Stage: stageRecv, RecvTok: 6000, RecvBytes: 1_024_000,
 		RecvStart: time.Now().Add(-100 * time.Second).UnixMilli(),
 		StartTime: time.Now().Add(-500 * time.Second)}
 	cells := m.flowCells(recv)
-	if got := cells[len(cells)-1]; got != "60.0 t/s" {
-		t.Errorf("接收中的状态列应写 6000 token / 100s (从首字节起算), 得到 %q", got)
+	if got := cells[len(cells)-1]; got != "60.0 t/s 10.0 KB/s" {
+		t.Errorf("接收中的状态列应写 6000 token / 100s 与 1MB / 100s, 得到 %q", got)
 	}
-	// 还没收到 token (非流式 / 刚开流) 时不显示, 与旧行为一致。
+	// 只有字节 (没有可计的输出 token) 时只显示字节吞吐。
+	onlyBytes := flow{ID: 4, Logical: "m1", Stage: stageRecv, RecvBytes: 512_000,
+		RecvStart: time.Now().Add(-100 * time.Second).UnixMilli()}
+	if got := m.flowCells(onlyBytes); got[len(got)-1] != "5.0 KB/s" {
+		t.Errorf("只有字节时应只写字节吞吐, 得到 %q", got[len(got)-1])
+	}
+	// 还没收到任何东西 (非流式 / 刚开流) 时不显示, 与旧行为一致。
 	fresh := flow{ID: 2, Logical: "m1", Stage: stageRecv, StartTime: time.Now()}
 	if got := m.flowCells(fresh); got[len(got)-1] != "" {
-		t.Errorf("没有 token 时状态列应为空, 得到 %q", got[len(got)-1])
+		t.Errorf("没有收到内容时状态列应为空, 得到 %q", got[len(got)-1])
 	}
-	send := flow{ID: 3, Logical: "m1", Stage: stageSend, RecvTok: 6000,
+	send := flow{ID: 3, Logical: "m1", Stage: stageSend, RecvTok: 6000, RecvBytes: 4096,
 		RecvStart: time.Now().Add(-100 * time.Second).UnixMilli()}
 	if got := m.flowCells(send); got[len(got)-1] != "" {
 		t.Errorf("只有接收中才显示吞吐, 得到 %q", got[len(got)-1])
 	}
 }
 
-// relayStream 边转发边回写已收到的输出 token 数与首字节时刻。
+// relayStream 边转发边回写已收到的输出 token 数、响应字节数与首字节时刻。
 func TestRelayStreamLiveProgress(t *testing.T) {
 	body := strings.NewReader(strings.Join([]string{
 		`data: {"choices":[{"delta":{"content":"hello"}}]}`,
@@ -64,14 +70,26 @@ func TestRelayStreamLiveProgress(t *testing.T) {
 		"",
 	}, "\n"))
 	var got []int
+	var gotBytes []int64
 	var first time.Time
-	ro := relayStream(httptest.NewRecorder(), body, "m1", "real-m1", time.Now(), false,
-		func(tokens int, firstAt time.Time) { got = append(got, tokens); first = firstAt })
+	rec := httptest.NewRecorder()
+	ro := relayStream(rec, body, "m1", "real-m1", time.Now(), false,
+		func(tokens int, bytes int64, firstAt time.Time) {
+			got = append(got, tokens)
+			gotBytes = append(gotBytes, bytes)
+			first = firstAt
+		})
 	if len(got) == 0 || got[len(got)-1] <= 0 {
 		t.Fatalf("live 应至少回写一次正数 token, 得到 %v", got)
 	}
+	if len(gotBytes) == 0 || gotBytes[len(gotBytes)-1] <= 0 {
+		t.Fatalf("live 应回写已转发的字节数, 得到 %v", gotBytes)
+	}
 	if first.IsZero() {
 		t.Error("live 应带上首字节时刻")
+	}
+	if ro.Bytes != int64(rec.Body.Len()) {
+		t.Errorf("字节数应与实际写出的响应体一致: %d vs %d", ro.Bytes, rec.Body.Len())
 	}
 	if ro.Usage == nil || ro.Usage.Completion <= 0 {
 		t.Errorf("流末 usage 应有用量, 得到 %+v", ro.Usage)
@@ -88,7 +106,7 @@ func TestRelayStreamCountsReasoning(t *testing.T) {
 	}, "\n"))
 	var got []int
 	ro := relayStream(httptest.NewRecorder(), body, "m1", "real-m1", time.Now(), false,
-		func(tokens int, firstAt time.Time) { got = append(got, tokens) })
+		func(tokens int, _ int64, firstAt time.Time) { got = append(got, tokens) })
 	if len(got) == 0 || got[len(got)-1] <= 0 {
 		t.Fatalf("思考增量应计入输出 token, 得到 %v", got)
 	}

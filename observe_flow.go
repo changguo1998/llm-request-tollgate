@@ -81,13 +81,13 @@ func (a *App) flowStage(id uint64, up, mod string, stage int, gate string, attem
 	a.flowMu.Unlock()
 }
 
-// flowLive 刷新「接收中」这一笔已收到的输出 token 数与首字节时刻 (只写展示字段,
-// 不碰阶段耗时)。由 relayStream 节流回写 (约 200ms 一次); 第 1 页用这两个值
-// 算这笔自己的吞吐 (从首字节起算)。
-func (a *App) flowLive(id uint64, tokens int, firstAt time.Time) {
+// flowLive 刷新「接收中」这一笔已收到的输出 token 数与字节数, 以及首字节时刻 (只写
+// 展示字段, 不碰阶段耗时)。由 relayStream 节流回写 (约 200ms 一次); 第 1 页用这三个
+// 值算这笔自己的 token 吞吐与字节吞吐 (都从首字节起算)。
+func (a *App) flowLive(id uint64, tokens int, bytes int64, firstAt time.Time) {
 	a.flowMu.Lock()
 	if f := a.flows[id]; f != nil {
-		f.RecvTok, f.RecvStart = tokens, firstAt.UnixMilli()
+		f.RecvTok, f.RecvBytes, f.RecvStart = tokens, bytes, firstAt.UnixMilli()
 	}
 	a.flowMu.Unlock()
 }

@@ -16,18 +16,20 @@ type relayOut struct {
 	Missing  bool
 	TtfbMs   int64
 	DecodeMs int64
+	Bytes    int64 // 转发给客户端的响应体字节数 (SSE 行 + 补发的 error 事件)
 }
 
-// relayStream 按行透传 SSE, 期间提取流末 usage。
+// relayStream 按行透传 SSE, 期间提取流末 usage 并统计已转发的响应字节数。
 // 流未以 [DONE] 正常结束时, 发一个 SSE error 事件后关流, 不伪造正常结束。
-// live 每约 200ms 回写一次已收到的输出 token 数与首字节时刻, 可为 nil。
+// live 每约 200ms 回写一次已收到的输出 token 数、响应字节数与首字节时刻, 可为 nil。
 // 返回提取到的 usage 与是否缺失。
-func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel string, start time.Time, isResponses bool, live func(tokens int, firstAt time.Time)) relayOut {
+func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel string, start time.Time, isResponses bool, live func(tokens int, bytes int64, firstAt time.Time)) relayOut {
 	flusher, _ := w.(http.Flusher)
 	sc := bufio.NewScanner(body)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	var usage *Usage
 	est := 0
+	var bytesOut int64
 	done := false
 	var firstAt, lastAt time.Time // 首字节 / 末字节时刻 (被动时延采样)
 	var lastLive time.Time        // 上次回写实时吞吐的时刻 (节流用)
@@ -36,6 +38,7 @@ func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel strin
 		if _, err := io.WriteString(w, s); err != nil {
 			return
 		}
+		bytesOut += int64(len(s))
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -110,7 +113,7 @@ func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel strin
 		// 实时吞吐: 最多 200ms 回写一次, 不每行都去抢 flowMu。
 		if live != nil && !firstAt.IsZero() && now.Sub(lastLive) >= 200*time.Millisecond {
 			lastLive = now
-			live(est, firstAt)
+			live(est, bytesOut, firstAt)
 		}
 	}
 	if !done {
@@ -122,7 +125,7 @@ func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel strin
 	if missing {
 		usage = &Usage{Completion: est, Total: est}
 	}
-	out := relayOut{Usage: usage, Missing: missing}
+	out := relayOut{Usage: usage, Missing: missing, Bytes: bytesOut}
 	if !firstAt.IsZero() {
 		out.TtfbMs = msCeil(firstAt.Sub(start))
 		if !lastAt.IsZero() {

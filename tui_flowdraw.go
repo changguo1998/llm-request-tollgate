@@ -17,10 +17,19 @@ func (m *tuiModel) flowCells(f flow) []string {
 		tag = "是"
 	}
 	status := stageName(f)
-	if f.Stage == stageRecv && f.RecvTok > 0 && f.RecvStart > 0 {
-		// 接收中: 状态列写这笔的吞吐 = 已收到的输出 token / 首字节到达至今的秒数。
+	if f.Stage == stageRecv && f.RecvStart > 0 && (f.RecvTok > 0 || f.RecvBytes > 0) {
+		// 接收中: 状态列写这笔的两种吞吐, 都从首字节起算 ——
+		// token 吞吐 = 已收到的输出 token / 首字节到达至今的秒数,
+		// 字节吞吐 = 已转发的响应字节 / 同一段时长。
 		if el := time.Since(time.UnixMilli(f.RecvStart)).Seconds(); el > 0 {
-			status = ftoa(float64(f.RecvTok)/el, 1) + " t/s"
+			var parts []string
+			if f.RecvTok > 0 {
+				parts = append(parts, ftoa(float64(f.RecvTok)/el, 1)+" t/s")
+			}
+			if f.RecvBytes > 0 {
+				parts = append(parts, humanRate(float64(f.RecvBytes)/el))
+			}
+			status = strings.Join(parts, " ")
 		}
 	}
 	return []string{

@@ -191,8 +191,9 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
   `max_seq`, `slow_ms`.
 - `active` 每笔: `id` / `logical` / `source` / `path` / `stream` / `start` / `upstream` /
   `backend` / `stage` / `attempt` / `gate`; 接收中的流式请求另带 `recv_tok` (已收到的
-  输出 token 估计数) 与 `recv_start` (首字节到达时刻, Unix 毫秒), 后者用来算这笔的
-  实时吞吐 (从首字节起算); 耗时列另带 `segs` (各阶段已结算的累计耗时, 秒, 下标 =
+  输出 token 估计数)、`recv_bytes` (已转发的响应字节数) 与 `recv_start` (首字节到达时刻,
+  Unix 毫秒), 后两个用来算这笔的实时吞吐 (token 与字节两种, 都从首字节起算); 耗时列另带
+  `segs` (各阶段已结算的累计耗时, 秒, 下标 =
   `stage`)、`cur_at` (当前阶段进入时刻, Unix 毫秒, TUI 用它现算正在走的那一段) 与
   `max_stage` (到过的最远阶段, TUI 据此决定写几段).
 - 事件 `kind`: `start` / `lock` / `unlock` / `fallback` / `gate` / `error` / `slow` /
@@ -237,6 +238,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 | `gate` | 被闸门挡下未发出时的原因 (见 5.2) |
 | `lock_skips` / `backoff_skips` | 候选被锁 / 在退避而被跳过的次数 |
 | `ttfb_ms` / `tps` | 首字节时延 / 解码吞吐 (流式才有 tps) |
+| `bytes` / `bps` | 转发给客户端的响应体字节数 / 接收的字节吞吐 bytes/s (流式才有 bps) |
 | `duration_ms` | 请求耗时 (收到请求到写完响应), 供不把空闲计入分母的吞吐 |
 
 明细事实来源是日志 (观测面重启即清空, 设计 D12); `-summary` 与 `-usage` 两个离线子命

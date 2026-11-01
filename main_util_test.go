@@ -138,18 +138,18 @@ func TestFlowLive(t *testing.T) {
 	id := a.flowStart("m1", "agent", "/v1/chat/completions", true)
 	a.flowStage(id, "up1", "real-m1", stageRecv, "", 1)
 	first := time.Now().Add(-2 * time.Second)
-	a.flowLive(id, 42, first)
+	a.flowLive(id, 42, 2048, first)
 
 	f := a.flowActives()[0]
-	if f.RecvTok != 42 || f.RecvStart != first.UnixMilli() {
+	if f.RecvTok != 42 || f.RecvBytes != 2048 || f.RecvStart != first.UnixMilli() {
 		t.Errorf("展示字段没写进去: %+v", f)
 	}
 	if f.Stage != stageRecv {
 		t.Errorf("flowLive 不该改阶段, 得到 %d", f.Stage)
 	}
-	a.flowLive(9999, 1, time.Now()) // 未知编号: 什么都不做
+	a.flowLive(9999, 1, 1, time.Now()) // 未知编号: 什么都不做
 	a.flowEnd(id)
-	a.flowLive(id, 7, time.Now()) // 已结束: 同样忽略
+	a.flowLive(id, 7, 7, time.Now()) // 已结束: 同样忽略
 	if got := len(a.flowActives()); got != 0 {
 		t.Errorf("结束后不该再有进行中的请求, 得到 %d", got)
 	}

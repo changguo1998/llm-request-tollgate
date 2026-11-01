@@ -183,4 +183,15 @@ func humanTokens(n int) string {
 
 func ftoa(f float64, prec int) string { return strconv.FormatFloat(f, 'f', prec, 64) }
 
+// humanRate 把字节速率写成带单位的字符串 (1024 进制): 1.2 KB/s / 3.4 MB/s。
+func humanRate(bps float64) string {
+	switch {
+	case bps >= 1<<20:
+		return ftoa(bps/(1<<20), 1) + " MB/s"
+	case bps >= 1<<10:
+		return ftoa(bps/(1<<10), 1) + " KB/s"
+	}
+	return itoa64(int64(bps)) + " B/s"
+}
+
 func itoa64(v int64) string { return strconv.FormatInt(v, 10) }

@@ -28,13 +28,15 @@ func (s *serveState) forward() {
 	var usage *Usage
 	missing := true
 	status := resp.StatusCode
-	var ttfbMs, decodeMs int64
+	var ttfbMs, decodeMs, bytesOut int64
 	if s.stream {
 		s.w.WriteHeader(status)
 		dst.Del("Content-Length")
 		ro := relayStream(s.w, resp.Body, s.logical, realModel, s.sentAt, s.isResponses,
-			func(tokens int, firstAt time.Time) { a.flowLive(s.flowID, tokens, firstAt) })
-		usage, missing, ttfbMs, decodeMs = ro.Usage, ro.Missing, ro.TtfbMs, ro.DecodeMs
+			func(tokens int, bytes int64, firstAt time.Time) {
+				a.flowLive(s.flowID, tokens, bytes, firstAt)
+			})
+		usage, missing, ttfbMs, decodeMs, bytesOut = ro.Usage, ro.Missing, ro.TtfbMs, ro.DecodeMs, ro.Bytes
 	} else {
 		buf, rerr := io.ReadAll(resp.Body)
 		// 非流式: 首字节与整体等待几乎同时 (上游把响应写全才回头), tps 无从分解。
@@ -57,20 +59,28 @@ func (s *serveState) forward() {
 			est := estimateUsageFromBody(buf)
 			usage = &Usage{Completion: est, Total: est}
 		}
+		bytesOut = int64(len(buf))
 		dst.Set("Content-Length", strconv.Itoa(len(buf)))
 		s.w.WriteHeader(status)
 		s.w.Write(buf)
 	}
 
 	// 被动时延采样: 真实流量本身就是主候选的观测, 不额外发探测请求。
-	// 只有流式能拆出解码段, 所以 tps 仅流式有值。
-	tps := 0.0
+	// 只有流式能拆出解码段, 所以 tps / bps 仅流式有值。
+	tps, bps := 0.0, 0.0
 	completion := 0
 	if usage != nil {
 		completion = usage.Completion
 	}
-	if s.stream && decodeMs > 0 && completion > 0 {
-		tps = float64(completion) / (float64(decodeMs) / 1000)
+	if s.stream && decodeMs > 0 {
+		if completion > 0 {
+			tps = float64(completion) / (float64(decodeMs) / 1000)
+		}
+		if bytesOut > 0 {
+			bps = float64(bytesOut) / (float64(decodeMs) / 1000)
+		}
+	}
+	if s.stream && tps > 0 {
 		// 低流量锁的样本: 只有能拆出解码段的流式成功请求才进。
 		a.noteDecodeTps(s.servedUp.ID, realModel, completion, decodeMs)
 	}
@@ -90,6 +100,7 @@ func (s *serveState) forward() {
 	rec.Upstream, rec.Model = s.servedUp.ID, realModel
 	rec.Status, rec.Usage, rec.Missing = status, usage, missing
 	rec.TtfbMs, rec.Tps = ttfbMs, tps
+	rec.Bytes, rec.Bps = bytesOut, bps
 	rec.DurationMs = msCeil(time.Since(s.reqStart))
 	a.logReq(rec)
 }

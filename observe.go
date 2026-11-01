@@ -44,6 +44,7 @@ type flow struct {
 	Attempt   int       `json:"attempt,omitempty"`    // 已试过的候选数 (含当前)
 	Gate      string    `json:"gate,omitempty"`       // 在等什么 (屏幕上那句话): 已发出 / 等节拍 … / 退避 … / 额度锁 …
 	RecvTok   int       `json:"recv_tok,omitempty"`   // 接收中: 已收到的输出 token 数 (流式估算)
+	RecvBytes int64     `json:"recv_bytes,omitempty"` // 接收中: 已转发的响应字节数 (流式)
 	RecvStart int64     `json:"recv_start,omitempty"` // 接收中: 首字节到达时刻 (Unix 毫秒)
 	// 耗时列的分段数据: Segs 是各阶段已结算的累计耗时 (秒, 下标 = stage*), 当前阶段
 	// 还没结算 (只记在 stageAt 里), TUI 用 CurAt 现算这一段; MaxStage 是到过的最远
