@@ -30,22 +30,23 @@ func TestTokRate(t *testing.T) {
 	}
 }
 
-// 第 1 页「接收中」的行在状态列写两种吞吐, 都从首字节起算: token 吞吐 = 已收到的
-// 输出 token / 首字节到达至今的秒数, 字节吞吐 = 已转发的响应字节 / 同一段时长。
+// 第 1 页「接收中」的行在状态列按模型/路由表的同三个速度写实时吞吐, 不加前缀:
+// 解码 = 已收到的输出 token / 首字节到达至今, 总 = 同一份输出 token / 请求总耗时,
+// 下载 = 已转发的响应字节 / 首字节到达至今。
 func TestFlowCellLiveTps(t *testing.T) {
 	m := newTUIModel("cfg")
 	recv := flow{ID: 1, Logical: "m1", Stage: stageRecv, RecvTok: 6000, RecvBytes: 1_024_000,
 		RecvStart: time.Now().Add(-100 * time.Second).UnixMilli(),
 		StartTime: time.Now().Add(-500 * time.Second)}
 	cells := m.flowCells(recv)
-	if got := cells[len(cells)-1]; got != "60.0 t/s 10.0 KB/s" {
-		t.Errorf("接收中的状态列应写 6000 token / 100s 与 1MB / 100s, 得到 %q", got)
+	if got := cells[len(cells)-1]; got != "60.0 t/s 12.0 t/s 10.0 KB/s" {
+		t.Errorf("接收中的状态列应写 6000/100s, 6000/500s 与 1MB/100s, 得到 %q", got)
 	}
-	// 只有字节 (没有可计的输出 token) 时只显示字节吞吐。
+	// 只有字节 (没有可计的输出 token) 时只显示下载吞吐。
 	onlyBytes := flow{ID: 4, Logical: "m1", Stage: stageRecv, RecvBytes: 512_000,
 		RecvStart: time.Now().Add(-100 * time.Second).UnixMilli()}
 	if got := m.flowCells(onlyBytes); got[len(got)-1] != "5.0 KB/s" {
-		t.Errorf("只有字节时应只写字节吞吐, 得到 %q", got[len(got)-1])
+		t.Errorf("只有字节时应只写下载吞吐, 得到 %q", got[len(got)-1])
 	}
 	// 还没收到任何东西 (非流式 / 刚开流) 时不显示, 与旧行为一致。
 	fresh := flow{ID: 2, Logical: "m1", Stage: stageRecv, StartTime: time.Now()}

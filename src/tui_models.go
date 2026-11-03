@@ -139,7 +139,8 @@ func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 		// 队列的锁都画在队列表里: 退避 = 黄 (等待), 熔断锁 = 红 (锁)。
 		paused := colorDur(r.PausedMs, tuiYell)
 		lock := colorDur(r.LockMs, tuiRed)
-		errs := colorCount(r.Errs)
+		// 连续错误与累计错误合成一格 (连错/错误): 0 绿, 大于 0 红。
+		errs := colorCount(r.Fails) + "/" + colorCount(r.Errs)
 		ttfb := "-"
 		if r.TtfbN > 0 {
 			ttfb = durStr(time.Duration(r.TtfbSum/int64(r.TtfbN)) * time.Millisecond)
@@ -161,9 +162,10 @@ func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 		// 与 modelCols 的顺序一一对应 (dropEmptyCols 按下标裁列)。
 		mrows = append(mrows, []string{
 			m.upModel(r.up, r.model),
-			strconv.Itoa(r.Queue), paused, lock, colorCount(r.Fails),
-			strconv.Itoa(r.Reqs), errs, strconv.Itoa(r.Fallbacks),
-			humanTokens(r.Total), humanTokens(r.Cached), ttfb,
+			strconv.Itoa(r.Queue), paused, lock, errs,
+			strconv.Itoa(r.Reqs), strconv.Itoa(r.Fallbacks),
+			// 缓存命中与总 token 合成一格 (cached/total)。
+			humanTokens(r.Cached) + "/" + humanTokens(r.Total), ttfb,
 			tps(r.DecodeRate), tps(r.TotalRate), bsp(r.ByteRate),
 			mages(r.Last),
 		})
@@ -173,8 +175,8 @@ func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 }
 
 // modelCols 是第 1 页模型/路由聚合表的列: 按类别从左到右排, 同类相邻 ——
-// 调度状态 (排队 / 退避 / 熔断锁 / 连续错误), 历史计数 (请求 / 错误 / 换候选),
-// 流量 (总 token / 缓存命中 / 首字节 / 三种速度: 解码=completion/decode,
+// 调度状态 (排队 / 退避 / 熔断锁), 错误 (连错/错误, 一格两数), 历史计数
+// (请求 / 换候选), 流量 (Token = cached/total / 首字节 / 三种速度: 解码=completion/decode,
 // 总=(prompt+completion)/duration, 字节=bytes/duration), 时间 (最近一次)。
 // 三种速度各自一列, 都写 平均/峰值。
 // 全部按内容成长 (grow=true), 基准宽只贴标题/内容的典型宽度, 不留大补白 ——
@@ -183,10 +185,9 @@ func modelCols() []tuiCol {
 	return []tuiCol{
 		{"上游/模型", 20, true, false, 4},
 		{"排队", 2, true, true, 0}, {"退避", 4, true, true, 4},
-		{"熔断", 5, true, true, 4}, {"连错", 2, true, true, 2},
-		{"请求", 4, true, true, 0}, {"错误", 2, true, true, 0}, {"换候选", 4, true, true, 1},
-		{"token", 6, true, true, 3}, {"缓存", 5, true, true, 1},
-		{"首字节", 6, true, true, 3},
+		{"熔断", 5, true, true, 4}, {"错误", 5, true, true, 2},
+		{"请求", 4, true, true, 0}, {"换候选", 4, true, true, 1},
+		{"Token", 9, true, true, 3}, {"首字节", 6, true, true, 3},
 		{"解码速率", 11, true, true, 1}, {"总速率", 11, true, true, 0}, {"下载速率", 16, true, true, 1},
 		{"最近", 6, true, true, 2},
 	}
@@ -209,7 +210,7 @@ type modelRow struct {
 }
 
 // blank 判断这一行是否全无数据: 队列 / 退避 / 熔断 / 连错 / 请求 / 错误 / 换候选 /
-// token / 缓存 / 首字节 / 吞吐都是 0 或 -, 且没有最近请求时间。
+// Token / 首字节 / 吞吐都是 0 或 -, 且没有最近请求时间。
 func (r *modelRow) blank() bool {
 	return r.Queue == 0 && r.Fails == 0 && r.PausedMs == 0 && r.LockMs == 0 &&
 		r.Reqs == 0 && r.Errs == 0 && r.Fallbacks == 0 &&

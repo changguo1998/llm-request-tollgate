@@ -413,7 +413,7 @@ func TestFlowTablesAndEventsScroll(t *testing.T) {
 	}
 	// 第 1 页正文下半段并入了上游表与 模型/路由聚合表: 不画表标题, 列名行保留。
 	out = m.draw()
-	for _, head := range []string{"记账", "连错"} {
+	for _, head := range []string{"记账", "错误"} {
 		if !strings.Contains(stripANSI(out), head) {
 			t.Errorf("active 页缺少并入表的列名 %q", head)
 		}
@@ -672,7 +672,7 @@ func TestFlowModelTables(t *testing.T) {
 		},
 	}}
 	out := stripANSI(m.draw())
-	for _, s := range []string{"记账", "g2", "4/12s", "01:00", "上游/模型", "连错",
+	for _, s := range []string{"记账", "g2", "4/12s", "01:00", "上游/模型", "Token",
 		"ustc/deepseek-flash", "ustc/glm-5.3", "ustc/kimi-k3"} {
 		if !strings.Contains(out, s) {
 			t.Errorf("active 页缺少 %q", s)
@@ -706,9 +706,9 @@ func TestModelsColumnGroups(t *testing.T) {
 	}
 	want := []string{
 		"上游/模型",
-		"排队", "退避", "熔断", "连错",
-		"请求", "错误", "换候选",
-		"token", "缓存", "首字节", "解码速率", "总速率", "下载速率",
+		"排队", "退避", "熔断", "错误",
+		"请求", "换候选",
+		"Token", "首字节", "解码速率", "总速率", "下载速率",
 		"最近",
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {

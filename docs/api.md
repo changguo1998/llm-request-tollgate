@@ -197,7 +197,8 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 - `active` 每笔: `id` / `logical` / `source` / `path` / `stream` / `start` / `upstream` /
   `backend` / `stage` / `attempt` / `gate`; 接收中的流式请求另带 `recv_tok` (已收到的
   输出 token 估计数)、`recv_bytes` (已转发的响应字节数) 与 `recv_start` (首字节到达时刻,
-  Unix 毫秒), 后两个用来算这笔的实时吞吐 (token 与字节两种, 都从首字节起算); 耗时列另带
+  Unix 毫秒), 后三个用来算这笔的实时吞吐 (解码 / 总 / 下载三种, 不加前缀: 解码与下载从
+  首字节起算, 总用请求开始时刻 `start`); 耗时列另带
   `segs` (各阶段已结算的累计耗时, 秒, 下标 =
   `stage`)、`cur_at` (当前阶段进入时刻, Unix 毫秒, TUI 用它现算正在走的那一段) 与
   `max_stage` (到过的最远阶段, TUI 据此决定写几段).
