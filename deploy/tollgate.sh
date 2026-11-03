@@ -8,6 +8,7 @@
 #   stop       停止
 #   start      启动
 #   hup        热加载配置, 不用重启 (改 config.local.json 别名/上游后)
+#   unlock     调试用: 清掉运行中代理内存里的所有锁与失败计数 (POST /v1/unlock)
 #   uninstall  停止并删除服务
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -57,6 +58,10 @@ case "${1:-}" in
     systemctl --user kill -s HUP "$SVC"
     echo "SIGHUP sent: config hot-reload (别名/上游)"
     ;;
+  unlock)
+    # 调试用强制解锁: 清掉运行中代理内存里的所有锁与失败计数 (并落盘)。
+    curl -s -X POST "${TOLLGATE_URL:-http://127.0.0.1:8787}/v1/unlock"; echo
+    ;;
   uninstall)
     systemctl --user disable --now "$SVC"
     rm -f "$U"
@@ -64,7 +69,7 @@ case "${1:-}" in
     echo "uninstalled: $SVC"
     ;;
   *)
-    echo "用法: $0 <install|status|logs|restart|stop|start|hup|uninstall>"
+    echo "用法: $0 <install|status|logs|restart|stop|start|hup|unlock|uninstall>"
     exit 2
     ;;
 esac

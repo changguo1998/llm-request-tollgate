@@ -260,7 +260,8 @@ token) 与 `-usage` (上游 + 模型 × 窗口的 token 分解)。
 ## 当前边界
 
 - 转发覆盖 `POST /v1/chat/completions` 与 `POST /v1/responses` (O5); `GET /v1/models`
-  返回逻辑名清单 (O5)。只读观测面: `GET /v1/state`。其余路径一律 404。
+  返回逻辑名清单 (O5)。只读观测面: `GET /v1/state`。调试用 `POST /v1/unlock` 强制解锁
+  (清掉运行中代理内存里的锁与失败计数, 可用 `?upstream=&model=&group=` 过滤)。其余路径一律 404。
 - 被闸门挡下的 429 在日志里带 `gate` (`locked` 候选在锁里 / `sem_timeout` 等不到并发
   槽位 / `queue_timeout` 排队超时 / `canceled` 客户端断开) 与等待时长 (`sem_ms` 等信号量、
   `queue_ms` 排队, 都是各候选之和), 便于区分「并发不够」「排队超时」和「被锁」。

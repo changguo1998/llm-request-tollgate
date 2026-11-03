@@ -13,6 +13,7 @@
 | `/v1/responses` | POST | 转发 Responses API, 同一链路 | 客户端, 即各 agent |
 | `/v1/models` | GET | 逻辑模型名清单 (不暴露真实上游 id) | 客户端与运维 |
 | `/v1/state` | GET | 只读观测面: 进行中的请求 + 候选调度状态 + 事件 | 运维 (TUI) |
+| `/v1/unlock` | POST | 调试用强制解锁: 清掉内存里的锁与失败计数 (query 可过滤 `upstream` / `model` / `group`) | 运维 (调试) |
 
 其余路径一律 404 `not_found`. base URL 是配置里的 `listen` (缺省
 `127.0.0.1:8787`), 客户端 base URL 指到 `http://127.0.0.1:8787/v1`.

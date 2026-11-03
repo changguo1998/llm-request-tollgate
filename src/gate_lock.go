@@ -288,3 +288,50 @@ func (c *cand) denyRecovery() {
 		g.lock.recover, g.lock.probing = false, false
 	}
 }
+
+// clearLocks 强制解锁 (调试用): 清掉该候选的锁与失败计数。
+//   - model 非空: 只清该模型的锁 (group 非空时连带清该额度组锁);
+//   - model 为空: 清全部组锁 + 全部模型锁 + 并发试探锁。
+//
+// 同时清掉恢复探测标记与连续错误计数 (避免刚解开又立刻被旧计数再熔断)。返回清掉的锁数。
+func (c *cand) clearLocks(model, group string) int {
+	c.mu.Lock()
+	n := 0
+	if model != "" {
+		if g := c.peekGate(model); g != nil {
+			if g.lock.reason != "" {
+				n++
+			}
+			g.lock = lockState{}
+			g.fails = 0
+			g.pausedUntil = time.Time{}
+		}
+		if group != "" {
+			if l, ok := c.groupLocks[group]; ok {
+				if l.reason != "" {
+					n++
+				}
+				delete(c.groupLocks, group)
+			}
+		}
+	} else {
+		n += len(c.groupLocks)
+		c.groupLocks = map[string]lockState{}
+		for _, g := range c.modelGates {
+			if g.lock.reason != "" {
+				n++
+			}
+			g.lock = lockState{}
+			g.fails = 0
+			g.pausedUntil = time.Time{}
+		}
+		if c.concLock.reason != "" {
+			n++
+		}
+		c.concLock = lockState{}
+	}
+	c.probing = false
+	c.mu.Unlock()
+	c.signal()
+	return n
+}

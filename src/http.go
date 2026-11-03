@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -118,4 +119,41 @@ func (a *App) serveModels(w http.ResponseWriter) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
+}
+
+// forceUnlock 强制解锁 (调试用): 清掉全部候选 (或指定 upstream) 的锁与连续错误计数, 落盘。
+// model / group 非空时按它们过滤。返回清掉的锁数。
+func (a *App) forceUnlock(upID, model, group string) int {
+	a.mu.RLock()
+	cands := make([]*cand, 0, len(a.cands))
+	if upID != "" {
+		if c, ok := a.cands[upID]; ok {
+			cands = append(cands, c)
+		}
+	} else {
+		for _, c := range a.cands {
+			cands = append(cands, c)
+		}
+	}
+	a.mu.RUnlock()
+	total := 0
+	for _, c := range cands {
+		total += c.clearLocks(model, group)
+	}
+	a.saveGateState()
+	a.evAdd("unlock", "", upID, model, "强制解锁, 清除 "+strconv.Itoa(total)+" 把锁")
+	return total
+}
+
+// serveUnlock 处理 POST /v1/unlock (调试用强制解锁)。可用 query 过滤:
+// upstream / model / group; 都不给 = 清掉所有候选的所有锁与退避。
+func (a *App) serveUnlock(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "only POST /v1/unlock")
+		return
+	}
+	q := r.URL.Query()
+	total := a.forceUnlock(q.Get("upstream"), q.Get("model"), q.Get("group"))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"cleared": total})
 }

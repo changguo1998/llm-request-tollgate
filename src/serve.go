@@ -31,6 +31,8 @@ func (a *App) serveSide(w http.ResponseWriter, r *http.Request) bool {
 	switch r.URL.Path {
 	case "/v1/state":
 		a.serveState(w, r)
+	case "/v1/unlock":
+		a.serveUnlock(w, r)
 	case "/v1/models":
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed",
