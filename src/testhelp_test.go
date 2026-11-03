@@ -23,6 +23,11 @@ func newTestAppCfg(t *testing.T, cfg *Config) *App {
 		// 超时不能留零值: 连接包装器会把每次读的死线设成 "现在", 读立刻超时。
 		cfg.setTimeouts(Timeouts{ConnectMs: 5000, ResponseHeaderMs: 5000, StreamIdleMs: 5000})
 	}
+	if cfg.ProbeEnabled == nil {
+		// 测试默认关掉锁恢复探测: 否则到期锁会去假上游发探测, 干扰既有用例的锁断言。
+		off := false
+		cfg.ProbeEnabled = &off
+	}
 	app, err := newApp(cfg)
 	if err != nil {
 		t.Fatal(err)

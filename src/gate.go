@@ -57,9 +57,10 @@ type cand struct {
 	modelGates map[string]*modelGate
 	seen       map[string]bool // 进过队列的真实模型 (TUI 模型视角只列有过请求的)
 	// 额度组锁: 键是组名 (默认组为空串)。额度是组级事实, 命中只锁该组。
-	groupLocks map[string]lockState
-	concLock   lockState // 并发上限锁: 只锁超发试探
-	wake       chan struct{}
+	groupLocks   map[string]lockState
+	concLock     lockState // 并发上限锁: 只锁超发试探
+	recoverProbe bool      // 是否开启锁恢复探测 (锁到期进入恢复态, 探测通过才解锁)
+	wake         chan struct{}
 }
 
 // modelGate 是一个 upstream/model 的失败状态与性能采样。

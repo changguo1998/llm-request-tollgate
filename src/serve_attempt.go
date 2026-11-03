@@ -25,6 +25,9 @@ func (s *serveState) attemptLoop() {
 		}
 		if locked, left, reason := at.cd.locked(at.mod, at.group); locked {
 			// 锁内不真发 (该模型的熔断锁 / 它所属组的额度锁), 直接换下一个候选。
+			// 若这是恢复态 (锁已到期待探测通过): 后台顺手发起一笔恢复探测, 请求本身
+			// 仍照锁定规则进下一个候选, 不等待结果。
+			s.app.kickRecovery(at.cd, at.mod, at.group)
 			s.noteFailure(fmt.Errorf("upstream %s locked for %s (%s)",
 				at.up.ID, left.Round(time.Second), reason), at.up.ID, at.mod)
 			s.noteLeft(left)
@@ -76,6 +79,7 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 			s.lastUpID, s.lastMod = at.up.ID, at.mod
 			s.failed++
 			if why == "locked" {
+				a.kickRecovery(at.cd, at.mod, at.group)
 				s.lockedSkips++
 				if _, left, _ := at.cd.locked(at.mod, at.group); left > s.gateLeft {
 					s.gateLeft = left

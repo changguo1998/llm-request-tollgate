@@ -470,6 +470,74 @@ func TestSettingsGateSave(t *testing.T) {
 	}
 }
 
+// 编辑 probe_enabled (settings 第 3 页的开关行) 应写回配置并可热重载。
+func TestSettingsProbeEditAndSave(t *testing.T) {
+	_, cfg := prioFixture(t)
+	m := newTUIModel(cfg)
+	m.prio = newTuiEditor(cfg)
+	m.tab = tabSettings
+	pending := []byte{}
+	send := func(b byte) {
+		if quit := m.handleKey(b, &pending); quit {
+			t.Fatal("不该退出")
+		}
+	}
+	send('g')
+	if m.prio.focus != 2 {
+		t.Fatalf("g 应切到调度参数, 得到 %d", m.prio.focus)
+	}
+	m.prio.gateSel = 13
+	if !m.prio.probeOn {
+		t.Fatal("夹具未写 probe_enabled, 缺省应为开")
+	}
+	send('-')
+	if m.prio.probeOn {
+		t.Fatal("'-' 应把 probe_enabled 切成关")
+	}
+	if !m.prio.gateDirty {
+		t.Fatal("改动该标记未保存")
+	}
+	called := false
+	m.reloadFn = func() error { called = true; return nil }
+	send('s')
+	if !called {
+		t.Errorf("保存后应触发热加载")
+	}
+	raw, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Config
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("写回非合法 JSON: %v", err)
+	}
+	if got.probeEnabled() {
+		t.Fatal("开关改成关后, 配置 probe_enabled 应为 false")
+	}
+	// 用 = 显式改回开, 再保存。
+	e := newTuiEditor(cfg) // 重读, probeOn 应为关
+	if e.probeOn {
+		t.Fatal("重读配置 probe_enabled 应为关")
+	}
+	e.probeOn = false
+	e.gateDirty = true
+	e.setGatePrompt(13, "on")
+	if !e.probeOn {
+		t.Fatal("= on 应打开开关")
+	}
+	if err := e.saveGate(); err != nil {
+		t.Fatalf("保存 gate: %v", err)
+	}
+	raw2, _ := os.ReadFile(cfg)
+	var got2 Config
+	if err := json.Unmarshal(raw2, &got2); err != nil {
+		t.Fatal(err)
+	}
+	if !got2.probeEnabled() {
+		t.Fatal("= on 保存后配置 probe_enabled 应为 true")
+	}
+}
+
 // 退避序列只能按逗号输入, 非法输入不落盘。
 func TestSettingsBackoffInput(t *testing.T) {
 	_, cfg := prioFixture(t)

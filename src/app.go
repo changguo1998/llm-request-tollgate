@@ -120,6 +120,12 @@ func (a *App) applyConfig(c *Config) {
 		if _, ok := a.cands[u.ID]; !ok {
 			a.cands[u.ID] = newCand(u.ID)
 		}
+		// 锁恢复探测开关热加载生效; 关闭时顺手清掉残留的恢复态, 让到期锁回到普通时间锁。
+		cd := a.cands[u.ID]
+		cd.recoverProbe = c.probeEnabled()
+		if !cd.recoverProbe {
+			cd.denyRecovery()
+		}
 	}
 	a.upstreams = upstreams
 	a.groups = groups

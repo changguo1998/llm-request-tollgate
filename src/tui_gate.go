@@ -13,12 +13,13 @@ import (
 )
 
 // gateLabels 是设置页里 gate 参数的顺序与名字, 与 GateCfg 的字段一一对应;
-// 最后一项是退避序列, 只能用 = 按逗号输入。
+// 最后一项是退避序列, 只能用 = 按逗号输入。probe_enabled 是扁平顶层开关 (0/1 = 关/开)。
 var gateLabels = []string{
 	"interval_ms", "sem_wait_ms", "queue_wait_ms",
 	"concurrency_lock_ms", "quota_lock_ms", "breaker_lock_ms",
 	"lowperf_window_ms", "lowperf_peak_max", "lowperf_avg_max", "lowperf_ttfb_max_ms", "lowperf_lock_ms",
 	"rate_window_ms", "block_window_ms",
+	"probe_enabled",
 	"retry_backoff_ms",
 }
 
@@ -39,6 +40,8 @@ func gateStep(i int) int {
 		return 600000 // rate_window_ms: 每次 10 分钟
 	case 12:
 		return 5000 // block_window_ms: 每次 5 秒
+	case 13:
+		return 1 // probe_enabled: 每次翻转 0/1
 	}
 	return 0
 }
@@ -74,6 +77,11 @@ func (e *tuiEditor) gateField(i int) int {
 		return e.rateWinMs
 	case 12:
 		return e.blockWinMs
+	case 13:
+		if e.probeOn {
+			return 1
+		}
+		return 0
 	}
 	return 0
 }
@@ -90,6 +98,12 @@ func (e *tuiEditor) gateText(i int) string {
 	}
 	if i == 7 || i == 8 {
 		return strconv.Itoa(e.gateField(i)) + " t/s"
+	}
+	if i == 13 {
+		if e.probeOn {
+			return "开"
+		}
+		return "关"
 	}
 	return strconv.Itoa(e.gateField(i)) + " ms"
 }
@@ -118,6 +132,7 @@ func (e *tuiEditor) loadGate() {
 	} else {
 		e.blockWinMs = 35000
 	}
+	e.probeOn = c.probeEnabled() // 未写缺省开; 显式 false 为关
 	e.gateErr = ""
 }
 
@@ -170,6 +185,9 @@ func (e *tuiEditor) adjustGate(delta int) {
 	case 12:
 		v = clampInt(v, 1000, 86400000)
 		e.blockWinMs = v
+	case 13:
+		v = clampInt(v, 0, 1)
+		e.probeOn = v == 1
 	}
 	e.gateDirty = true
 	e.message = gateLabels[i] + " = " + strconv.Itoa(v)
@@ -199,6 +217,24 @@ func (e *tuiEditor) setGatePrompt(i int, text string) {
 		e.gate.RetryBackoffMs = seq
 		e.gateDirty = true
 		e.message = "retry_backoff_ms = " + text
+		return
+	}
+	if i == 13 {
+		switch strings.ToLower(strings.TrimSpace(text)) {
+		case "0", "false", "off", "关":
+			e.probeOn = false
+		case "1", "true", "on", "开":
+			e.probeOn = true
+		default:
+			e.message = "probe_enabled 要用 0/1 / on/off / 开/关"
+			return
+		}
+		e.gateDirty = true
+		if e.probeOn {
+			e.message = "probe_enabled = 开"
+		} else {
+			e.message = "probe_enabled = 关"
+		}
 		return
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(text))
@@ -248,7 +284,7 @@ func marshalConfig(top map[string]json.RawMessage) ([]byte, error) {
 		"concurrency_lock_sec", "quota_lock_sec", "breaker_lock_sec",
 		"lowperf_window_sec", "lowperf_peak_max", "lowperf_avg_max",
 		"lowperf_ttfb_max_sec", "lowperf_lock_sec", "retry_backoff_sec",
-		"rate_window_sec", "block_window_sec",
+		"rate_window_sec", "block_window_sec", "probe_enabled",
 		"upstreams", "aliases",
 	}
 	rest := make([]string, 0)
@@ -323,6 +359,7 @@ func (e *tuiEditor) saveGate() error {
 		"retry_backoff_sec":    msListToSec(g.RetryBackoffMs),
 		"rate_window_sec":      msToSec(e.rateWinMs),
 		"block_window_sec":     msToSec(e.blockWinMs),
+		"probe_enabled":        e.probeOn,
 	}
 	for k, v := range flat {
 		if w, err := json.Marshal(v); err == nil {

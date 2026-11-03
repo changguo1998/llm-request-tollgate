@@ -22,6 +22,7 @@
   ],
   "rate_window_sec": 3600,
   "block_window_sec": 35,
+  "probe_enabled": true,
   "upstreams": [
     {
       "id": "ustc",

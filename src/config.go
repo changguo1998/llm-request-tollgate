@@ -64,10 +64,17 @@ type Config struct {
 	LowPerfLockSec     float64   `json:"lowperf_lock_sec"`
 	RetryBackoffSec    []float64 `json:"retry_backoff_sec"`
 	// TUI 显示窗口 (秒, 可小数)
-	RateWindowSec  float64                `json:"rate_window_sec"`
-	BlockWindowSec float64                `json:"block_window_sec"`
-	Upstreams      []UpstreamCfg          `json:"upstreams"`
-	Aliases        map[string][][2]string `json:"aliases"`
+	RateWindowSec  float64 `json:"rate_window_sec"`
+	BlockWindowSec float64 `json:"block_window_sec"`
+	// 锁恢复探测: 指针区分"未写"(缺省 true) 与显式 false。
+	ProbeEnabled *bool                  `json:"probe_enabled"`
+	Upstreams    []UpstreamCfg          `json:"upstreams"`
+	Aliases      map[string][][2]string `json:"aliases"`
+}
+
+// probeEnabled 是否开启锁恢复探测: 缺省 true (未写即开), 显式 false 关闭。
+func (c *Config) probeEnabled() bool {
+	return c.ProbeEnabled == nil || *c.ProbeEnabled
 }
 
 // 秒 <-> 毫秒换算 (配置文件为秒可小数, 代码内部毫秒取整)。

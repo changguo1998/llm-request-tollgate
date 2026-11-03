@@ -88,7 +88,7 @@ func sameEvent(a, b routeEvent) bool {
 var tuiEventKinds = map[string]string{
 	"start": "启动", "reload": "重载", "ok": "正常", "error": "错误",
 	"fallback": "换候选", "gate": "闸门", "queue": "排队", "slow": "慢",
-	"lock": "加锁", "unlock": "解锁", "breaker": "熔断",
+	"lock": "加锁", "unlock": "解锁", "breaker": "熔断", "probe": "探测",
 }
 
 // tuiEventTag 给事件类型上色; 窄终端不依赖颜色也能读。

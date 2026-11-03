@@ -42,6 +42,9 @@ func (a *App) recordGenericFailure(c *cand, model string, g GateCfg) bool {
 func (a *App) addLockGroup(c *cand, group, reason string, dur time.Duration) {
 	a.evAdd("lock", "", c.id, "", "加锁 额度限制 (组 "+groupLabel(group)+") "+durStr(dur))
 	c.lockGroup(group, reason, dur)
+	if c.recoverProbe && recoverProbeable(reason) {
+		a.armLockRecovery(recoverRef{c: c, isModel: false, group: group, reason: reason}, time.Now().Add(dur))
+	}
 	a.saveGateState()
 }
 
@@ -49,6 +52,9 @@ func (a *App) addLockGroup(c *cand, group, reason string, dur time.Duration) {
 func (a *App) addLockModel(c *cand, model, reason string, dur time.Duration) {
 	a.evAdd("lock", "", c.id, model, "加锁 连续错误到阈值, 熔断 "+durStr(dur))
 	c.lockModel(model, reason, dur)
+	if c.recoverProbe && recoverProbeable(reason) {
+		a.armLockRecovery(recoverRef{c: c, isModel: true, model: model, reason: reason}, time.Now().Add(dur))
+	}
 	a.saveGateState()
 }
 
@@ -60,6 +66,9 @@ func (a *App) addLockLowPerf(c *cand, model string, peak, avg, latAvg float64, d
 		"加锁 低性能 (吞吐 峰 "+ftoa(peak, 1)+" / 均 "+ftoa(avg, 1)+" t/s, 平均首字节 "+
 			ftoa(latAvg, 0)+"ms) "+durStr(dur))
 	c.lockModel(model, lowPerfReason, dur)
+	if c.recoverProbe && recoverProbeable(lowPerfReason) {
+		a.armLockRecovery(recoverRef{c: c, isModel: true, model: model, reason: lowPerfReason}, time.Now().Add(dur))
+	}
 	a.saveGateState()
 }
 
@@ -161,6 +170,10 @@ func (a *App) loadGateState() {
 			c.groupLocks[group] = lockState{until: until, reason: rec.Reason}
 		}
 		c.mu.Unlock()
+		// 活跃且可探测的锁: 重挂恢复定时器, 让到期后继续走恢复探测。
+		if c.recoverProbe && recoverProbeable(rec.Reason) {
+			a.armLockRecovery(recoverRef{c: c, isModel: model != "", model: model, group: group, reason: rec.Reason}, until)
+		}
 		restored++
 	}
 	if restored > 0 {

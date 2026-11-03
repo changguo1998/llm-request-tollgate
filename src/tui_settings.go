@@ -88,6 +88,8 @@ type tuiEditor struct {
 	// 全局区 (gate 列表) 里的扁平顶层窗口参数: 速度窗 / 分块采样时间尺度。
 	rateWinMs  int
 	blockWinMs int
+	// 锁恢复探测开关 (配置扁平顶层键, 本项目也用 gate 列表编辑)。
+	probeOn bool
 }
 
 // storePathFor 定位模型列表: 先看配置实文件所在目录 (config.local.json 软链到
