@@ -19,9 +19,9 @@ func newTestAppCfg(t *testing.T, cfg *Config) *App {
 	if cfg.LogPath == "" {
 		cfg.LogPath = filepath.Join(t.TempDir(), "requests.jsonl")
 	}
-	if cfg.Timeouts.StreamIdleMs == 0 {
+	if cfg.StreamIdleSec == 0 {
 		// 超时不能留零值: 连接包装器会把每次读的死线设成 "现在", 读立刻超时。
-		cfg.Timeouts = Timeouts{ConnectMs: 5000, ResponseHeaderMs: 5000, StreamIdleMs: 5000}
+		cfg.setTimeouts(Timeouts{ConnectMs: 5000, ResponseHeaderMs: 5000, StreamIdleMs: 5000})
 	}
 	app, err := newApp(cfg)
 	if err != nil {
@@ -30,17 +30,28 @@ func newTestAppCfg(t *testing.T, cfg *Config) *App {
 	return app
 }
 
+// appWithGate 起 App 后用运行时毫秒 gate 覆盖配置里的门控参数 —— 测试常要毫秒级
+// (如 interval=5ms), 而配置文件的 gate 是秒制, 不能经 setGate 取整。
+func appWithGate(t *testing.T, cfg *Config, gate GateCfg) *App {
+	t.Helper()
+	app := newTestAppCfg(t, cfg)
+	app.mu.Lock()
+	app.gate = normGate(gate)
+	app.mu.Unlock()
+	return app
+}
+
 // newTestApp 起一个指向假上游的单候选 App (别名 m1 -> u1/real-1), 日志写在临时目录里。
 func newTestApp(t *testing.T, upstreamURL string, gate GateCfg, rules *ErrRules) *App {
 	t.Helper()
-	return newTestAppCfg(t, &Config{
-		Gate: gate,
+	cfg := &Config{
 		Upstreams: []UpstreamCfg{{
 			ID: "u1", BaseURL: upstreamURL, AuthHeader: "Authorization", Key: "k",
 			IncludeUsage: true, Errors: rules,
 		}},
 		Aliases: map[string][][2]string{"m1": {{"u1", "real-1"}}},
-	})
+	}
+	return appWithGate(t, cfg, gate)
 }
 
 // postJSON 发一个 JSON POST, 返回状态码与响应体。

@@ -422,10 +422,11 @@ func TestSettingsGateSave(t *testing.T) {
 	if m.prio.focus != 2 {
 		t.Fatalf("g 应把焦点切到调度参数, 得到 %d", m.prio.focus)
 	}
-	before := m.prio.gate.IntervalMs
+	before := m.prio.gate.SemWaitMs
+	m.prio.gateSel = 1 // 编辑 sem_wait (整秒友好, 秒精度可往返)
 	send('+')
-	if got := m.prio.gate.IntervalMs; got != before+100 {
-		t.Fatalf("interval_ms 应 +100: %d -> %d", before, got)
+	if got := m.prio.gate.SemWaitMs; got != before+500 {
+		t.Fatalf("sem_wait 应 +500: %d -> %d", before, got)
 	}
 	if !m.prio.gateDirty {
 		t.Fatalf("改了参数应标记未保存")
@@ -456,17 +457,13 @@ func TestSettingsGateSave(t *testing.T) {
 			t.Errorf("写回配置丢了字段 %q", k)
 		}
 	}
-	var got struct {
-		Gate GateCfg `json:"gate"`
-	}
+	var got Config
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Gate.IntervalMs != before+100 {
-		t.Errorf("配置里的 interval_ms = %d, 期望 %d", got.Gate.IntervalMs, before+100)
-	}
-	if got.Gate.SemWaitMs != m.prio.gate.SemWaitMs {
-		t.Errorf("未改的参数应保持原值")
+	gg := got.gate()
+	if gg.SemWaitMs != before+500 {
+		t.Errorf("配置里的 sem_wait = %d, 期望 %d", gg.SemWaitMs, before+500)
 	}
 	if strings.Contains(string(raw), "sk-") || strings.Contains(string(raw), "key\": \"") {
 		t.Errorf("写回配置不该出现密钥: %s", raw)
@@ -509,7 +506,8 @@ func TestSettingsGateSaveKeepsSymlink(t *testing.T) {
 	}
 	e := newTuiEditor(link)
 	e.focus = 2
-	before := e.gate.IntervalMs
+	e.gateSel = 1 // sem_wait (整秒可往返)
+	before := e.gate.SemWaitMs
 	e.adjustGate(1)
 	if err := e.saveGate(); err != nil {
 		t.Fatalf("保存 gate: %v", err)
@@ -525,14 +523,12 @@ func TestSettingsGateSaveKeepsSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got struct {
-		Gate GateCfg `json:"gate"`
-	}
+	var got Config
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Gate.IntervalMs != before+100 {
-		t.Errorf("真实配置没更新: interval_ms=%d, 期望 %d", got.Gate.IntervalMs, before+100)
+	if gg := got.gate(); gg.SemWaitMs != before+500 {
+		t.Errorf("真实配置没更新: sem_wait=%d, 期望 %d", gg.SemWaitMs, before+500)
 	}
 }
 

@@ -11,7 +11,7 @@ import (
 // connect / stream_idle 走原子值, response_header 写回 transport 字段。
 func TestReloadTimeouts(t *testing.T) {
 	app := newTestAppCfg(t, &Config{
-		Timeouts: Timeouts{ConnectMs: 1000, ResponseHeaderMs: 2000, StreamIdleMs: 3000},
+		ConnectSec: 1, ResponseHeaderSec: 2, StreamIdleSec: 3,
 		Upstreams: []UpstreamCfg{{ID: "u1", BaseURL: "http://127.0.0.1:1/v1",
 			AuthHeader: "Authorization", Key: "k"}},
 	})
@@ -32,7 +32,7 @@ func TestReloadTimeouts(t *testing.T) {
 	// 热加载换三值: transport 指针不变 (连接池复用), 三个值即更新。
 	oldRT := app.transport
 	app.applyConfig(&Config{
-		Timeouts: Timeouts{ConnectMs: 5000, ResponseHeaderMs: 6000, StreamIdleMs: 7000},
+		ConnectSec: 5, ResponseHeaderSec: 6, StreamIdleSec: 7,
 		Upstreams: []UpstreamCfg{{ID: "u1", BaseURL: "http://127.0.0.1:1/v1",
 			AuthHeader: "Authorization", Key: "k"}},
 		Aliases: map[string][][2]string{"m1": {{"u1", "real-1"}}},

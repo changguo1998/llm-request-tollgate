@@ -40,16 +40,90 @@ type UpstreamCfg struct {
 	Errors *ErrRules `json:"errors,omitempty"`
 }
 
+// Config 是所有扁平顶层键的配置: timeouts 与 gate 参数不再嵌套对象, 全部平铺在顶层。
+// 时间字段在配置文件里以「秒」表达 (`*_sec`, 允许小数); 代码内部改用毫秒, 经
+// gate()/timeouts() 转换 (×1000 取整)。
 type Config struct {
-	Listen    string                 `json:"listen"`
-	LogPath   string                 `json:"log_path"`
-	Timeouts  Timeouts               `json:"timeouts"`
-	Gate      GateCfg                `json:"gate"`
-	Upstreams []UpstreamCfg          `json:"upstreams"`
-	Aliases   map[string][][2]string `json:"aliases"`
-	// TUI 显示窗口 (扁平顶层键, 不嵌套): 速度平均/峰值统计窗, 与 active 分块采样时间尺度。
-	RateWindowMs  int `json:"rate_window_ms"`
-	BlockWindowMs int `json:"block_window_ms"`
+	Listen  string `json:"listen"`
+	LogPath string `json:"log_path"`
+	// timeouts (扁平, 秒, 可小数)
+	ConnectSec        float64 `json:"connect_sec"`
+	ResponseHeaderSec float64 `json:"response_header_sec"`
+	StreamIdleSec     float64 `json:"stream_idle_sec"`
+	// gate 门控参数 (扁平; 时间为秒可小数, 非时间项原单位)
+	IntervalSec        float64   `json:"interval_sec"`
+	SemWaitSec         float64   `json:"sem_wait_sec"`
+	QueueWaitSec       float64   `json:"queue_wait_sec"`
+	ConcurrencyLockSec float64   `json:"concurrency_lock_sec"`
+	QuotaLockSec       float64   `json:"quota_lock_sec"`
+	BreakerLockSec     float64   `json:"breaker_lock_sec"`
+	LowPerfWindowSec   float64   `json:"lowperf_window_sec"`
+	LowPerfPeakMax     int       `json:"lowperf_peak_max"`     // tokens/s, 非时间
+	LowPerfAvgMax      int       `json:"lowperf_avg_max"`      // tokens/s, 非时间
+	LowPerfTtfbMaxSec  float64   `json:"lowperf_ttfb_max_sec"` // 高延迟阈值 (秒); 0 = 关闭
+	LowPerfLockSec     float64   `json:"lowperf_lock_sec"`
+	RetryBackoffSec    []float64 `json:"retry_backoff_sec"`
+	// TUI 显示窗口 (秒, 可小数)
+	RateWindowSec  float64                `json:"rate_window_sec"`
+	BlockWindowSec float64                `json:"block_window_sec"`
+	Upstreams      []UpstreamCfg          `json:"upstreams"`
+	Aliases        map[string][][2]string `json:"aliases"`
+}
+
+// 秒 <-> 毫秒换算 (配置文件为秒可小数, 代码内部毫秒取整)。
+func secToMs(s float64) int {
+	return int(s*1000 + 0.5)
+}
+func msToSec(ms int) float64 {
+	return float64(ms) / 1000
+}
+func secListToMs(ls []float64) []int {
+	out := make([]int, len(ls))
+	for i, v := range ls {
+		out[i] = secToMs(v)
+	}
+	return out
+}
+func msListToSec(ls []int) []float64 {
+	out := make([]float64, len(ls))
+	for i, v := range ls {
+		out[i] = msToSec(v)
+	}
+	return out
+}
+
+// timeouts 把扁平秒字段装成内部 Timeouts (毫秒, 仅逻辑用)。
+func (c *Config) timeouts() Timeouts {
+	return Timeouts{
+		ConnectMs: secToMs(c.ConnectSec), ResponseHeaderMs: secToMs(c.ResponseHeaderSec),
+		StreamIdleMs: secToMs(c.StreamIdleSec),
+	}
+}
+
+// setTimeouts 把内部 Timeouts 写回扁平秒字段。
+func (c *Config) setTimeouts(t Timeouts) {
+	c.ConnectSec, c.ResponseHeaderSec, c.StreamIdleSec = msToSec(t.ConnectMs), msToSec(t.ResponseHeaderMs), msToSec(t.StreamIdleMs)
+}
+
+// gate 把扁平门控字段装成内部 GateCfg (毫秒)。
+func (c *Config) gate() GateCfg {
+	return GateCfg{
+		IntervalMs: secToMs(c.IntervalSec), SemWaitMs: secToMs(c.SemWaitSec), QueueWaitMs: secToMs(c.QueueWaitSec),
+		ConcurrencyLockMs: secToMs(c.ConcurrencyLockSec), QuotaLockMs: secToMs(c.QuotaLockSec), BreakerLockMs: secToMs(c.BreakerLockSec),
+		LowPerfWindowMs: secToMs(c.LowPerfWindowSec), LowPerfPeakMax: c.LowPerfPeakMax, LowPerfAvgMax: c.LowPerfAvgMax,
+		LowPerfLockMs: secToMs(c.LowPerfLockSec), LowPerfTtfbMaxMs: secToMs(c.LowPerfTtfbMaxSec),
+		RetryBackoffMs: secListToMs(c.RetryBackoffSec),
+	}
+}
+
+// setGate 把内部 GateCfg 写回扁平秒字段。
+func (c *Config) setGate(g GateCfg) {
+	c.IntervalSec, c.SemWaitSec, c.QueueWaitSec = msToSec(g.IntervalMs), msToSec(g.SemWaitMs), msToSec(g.QueueWaitMs)
+	c.ConcurrencyLockSec, c.QuotaLockSec, c.BreakerLockSec = msToSec(g.ConcurrencyLockMs), msToSec(g.QuotaLockMs), msToSec(g.BreakerLockMs)
+	c.LowPerfWindowSec = msToSec(g.LowPerfWindowMs)
+	c.LowPerfPeakMax, c.LowPerfAvgMax = g.LowPerfPeakMax, g.LowPerfAvgMax
+	c.LowPerfLockSec, c.LowPerfTtfbMaxSec = msToSec(g.LowPerfLockMs), msToSec(g.LowPerfTtfbMaxMs)
+	c.RetryBackoffSec = msListToSec(g.RetryBackoffMs)
 }
 
 // GateCfg 是所有上游共用的门控参数。
@@ -175,11 +249,11 @@ func loadConfigOpt(path string, lenient bool) (*Config, error) {
 		c.LogPath = "var/requests.jsonl"
 	}
 	// TUI 显示窗口缺省: 速度窗 1h, active 分块采样时间尺度 35s (rowStatTau0)。
-	if c.RateWindowMs <= 0 {
-		c.RateWindowMs = 3600000
+	if c.RateWindowSec <= 0 {
+		c.RateWindowSec = 3600 // 1h
 	}
-	if c.BlockWindowMs <= 0 {
-		c.BlockWindowMs = 35000
+	if c.BlockWindowSec <= 0 {
+		c.BlockWindowSec = 35 // rowStatTau0 兜底
 	}
 	// 额度组: 同一上游里模型 id 唯一; 声明了 models 的上游, 别名引用的模型必须在表内
 	// (没列出的模型属于哪个组无从谈起, 早报错好过静默落进默认组)。

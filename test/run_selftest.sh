@@ -101,21 +101,25 @@ PYSRV
     return 1
 }
 
+# ms2sec: 毫秒 -> 秒 (小数), 供扁平 _sec 配置键用。
+ms2sec() { awk -v m="$1" 'BEGIN{printf "%g", m/1000}'; }
+
 # gen_config1: 单上游 v2 配置。参数: 输出文件 监听端口 日志 假上游端口 上游id
 #   include_usage interval_ms sem_wait_ms queue_wait_ms 逻辑模型名 [gate 里的额外字段]
 # 门控是全局的 (设计 §5.5.4): 节拍与等待都在这里给, 锁时长与退避序列取测试用的小值。
+# 时间为扁平 _sec 键 (可小数), 参数仍按毫秒传, 经 ms2sec 转秒。
 gen_config1() {
     local extra="${11:-}" gate
-    gate="\"interval_ms\": ${7}, \"sem_wait_ms\": ${8}, \"queue_wait_ms\": ${9}"
-    gate="$gate, \"concurrency_lock_ms\": 800, \"quota_lock_ms\": 2000, \"breaker_lock_ms\": 3000"
-    gate="$gate, \"retry_backoff_ms\": [10, 20, 30]"
+    gate="\"interval_sec\": $(ms2sec "${7}"), \"sem_wait_sec\": $(ms2sec "${8}"), \"queue_wait_sec\": $(ms2sec "${9}")"
+    gate="$gate, \"concurrency_lock_sec\": $(ms2sec 800), \"quota_lock_sec\": $(ms2sec 2000), \"breaker_lock_sec\": $(ms2sec 3000)"
+    gate="$gate, \"retry_backoff_sec\": [0.01, 0.02, 0.03]"
     [ -n "$extra" ] && gate="$gate, $extra"
     cat > "$1" << EOF
 {
   "listen": "127.0.0.1:$2",
   "log_path": "$3",
-  "timeouts": { "connect_ms": 1000, "response_header_ms": 5000, "stream_idle_ms": 3000 },
-  "gate": { $gate },
+  "connect_sec": 1.0, "response_header_sec": 5.0, "stream_idle_sec": 3.0,
+  $gate,
   "upstreams": [
     { "id": "$5", "base_url": "http://127.0.0.1:$4/v1", "auth_header": "Authorization", "key": "fake-key", "headers": {}, "include_usage": $6 }
   ],
@@ -177,8 +181,8 @@ case_keyenv() {
 {
   "listen": "127.0.0.1:18812",
   "log_path": "$TMP/log-keyenv.jsonl",
-  "timeouts": { "connect_ms": 1000, "response_header_ms": 5000, "stream_idle_ms": 3000 },
-  "gate": { "interval_ms": 20, "sem_wait_ms": 400, "queue_wait_ms": 400, "concurrency_lock_ms": 800, "quota_lock_ms": 2000, "breaker_lock_ms": 3000, "retry_backoff_ms": [10, 20, 30] },
+  "connect_sec": 1.0, "response_header_sec": 5.0, "stream_idle_sec": 3.0,
+  "interval_sec": 0.02, "sem_wait_sec": 0.4, "queue_wait_sec": 0.4, "concurrency_lock_sec": 0.8, "quota_lock_sec": 2.0, "breaker_lock_sec": 3.0, "retry_backoff_sec": [0.01, 0.02, 0.03],
   "upstreams": [
     { "id": "fu", "base_url": "http://127.0.0.1:19012/v1", "auth_header": "Authorization", "key_env": "TG_TEST_KEY", "headers": {}, "include_usage": true }
   ],
@@ -205,8 +209,8 @@ case_fallback() {
 {
   "listen": "127.0.0.1:18813",
   "log_path": "$LOG",
-  "timeouts": { "connect_ms": 1000, "response_header_ms": 5000, "stream_idle_ms": 3000 },
-  "gate": { "interval_ms": 20, "sem_wait_ms": 400, "queue_wait_ms": 400, "concurrency_lock_ms": 800, "quota_lock_ms": 2000, "breaker_lock_ms": 5000, "retry_backoff_ms": [10, 20, 30] },
+  "connect_sec": 1.0, "response_header_sec": 5.0, "stream_idle_sec": 3.0,
+  "interval_sec": 0.02, "sem_wait_sec": 0.4, "queue_wait_sec": 0.4, "concurrency_lock_sec": 0.8, "quota_lock_sec": 2.0, "breaker_lock_sec": 5.0, "retry_backoff_sec": [0.01, 0.02, 0.03],
   "upstreams": [
     { "id": "dead", "base_url": "http://127.0.0.1:19999/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true },
     { "id": "fu", "base_url": "http://127.0.0.1:19013/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true }
@@ -249,8 +253,8 @@ case_fallback_gate() {
 {
   "listen": "127.0.0.1:18816",
   "log_path": "$LOG",
-  "timeouts": { "connect_ms": 1000, "response_header_ms": 5000, "stream_idle_ms": 3000 },
-  "gate": { "interval_ms": 20, "sem_wait_ms": 150, "queue_wait_ms": 150, "concurrency_lock_ms": 800, "quota_lock_ms": 2000, "breaker_lock_ms": 5000, "retry_backoff_ms": [10, 20, 30] },
+  "connect_sec": 1.0, "response_header_sec": 5.0, "stream_idle_sec": 3.0,
+  "interval_sec": 0.02, "sem_wait_sec": 0.15, "queue_wait_sec": 0.15, "concurrency_lock_sec": 0.8, "quota_lock_sec": 2.0, "breaker_lock_sec": 5.0, "retry_backoff_sec": [0.01, 0.02, 0.03],
   "upstreams": [
     { "id": "dead", "base_url": "http://127.0.0.1:19999/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true },
     { "id": "fu", "base_url": "http://127.0.0.1:19016/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true },
@@ -397,8 +401,8 @@ PYSRV
 {
   "listen": "127.0.0.1:18814",
   "log_path": "$LOG",
-  "timeouts": { "connect_ms": 1000, "response_header_ms": 5000, "stream_idle_ms": 3000 },
-  "gate": { "interval_ms": 20, "sem_wait_ms": 400, "queue_wait_ms": 400, "concurrency_lock_ms": 800, "quota_lock_ms": 2000, "breaker_lock_ms": 3000, "retry_backoff_ms": [10, 20, 30] },
+  "connect_sec": 1.0, "response_header_sec": 5.0, "stream_idle_sec": 3.0,
+  "interval_sec": 0.02, "sem_wait_sec": 0.4, "queue_wait_sec": 0.4, "concurrency_lock_sec": 0.8, "quota_lock_sec": 2.0, "breaker_lock_sec": 3.0, "retry_backoff_sec": [0.01, 0.02, 0.03],
   "upstreams": [
     { "id": "quota", "base_url": "http://127.0.0.1:19994/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true,
       "errors": { "quota": [ { "status": [402, 429], "contains": ["insufficient balance"] } ] } },
@@ -481,8 +485,8 @@ PYSRV
 {
   "listen": "127.0.0.1:18840",
   "log_path": "$LOG",
-  "timeouts": { "connect_ms": 1000, "response_header_ms": 5000, "stream_idle_ms": 3000 },
-  "gate": { "interval_ms": 20, "sem_wait_ms": 200, "queue_wait_ms": 200, "concurrency_lock_ms": 800, "quota_lock_ms": 2000, "breaker_lock_ms": 3000, "retry_backoff_ms": [10, 20, 30] },
+  "connect_sec": 1.0, "response_header_sec": 5.0, "stream_idle_sec": 3.0,
+  "interval_sec": 0.02, "sem_wait_sec": 0.2, "queue_wait_sec": 0.2, "concurrency_lock_sec": 0.8, "quota_lock_sec": 2.0, "breaker_lock_sec": 3.0, "retry_backoff_sec": [0.01, 0.02, 0.03],
   "upstreams": [
     { "id": "limited", "base_url": "http://127.0.0.1:19995/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true }
   ],
@@ -569,8 +573,8 @@ case_usage() {
 {
   "listen": "127.0.0.1:18803",
   "log_path": "$LOG",
-  "timeouts": { "connect_ms": 1000, "response_header_ms": 5000, "stream_idle_ms": 3000 },
-  "gate": { "interval_ms": 20, "sem_wait_ms": 400, "queue_wait_ms": 400, "concurrency_lock_ms": 800, "quota_lock_ms": 2000, "breaker_lock_ms": 3000, "retry_backoff_ms": [10, 20, 30] },
+  "connect_sec": 1.0, "response_header_sec": 5.0, "stream_idle_sec": 3.0,
+  "interval_sec": 0.02, "sem_wait_sec": 0.4, "queue_wait_sec": 0.4, "concurrency_lock_sec": 0.8, "quota_lock_sec": 2.0, "breaker_lock_sec": 3.0, "retry_backoff_sec": [0.01, 0.02, 0.03],
   "upstreams": [
     { "id": "fu", "base_url": "http://127.0.0.1:19003/v1", "auth_header": "Authorization", "key": "k1", "headers": {}, "include_usage": true },
     { "id": "fnu", "base_url": "http://127.0.0.1:19003/v1", "auth_header": "Authorization", "key": "k2", "headers": {}, "include_usage": false }
@@ -693,8 +697,8 @@ case_ratelimit_429() {
 {
   "listen": "127.0.0.1:18805",
   "log_path": "$LOG",
-  "timeouts": { "connect_ms": 1000, "response_header_ms": 5000, "stream_idle_ms": 3000 },
-  "gate": { "interval_ms": 20, "sem_wait_ms": 150, "queue_wait_ms": 150, "concurrency_lock_ms": 2000, "quota_lock_ms": 2000, "breaker_lock_ms": 3000, "retry_backoff_ms": [10, 20, 30] },
+  "connect_sec": 1.0, "response_header_sec": 5.0, "stream_idle_sec": 3.0,
+  "interval_sec": 0.02, "sem_wait_sec": 0.15, "queue_wait_sec": 0.15, "concurrency_lock_sec": 2.0, "quota_lock_sec": 2.0, "breaker_lock_sec": 3.0, "retry_backoff_sec": [0.01, 0.02, 0.03],
   "upstreams": [
     { "id": "slow", "base_url": "http://127.0.0.1:19997/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true }
   ],

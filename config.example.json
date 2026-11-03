@@ -1,31 +1,27 @@
 {
   "listen": "127.0.0.1:8787",
   "log_path": "var/requests.jsonl",
-  "timeouts": {
-    "connect_ms": 10000,
-    "response_header_ms": 120000,
-    "stream_idle_ms": 240000
-  },
-  "gate": {
-    "interval_ms": 500,
-    "sem_wait_ms": 5000,
-    "queue_wait_ms": 10000,
-    "concurrency_lock_ms": 3600000,
-    "quota_lock_ms": 600000,
-    "breaker_lock_ms": 300000,
-    "lowperf_window_ms": 600000,
-    "lowperf_peak_max": 5,
-    "lowperf_avg_max": 1,
-    "lowperf_ttfb_max_ms": 30000,
-    "lowperf_lock_ms": 300000,
-    "retry_backoff_ms": [
-      10000,
-      20000,
-      30000
-    ]
-  },
-  "rate_window_ms": 3600000,
-  "block_window_ms": 35000,
+  "connect_sec": 10,
+  "response_header_sec": 120,
+  "stream_idle_sec": 240,
+  "interval_sec": 0.5,
+  "sem_wait_sec": 5,
+  "queue_wait_sec": 10,
+  "concurrency_lock_sec": 3600,
+  "quota_lock_sec": 600,
+  "breaker_lock_sec": 300,
+  "lowperf_window_sec": 600,
+  "lowperf_peak_max": 5,
+  "lowperf_avg_max": 1,
+  "lowperf_ttfb_max_sec": 30,
+  "lowperf_lock_sec": 300,
+  "retry_backoff_sec": [
+    10,
+    20,
+    30
+  ],
+  "rate_window_sec": 3600,
+  "block_window_sec": 35,
   "upstreams": [
     {
       "id": "ustc",

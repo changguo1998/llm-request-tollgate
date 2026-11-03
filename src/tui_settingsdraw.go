@@ -48,7 +48,7 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 	if e.focus == 2 {
 		focusGate = " (焦点)"
 	}
-	left = append(left, tuiBold+"调度参数 (gate)"+focusGate+tuiReset)
+	left = append(left, tuiBold+"全局参数 (global)"+focusGate+tuiReset)
 	for i := range gateLabels {
 		text := tuiIndent + gateLabels[i] + "  " + e.gateText(i)
 		if e.focus == 2 && i == e.gateSel {

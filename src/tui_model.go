@@ -94,17 +94,17 @@ func tuiWindowConfig(cfgPath string) (rateWin, blockWin time.Duration) {
 		return
 	}
 	var raw struct {
-		RateWindowMs  int `json:"rate_window_ms"`
-		BlockWindowMs int `json:"block_window_ms"`
+		RateWindowSec  float64 `json:"rate_window_sec"`
+		BlockWindowSec float64 `json:"block_window_sec"`
 	}
 	if json.Unmarshal(b, &raw) != nil {
 		return
 	}
-	if raw.RateWindowMs > 0 {
-		rateWin = time.Duration(raw.RateWindowMs) * time.Millisecond
+	if raw.RateWindowSec > 0 {
+		rateWin = time.Duration(secToMs(raw.RateWindowSec)) * time.Millisecond
 	}
-	if raw.BlockWindowMs > 0 {
-		blockWin = time.Duration(raw.BlockWindowMs) * time.Millisecond
+	if raw.BlockWindowSec > 0 {
+		blockWin = time.Duration(secToMs(raw.BlockWindowSec)) * time.Millisecond
 	}
 	return
 }

@@ -312,8 +312,7 @@ func TestProxyQuotaLockStaysInGroup(t *testing.T) {
 	}))
 	defer up.Close()
 	rules := &ErrRules{Quota: []ErrRule{{Status: []int{429}, Contains: []string{"insufficient balance"}}}}
-	app := newTestAppCfg(t, &Config{
-		Gate: GateCfg{IntervalMs: 5, SemWaitMs: 500, QueueWaitMs: 500},
+	cfg := &Config{
 		Upstreams: []UpstreamCfg{{
 			ID: "u1", BaseURL: up.URL, AuthHeader: "Authorization", Key: "k",
 			IncludeUsage: true, Errors: rules,
@@ -326,7 +325,9 @@ func TestProxyQuotaLockStaysInGroup(t *testing.T) {
 			"m1": {{"u1", "real-1"}},
 			"m2": {{"u1", "real-2"}},
 		},
-	})
+	}
+	app := appWithGate(t, cfg, GateCfg{IntervalMs: 5, SemWaitMs: 500, QueueWaitMs: 500})
+
 	proxy := httptest.NewServer(app)
 	defer proxy.Close()
 
@@ -478,15 +479,16 @@ func TestProxyConcurrencyClassRetriesSameCandidate(t *testing.T) {
 	rules := &ErrRules{Concurrency: []ErrRule{
 		{Status: []int{429}, Contains: []string{"max parallel"}},
 	}}
-	app := newTestAppCfg(t, &Config{
-		// 退避序列调小, 让一笔请求内走完 4 次失败并熔断。
-		Gate: GateCfg{IntervalMs: 5, SemWaitMs: 50, QueueWaitMs: 200, RetryBackoffMs: []int{5, 10, 15}},
+	cfg := &Config{
 		Upstreams: []UpstreamCfg{
 			{ID: "bad", BaseURL: bad.URL, AuthHeader: "Authorization", Key: "k", IncludeUsage: true, Errors: rules},
 			{ID: "good", BaseURL: good.URL, AuthHeader: "Authorization", Key: "k", IncludeUsage: true},
 		},
 		Aliases: map[string][][2]string{"m1": {{"bad", "real-1"}, {"good", "real-2"}}},
-	})
+	}
+	// 退避序列调小, 让一笔请求内走完 4 次失败并熔断。
+	app := appWithGate(t, cfg, GateCfg{IntervalMs: 5, SemWaitMs: 50, QueueWaitMs: 200, RetryBackoffMs: []int{5, 10, 15}})
+
 	proxy := httptest.NewServer(app)
 	defer proxy.Close()
 
@@ -573,11 +575,11 @@ func TestProxyBreakerIsPerModel(t *testing.T) {
 	defer up.Close()
 
 	cfg := &Config{
-		Gate:      GateCfg{IntervalMs: 5, SemWaitMs: 50, QueueWaitMs: 200, RetryBackoffMs: []int{5, 10, 15}},
 		Upstreams: []UpstreamCfg{{ID: "u1", BaseURL: up.URL, AuthHeader: "Authorization", Key: "k"}},
 		Aliases:   map[string][][2]string{"m1": {{"u1", "bad-1"}}, "m2": {{"u1", "good-1"}}},
 	}
-	app := newTestAppCfg(t, cfg)
+	app := appWithGate(t, cfg, GateCfg{IntervalMs: 5, SemWaitMs: 50, QueueWaitMs: 200, RetryBackoffMs: []int{5, 10, 15}})
+
 	proxy := httptest.NewServer(app)
 	defer proxy.Close()
 	url := proxy.URL + "/v1/chat/completions"
@@ -633,12 +635,12 @@ func TestProxyModelQueueDoesNotBlockSiblings(t *testing.T) {
 	defer up.Close()
 
 	cfg := &Config{
-		// 退避 10s (缺省序列第一档) 远大于这里的排队预算: 若第二笔仍被退避压住, 必然超时。
-		Gate:      GateCfg{IntervalMs: 5, SemWaitMs: 50, QueueWaitMs: 200},
 		Upstreams: []UpstreamCfg{{ID: "u1", BaseURL: up.URL, AuthHeader: "Authorization", Key: "k"}},
 		Aliases:   map[string][][2]string{"a-bad": {{"u1", "bad-1"}}, "b-good": {{"u1", "good-1"}}},
 	}
-	app := newTestAppCfg(t, cfg)
+	// 退避 10s (缺省序列第一档) 远大于这里的排队预算: 若第二笔仍被退避压住, 必然超时。
+	app := appWithGate(t, cfg, GateCfg{IntervalMs: 5, SemWaitMs: 50, QueueWaitMs: 200})
+
 	proxy := httptest.NewServer(app)
 	defer proxy.Close()
 	url := proxy.URL + "/v1/chat/completions"

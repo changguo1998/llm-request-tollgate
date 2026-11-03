@@ -94,31 +94,27 @@ func (e *tuiEditor) gateText(i int) string {
 	return strconv.Itoa(e.gateField(i)) + " ms"
 }
 
-// loadGate 读配置文件里的 gate 段 (只读这一段, 不碰密钥; 缺省值用 normGate 补齐)。
+// loadGate 读配置文件 (扁平顶层键, 时间为秒); 内部转为毫秒的 GateCfg 显示用。
 func (e *tuiEditor) loadGate() {
 	b, err := os.ReadFile(e.config)
 	if err != nil {
 		e.gateErr = err.Error()
 		return
 	}
-	var raw struct {
-		Gate          GateCfg `json:"gate"`
-		RateWindowMs  int     `json:"rate_window_ms"`
-		BlockWindowMs int     `json:"block_window_ms"`
-	}
-	if err := json.Unmarshal(b, &raw); err != nil {
+	var c Config
+	if err := json.Unmarshal(b, &c); err != nil {
 		e.gateErr = err.Error()
 		return
 	}
-	e.gate = normGate(raw.Gate)
-	// 扁平顶层窗口: 0=缺省 (速度窗 1h, 分块采样 35s)。
-	if raw.RateWindowMs > 0 {
-		e.rateWinMs = raw.RateWindowMs
+	e.gate = normGate(c.gate())
+	// 扁平窗口 (秒 x1000 -> 毫秒): 0=缺省 (速度窗 1h, 分块采样 35s)。
+	if c.RateWindowSec > 0 {
+		e.rateWinMs = secToMs(c.RateWindowSec)
 	} else {
 		e.rateWinMs = 3600000
 	}
-	if raw.BlockWindowMs > 0 {
-		e.blockWinMs = raw.BlockWindowMs
+	if c.BlockWindowSec > 0 {
+		e.blockWinMs = secToMs(c.BlockWindowSec)
 	} else {
 		e.blockWinMs = 35000
 	}
@@ -245,7 +241,16 @@ func (e *tuiEditor) setGatePrompt(i int, text string) {
 // marshalConfig 按固定的顶层顺序写回配置文件: 手写 JSON 是因为 map 会把键排序,
 // 让整份配置产生无关的 diff。raw 里没认识的键按字典序补在最后, 不丢数据。
 func marshalConfig(top map[string]json.RawMessage) ([]byte, error) {
-	known := []string{"listen", "log_path", "timeouts", "gate", "rate_window_ms", "block_window_ms", "upstreams", "aliases"}
+	known := []string{
+		"listen", "log_path",
+		"connect_sec", "response_header_sec", "stream_idle_sec",
+		"interval_sec", "sem_wait_sec", "queue_wait_sec",
+		"concurrency_lock_sec", "quota_lock_sec", "breaker_lock_sec",
+		"lowperf_window_sec", "lowperf_peak_max", "lowperf_avg_max",
+		"lowperf_ttfb_max_sec", "lowperf_lock_sec", "retry_backoff_sec",
+		"rate_window_sec", "block_window_sec",
+		"upstreams", "aliases",
+	}
 	rest := make([]string, 0)
 	for k := range top {
 		seen := false
@@ -302,16 +307,27 @@ func (e *tuiEditor) saveGate() error {
 	if err := json.Unmarshal(b, &top); err != nil {
 		return err
 	}
-	raw, err := json.Marshal(normGate(e.gate))
-	if err != nil {
-		return err
+	g := normGate(e.gate)
+	flat := map[string]any{
+		"interval_sec":         msToSec(g.IntervalMs),
+		"sem_wait_sec":         msToSec(g.SemWaitMs),
+		"queue_wait_sec":       msToSec(g.QueueWaitMs),
+		"concurrency_lock_sec": msToSec(g.ConcurrencyLockMs),
+		"quota_lock_sec":       msToSec(g.QuotaLockMs),
+		"breaker_lock_sec":     msToSec(g.BreakerLockMs),
+		"lowperf_window_sec":   msToSec(g.LowPerfWindowMs),
+		"lowperf_peak_max":     g.LowPerfPeakMax,
+		"lowperf_avg_max":      g.LowPerfAvgMax,
+		"lowperf_ttfb_max_sec": msToSec(g.LowPerfTtfbMaxMs),
+		"lowperf_lock_sec":     msToSec(g.LowPerfLockMs),
+		"retry_backoff_sec":    msListToSec(g.RetryBackoffMs),
+		"rate_window_sec":      msToSec(e.rateWinMs),
+		"block_window_sec":     msToSec(e.blockWinMs),
 	}
-	top["gate"] = raw
-	if w, err := json.Marshal(e.rateWinMs); err == nil {
-		top["rate_window_ms"] = w
-	}
-	if w, err := json.Marshal(e.blockWinMs); err == nil {
-		top["block_window_ms"] = w
+	for k, v := range flat {
+		if w, err := json.Marshal(v); err == nil {
+			top[k] = w
+		}
 	}
 	out, err := marshalConfig(top)
 	if err != nil {

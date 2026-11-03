@@ -11,11 +11,11 @@ import (
 	"time"
 )
 
-// tuiWindowConfig: 从扁平顶层键读窗口; 读不到/非正数回退缺省。
+// tuiWindowConfig: 从扁平顶层键 (秒) 读窗口; 读不到/非正数回退缺省。
 func TestTUIWindowConfig(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c.json")
-	if err := os.WriteFile(p, []byte(`{"rate_window_ms":7200000,"block_window_ms":10000}`), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte(`{"rate_window_sec":7200,"block_window_sec":10}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	rate, block := tuiWindowConfig(p)
@@ -33,7 +33,7 @@ func TestTUIWindowConfig(t *testing.T) {
 	}
 }
 
-// loadConfig 给扁平顶层窗口键设缺省 (1h / 35s), 也认显式值。
+// loadConfig 给扁平顶层窗口键 (秒) 设缺省 (3600s / 35s), 也认显式值。
 func TestConfigWindowDefaults(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c.json")
@@ -44,20 +44,20 @@ func TestConfigWindowDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.RateWindowMs != 3600000 || c.BlockWindowMs != 35000 {
-		t.Fatalf("缺省 rate=%d block=%d, want 3600000/35000", c.RateWindowMs, c.BlockWindowMs)
+	if c.RateWindowSec != 3600 || c.BlockWindowSec != 35 {
+		t.Fatalf("缺省 rate=%d block=%d, want 3600/35", c.RateWindowSec, c.BlockWindowSec)
 	}
 
 	p2 := filepath.Join(dir, "c2.json")
-	if err := os.WriteFile(p2, []byte(`{"rate_window_ms":7200000,"block_window_ms":10000}`), 0o644); err != nil {
+	if err := os.WriteFile(p2, []byte(`{"rate_window_sec":7200,"block_window_sec":10}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	c2, err := loadConfig(p2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c2.RateWindowMs != 7200000 || c2.BlockWindowMs != 10000 {
-		t.Fatalf("显式 rate=%d block=%d, want 7200000/10000", c2.RateWindowMs, c2.BlockWindowMs)
+	if c2.RateWindowSec != 7200 || c2.BlockWindowSec != 10 {
+		t.Fatalf("显式 rate=%d block=%d, want 7200/10", c2.RateWindowSec, c2.BlockWindowSec)
 	}
 }
 
@@ -113,14 +113,14 @@ func TestTUISettingsWindowsEditAndSave(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got struct {
-		Rate  int `json:"rate_window_ms"`
-		Block int `json:"block_window_ms"`
+		Rate  int `json:"rate_window_sec"`
+		Block int `json:"block_window_sec"`
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Rate != 4200000 || got.Block != 40000 {
-		t.Fatalf("配置应写回 rate=%d block=%d, want 4200000/40000", got.Rate, got.Block)
+	if got.Rate != 4200 || got.Block != 40 {
+		t.Fatalf("配置应写回 rate=%d block=%d, want 4200/40 (秒)", got.Rate, got.Block)
 	}
 }
 

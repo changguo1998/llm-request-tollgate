@@ -83,12 +83,13 @@ func (a *App) applyConfig(c *Config) {
 	a.cfg = c
 	// 三项超时热加载: connect / stream_idle 原子存, 建连与每次读写取当前值;
 	// response_header 写回已建 Transport (net/http 每笔请求开始时读该字段即生效)。
-	a.connectNs.Store(int64(time.Duration(c.Timeouts.ConnectMs) * time.Millisecond))
-	a.streamIdlNs.Store(int64(time.Duration(c.Timeouts.StreamIdleMs) * time.Millisecond))
-	rh := time.Duration(c.Timeouts.ResponseHeaderMs) * time.Millisecond
+	to := c.timeouts()
+	a.connectNs.Store(int64(time.Duration(to.ConnectMs) * time.Millisecond))
+	a.streamIdlNs.Store(int64(time.Duration(to.StreamIdleMs) * time.Millisecond))
+	rh := time.Duration(to.ResponseHeaderMs) * time.Millisecond
 	// 门控参数是全局的, 热加载直接生效; 队列与自适应上限按上游 id 保留 (爬了半天的
 	// 上限不该被 hup 清掉, 排队中的请求也不该被丢)。
-	a.gate = normGate(c.Gate)
+	a.gate = normGate(c.gate())
 	// settings 页离线编辑时 (tui_model) 也会拼一个 App 再 applyConfig, 表可能还没建。
 	if a.cands == nil {
 		a.cands = map[string]*cand{}
