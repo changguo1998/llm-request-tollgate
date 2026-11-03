@@ -34,6 +34,7 @@ type logRec struct {
 	LockSkips    int     `json:"lock_skips,omitempty"`
 	BackoffSkips int     `json:"backoff_skips,omitempty"`
 	TtfbMs       int64   `json:"ttfb_ms,omitempty"`     // 首字节时延 (被动采样)
+	DecodeMs     int64   `json:"decode_ms,omitempty"`   // 解码段时长: 首字节到流末 (仅流式有值)
 	Tps          float64 `json:"tps,omitempty"`         // 解码吞吐 tokens/s (流式才有)
 	Bytes        int64   `json:"bytes,omitempty"`       // 转发给客户端的响应体字节数
 	Bps          float64 `json:"bps,omitempty"`         // 接收的字节吞吐 bytes/s (流式才有)

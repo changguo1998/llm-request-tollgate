@@ -223,7 +223,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 | `err` | 错误说明 |
 | `gate` | 被闸门挡下未发出时的原因 (见 5.2) |
 | `lock_skips` / `backoff_skips` | 候选被锁 / 在退避而被跳过的次数 |
-| `ttfb_ms` / `tps` | 首字节时延 / 解码吞吐 (流式才有 tps) |
+| `ttfb_ms` / `decode_ms` / `tps` | 首字节时延 / 解码段时长(首字节到流末, 仅流式) / 解码吞吐 tokens/s (流式才有) |
 | `bytes` / `bps` | 转发给客户端的响应体字节数 / 接收的字节吞吐 bytes/s (流式才有 bps) |
 | `duration_ms` | 请求耗时 (收到请求到写完响应), 供不把空闲计入分母的吞吐 |
 

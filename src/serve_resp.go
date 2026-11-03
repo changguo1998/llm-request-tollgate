@@ -88,7 +88,7 @@ func (s *serveState) forward() {
 	rec := s.baseLog()
 	rec.Upstream, rec.Model = s.servedUp.ID, realModel
 	rec.Status, rec.Usage, rec.Missing = status, usage, missing
-	rec.TtfbMs, rec.Tps = ttfbMs, tps
+	rec.TtfbMs, rec.DecodeMs, rec.Tps = ttfbMs, decodeMs, tps
 	rec.Bytes, rec.Bps = bytesOut, bps
 	rec.DurationMs = msCeil(time.Since(s.reqStart))
 	a.logReq(rec)
