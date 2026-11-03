@@ -24,6 +24,8 @@
       30000
     ]
   },
+  "rate_window_ms": 3600000,
+  "block_window_ms": 35000,
   "upstreams": [
     {
       "id": "ustc",

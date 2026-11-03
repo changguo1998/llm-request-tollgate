@@ -47,6 +47,9 @@ type Config struct {
 	Gate      GateCfg                `json:"gate"`
 	Upstreams []UpstreamCfg          `json:"upstreams"`
 	Aliases   map[string][][2]string `json:"aliases"`
+	// TUI 显示窗口 (扁平顶层键, 不嵌套): 速度平均/峰值统计窗, 与 active 分块采样时间尺度。
+	RateWindowMs  int `json:"rate_window_ms"`
+	BlockWindowMs int `json:"block_window_ms"`
 }
 
 // GateCfg 是所有上游共用的门控参数。
@@ -170,6 +173,13 @@ func loadConfigOpt(path string, lenient bool) (*Config, error) {
 	}
 	if c.LogPath == "" {
 		c.LogPath = "var/requests.jsonl"
+	}
+	// TUI 显示窗口缺省: 速度窗 1h, active 分块采样时间尺度 35s (rowStatTau0)。
+	if c.RateWindowMs <= 0 {
+		c.RateWindowMs = 3600000
+	}
+	if c.BlockWindowMs <= 0 {
+		c.BlockWindowMs = 35000
 	}
 	// 额度组: 同一上游里模型 id 唯一; 声明了 models 的上游, 别名引用的模型必须在表内
 	// (没列出的模型属于哪个组无从谈起, 早报错好过静默落进默认组)。

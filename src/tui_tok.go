@@ -15,11 +15,11 @@ const (
 // 模型/路由表的吞吐窗口: 最近 1h (算法见 rate.go, 分母是整笔请求耗时)。
 const tuiTokWindow = time.Hour
 
-// addTok 追加一个采样, 并裁掉超出 1h 窗口的过期样本。
-func addTok(pts []tokPoint, p tokPoint, now time.Time) []tokPoint {
+// addTok 追加一个采样, 并裁掉超出 win 窗口的过期样本。
+func addTok(pts []tokPoint, p tokPoint, now time.Time, win time.Duration) []tokPoint {
 	pts = append(pts, p)
 	start := 0
-	for start < len(pts) && now.Sub(pts[start].ts) > tuiTokWindow {
+	for start < len(pts) && now.Sub(pts[start].ts) > win {
 		start++
 	}
 	return pts[start:]

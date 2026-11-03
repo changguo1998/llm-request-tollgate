@@ -18,6 +18,7 @@ var gateLabels = []string{
 	"interval_ms", "sem_wait_ms", "queue_wait_ms",
 	"concurrency_lock_ms", "quota_lock_ms", "breaker_lock_ms",
 	"lowperf_window_ms", "lowperf_peak_max", "lowperf_avg_max", "lowperf_ttfb_max_ms", "lowperf_lock_ms",
+	"rate_window_ms", "block_window_ms",
 	"retry_backoff_ms",
 }
 
@@ -34,11 +35,16 @@ func gateStep(i int) int {
 		return 1
 	case 9:
 		return 1000
+	case 11:
+		return 600000 // rate_window_ms: 每次 10 分钟
+	case 12:
+		return 5000 // block_window_ms: 每次 5 秒
 	}
 	return 0
 }
 
-// gateField 取/设一个 gate 参数 (i 是 gateLabels 的下标)。
+// gateField 取/设一个 gate 参数 (i 是 gateLabels 的下标);
+// 11/12 是扁平顶层窗口参数 (rate/block), 不走 GateCfg。
 func (e *tuiEditor) gateField(i int) int {
 	g := e.gate
 	switch i {
@@ -64,6 +70,10 @@ func (e *tuiEditor) gateField(i int) int {
 		return g.LowPerfTtfbMaxMs
 	case 10:
 		return g.LowPerfLockMs
+	case 11:
+		return e.rateWinMs
+	case 12:
+		return e.blockWinMs
 	}
 	return 0
 }
@@ -92,13 +102,26 @@ func (e *tuiEditor) loadGate() {
 		return
 	}
 	var raw struct {
-		Gate GateCfg `json:"gate"`
+		Gate          GateCfg `json:"gate"`
+		RateWindowMs  int     `json:"rate_window_ms"`
+		BlockWindowMs int     `json:"block_window_ms"`
 	}
 	if err := json.Unmarshal(b, &raw); err != nil {
 		e.gateErr = err.Error()
 		return
 	}
 	e.gate = normGate(raw.Gate)
+	// 扁平顶层窗口: 0=缺省 (速度窗 1h, 分块采样 35s)。
+	if raw.RateWindowMs > 0 {
+		e.rateWinMs = raw.RateWindowMs
+	} else {
+		e.rateWinMs = 3600000
+	}
+	if raw.BlockWindowMs > 0 {
+		e.blockWinMs = raw.BlockWindowMs
+	} else {
+		e.blockWinMs = 35000
+	}
 	e.gateErr = ""
 }
 
@@ -145,6 +168,12 @@ func (e *tuiEditor) adjustGate(delta int) {
 	case 10:
 		v = clampInt(v, 1000, 86400000)
 		e.gate.LowPerfLockMs = v
+	case 11:
+		v = clampInt(v, 60000, 86400000)
+		e.rateWinMs = v
+	case 12:
+		v = clampInt(v, 1000, 86400000)
+		e.blockWinMs = v
 	}
 	e.gateDirty = true
 	e.message = gateLabels[i] + " = " + strconv.Itoa(v)
@@ -204,6 +233,10 @@ func (e *tuiEditor) setGatePrompt(i int, text string) {
 		e.gate.LowPerfTtfbMaxMs = n // 0 = 关闭高延迟判定
 	case 10:
 		e.gate.LowPerfLockMs = n
+	case 11:
+		e.rateWinMs = n
+	case 12:
+		e.blockWinMs = n
 	}
 	e.gateDirty = true
 	e.message = gateLabels[i] + " = " + strconv.Itoa(n)
@@ -212,7 +245,7 @@ func (e *tuiEditor) setGatePrompt(i int, text string) {
 // marshalConfig 按固定的顶层顺序写回配置文件: 手写 JSON 是因为 map 会把键排序,
 // 让整份配置产生无关的 diff。raw 里没认识的键按字典序补在最后, 不丢数据。
 func marshalConfig(top map[string]json.RawMessage) ([]byte, error) {
-	known := []string{"listen", "log_path", "timeouts", "gate", "upstreams", "aliases"}
+	known := []string{"listen", "log_path", "timeouts", "gate", "rate_window_ms", "block_window_ms", "upstreams", "aliases"}
 	rest := make([]string, 0)
 	for k := range top {
 		seen := false
@@ -274,6 +307,12 @@ func (e *tuiEditor) saveGate() error {
 		return err
 	}
 	top["gate"] = raw
+	if w, err := json.Marshal(e.rateWinMs); err == nil {
+		top["rate_window_ms"] = w
+	}
+	if w, err := json.Marshal(e.blockWinMs); err == nil {
+		top["block_window_ms"] = w
+	}
 	out, err := marshalConfig(top)
 	if err != nil {
 		return err

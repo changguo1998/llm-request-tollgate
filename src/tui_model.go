@@ -3,7 +3,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 )
@@ -24,6 +26,8 @@ type tuiModel struct {
 	events []routeEvent
 
 	window       time.Duration     // 回看窗口 (行只算窗口内的记录)
+	rateWin      time.Duration     // 速度平均/峰值窗口 (rate_window_ms)
+	blockWin     time.Duration     // active 分块采样时间尺度 (block_window_ms)
 	logPos       map[string]int64  // 每个日志文件读到哪
 	logRest      map[string][]byte // 每文件各自的半行缓冲 (读到一半的行)
 	scannedFiles map[string]bool   // 归档已整读, 不再重复扫
@@ -70,13 +74,39 @@ func (m *tuiModel) lastError() string {
 }
 
 func newTUIModel(cfgPath string) *tuiModel {
+	rateWin, blockWin := tuiWindowConfig(cfgPath)
 	m := &tuiModel{
 		cfgPath: cfgPath, start: time.Now(),
-		routes: map[string]*routeRow{},
-		window: tuiWindow,
+		routes:  map[string]*routeRow{},
+		window:  tuiWindow,
+		rateWin: rateWin, blockWin: blockWin,
 		logPos: map[string]int64{}, logRest: map[string][]byte{}, scannedFiles: map[string]bool{},
 	}
 	return m
+}
+
+// tuiWindowConfig 从配置文件的扁平顶层键读 TUI 窗口 (不依赖 key_env, TUI 只读 display 参数)。
+// 读不到或非正数时用缺省: 速度窗 1h, 分块采样时间尺度 35s。
+func tuiWindowConfig(cfgPath string) (rateWin, blockWin time.Duration) {
+	rateWin, blockWin = time.Hour, 35*time.Second
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return
+	}
+	var raw struct {
+		RateWindowMs  int `json:"rate_window_ms"`
+		BlockWindowMs int `json:"block_window_ms"`
+	}
+	if json.Unmarshal(b, &raw) != nil {
+		return
+	}
+	if raw.RateWindowMs > 0 {
+		rateWin = time.Duration(raw.RateWindowMs) * time.Millisecond
+	}
+	if raw.BlockWindowMs > 0 {
+		blockWin = time.Duration(raw.BlockWindowMs) * time.Millisecond
+	}
+	return
 }
 
 // loadCfg 从配置里取 监听地址 / 日志路径 (TUI 只读这两个字段)。

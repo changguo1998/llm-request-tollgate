@@ -126,16 +126,16 @@ func (m *tuiModel) absorb(line []byte) {
 		if r.DurationMs > 0 {
 			if r.Usage.Prompt+r.Usage.Completion > 0 {
 				row.TotalRate = addTok(row.TotalRate,
-					tokPoint{ts: ts, tok: r.Usage.Prompt + r.Usage.Completion, dur: r.DurationMs}, now)
+					tokPoint{ts: ts, tok: r.Usage.Prompt + r.Usage.Completion, dur: r.DurationMs}, now, m.rateWin)
 			}
 			if r.Bytes > 0 {
 				row.ByteRate = addTok(row.ByteRate,
-					tokPoint{ts: ts, tok: int(r.Bytes), dur: r.DurationMs}, now)
+					tokPoint{ts: ts, tok: int(r.Bytes), dur: r.DurationMs}, now, m.rateWin)
 			}
 		}
 		if r.DecodeMs > 0 && r.Usage.Completion > 0 {
 			row.DecodeRate = addTok(row.DecodeRate,
-				tokPoint{ts: ts, tok: r.Usage.Completion, dur: r.DecodeMs}, now)
+				tokPoint{ts: ts, tok: r.Usage.Completion, dur: r.DecodeMs}, now, m.rateWin)
 		}
 	}
 	if r.TtfbMs > 0 {

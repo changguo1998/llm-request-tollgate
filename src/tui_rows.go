@@ -149,10 +149,10 @@ func (m *tuiModel) blockRefRows(now time.Time) ([]int, bool) {
 }
 
 // rowTau 是全部能读到的请求的平均耗时 (从开始请求信号量到请求结束), 作高斯权重的时间尺度;
-// 日志里还没有请求时用 rowStatTau0 兜底。
+// 日志里还没有请求时用 block_window_ms 兜底 (缺省 35s)。
 func (m *tuiModel) rowTau() time.Duration {
 	if m.durN <= 0 || m.durSum <= 0 {
-		return rowStatTau0
+		return m.blockWin
 	}
 	return time.Duration(m.durSum/m.durN) * time.Millisecond
 }

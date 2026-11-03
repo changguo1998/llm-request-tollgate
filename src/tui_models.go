@@ -147,13 +147,13 @@ func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 		// 三种速度都写成 平均/峰值 (同一份 tokRate 口径: 平均=Σ体积/Σ时间, 峰值=单笔最高);
 		// 缺字段的格子显示 "-"(2B), 整列全空由 dropEmptyCols 收掉。
 		tps := func(pts []tokPoint) string {
-			if avg, peak, ok := tokRate(pts, time.Now(), tuiTokWindow); ok {
+			if avg, peak, ok := tokRate(pts, time.Now(), m.rateWin); ok {
 				return ftoa(avg, 1) + "/" + ftoa(peak, 1)
 			}
 			return "-"
 		}
 		bsp := func(pts []tokPoint) string {
-			if avg, peak, ok := tokRate(pts, time.Now(), tuiTokWindow); ok {
+			if avg, peak, ok := tokRate(pts, time.Now(), m.rateWin); ok {
 				return humanRate(avg) + "/" + humanRate(peak)
 			}
 			return "-"
