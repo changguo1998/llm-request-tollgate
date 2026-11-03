@@ -8,7 +8,7 @@ import (
 
 // tuiWindow 是默认回看窗口: 聚合只算这么久以内的日志 (与 -summary 的窗口口径一致)。
 const (
-	tuiWindow     = 6 * time.Hour
+	tuiWindow     = 3 * time.Hour
 	tuiScanWindow = 24 * time.Hour
 )
 
