@@ -6,7 +6,7 @@
 //     另进程看 GET /v1/state (-tui-state [base])。
 //  2. routes  按 逻辑名 x 上游 x 真实模型 聚合的路由历史 (请求数 / 错误 / fallback /
 //     token / 首字节 / 吞吐), 直接读 JSONL 日志 —— 日志是唯一事实来源。
-//  3. events  事件流: 锁 / 熔断 / 退避 / fallback / 错误 / 慢请求, 倒序。
+//  3. events  事件流: 请求阶段战报 + 加锁 / 探测 / 解锁, 倒序。
 //
 // 用法:
 //

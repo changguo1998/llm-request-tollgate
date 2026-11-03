@@ -15,11 +15,12 @@ import (
 // 上游非 200); 全部失败时保留最近一次错误, 由 writeFailure 决定应答。
 func (s *serveState) attemptLoop() {
 	for _, at := range s.attempts {
-		// 进入这个候选: 展示状态跟着走 (换候选时 mark 收到失败码, 顺手记一条 fallback 事件)。
+		// 进入这个候选: 展示状态跟着走; 失败原因由下一次阶段切换的战报带出。
 		s.obs.attempt++
 		s.obs.up, s.obs.model, s.obs.group = at.up.ID, at.mod, at.group
-		s.obs.mark(0, "")
+		s.obs.mark(0)
 		if at.cd == nil {
+			s.obs.failNote("候选未启用")
 			s.noteFailure(fmt.Errorf("upstream %s has no scheduler", at.up.ID), at.up.ID, at.mod)
 			continue
 		}
@@ -28,6 +29,7 @@ func (s *serveState) attemptLoop() {
 			// 若这是恢复态 (锁已到期待探测通过): 后台顺手发起一笔恢复探测, 请求本身
 			// 仍照锁定规则进下一个候选, 不等待结果。
 			s.app.kickRecovery(at.cd, at.mod, at.group)
+			s.obs.failNote(lockNoteText(reason, left))
 			s.noteFailure(fmt.Errorf("upstream %s locked for %s (%s)",
 				at.up.ID, left.Round(time.Second), reason), at.up.ID, at.mod)
 			s.noteLeft(left)
@@ -36,6 +38,7 @@ func (s *serveState) attemptLoop() {
 		}
 		if paused, left := at.cd.paused(at.mod); paused {
 			// 该模型正在退避: 不进它的队列白等 (退避比排队预算长), 直接换候选。
+			s.obs.failNote("退避 " + durStr(left))
 			s.noteFailure(fmt.Errorf("upstream %s/%s backing off for %s",
 				at.up.ID, at.mod, left.Round(time.Second)), at.up.ID, at.mod)
 			s.noteLeft(left)
@@ -76,6 +79,7 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 		s.queueMs += qms
 		if !ok {
 			s.gateReject = why
+			s.obs.failNote(acquireFailNote(at, why))
 			s.lastUpID, s.lastMod = at.up.ID, at.mod
 			s.failed++
 			if why == "locked" {
@@ -95,7 +99,7 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 			at.cd.finish(kind, false)
 			a.recordGenericFailure(at.cd, at.mod, s.gate)
 			s.noteFailure(rerr, at.up.ID, at.mod)
-			s.obs.mark(-1, rerr.Error())
+			s.obs.mark(-1)
 			continue
 		}
 		s.obs.stage(stageRecv)
@@ -103,7 +107,7 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 			b, berr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			at.cd.finish(kind, false)
-			s.obs.mark(resp.StatusCode, "")
+			s.obs.mark(resp.StatusCode)
 			moveOn := a.classifyFailure(at, kind, resp, b, s.gate)
 			s.lastErr = fmt.Errorf("upstream %s returned %d", at.up.ID, resp.StatusCode)
 			s.lastStatus, s.lastHdr, s.lastBody = resp.StatusCode, resp.Header.Clone(), b
@@ -164,4 +168,39 @@ func (s *serveState) noteLeft(left time.Duration) {
 	if left > s.gateLeft {
 		s.gateLeft = left
 	}
+}
+
+// acquireFailNote 把取资格失败的原因写成阶段战报里的一句旧结果。
+func acquireFailNote(at attempt, why string) string {
+	switch why {
+	case "locked":
+		if _, left, reason := at.cd.locked(at.mod, at.group); left > 0 {
+			return lockNoteText(reason, left)
+		}
+		return "命中锁"
+	case "backoff_timeout":
+		return "退避超时"
+	case "sem_timeout":
+		return "等信号量超时"
+	case "queue_timeout":
+		return "排队超时"
+	case "canceled":
+		return "客户端取消"
+	}
+	if why == "" {
+		return "候选失败"
+	}
+	return why
+}
+
+// lockNoteText 是锁原因 + 剩余时间的统一写法 (阶段战报与候选预检共用)。
+func lockNoteText(reason string, left time.Duration) string {
+	name := "额度锁"
+	switch reason {
+	case "breaker":
+		name = "熔断锁"
+	case lowPerfReason:
+		name = "低性能锁"
+	}
+	return "命中" + name + " " + durStr(left)
 }

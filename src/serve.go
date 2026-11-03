@@ -95,7 +95,6 @@ type serveState struct {
 	lastMod    string
 
 	finalStatus int
-	finalTtfb   int64
 }
 
 // newServeState 读请求体并建好观测面; 请求本身不合法时直接应答并返回 nil。
@@ -131,7 +130,7 @@ func newServeState(a *App, w http.ResponseWriter, r *http.Request, isResponses b
 	flowID := a.flowStart(logical, r.Header.Get("X-Tollgate-Source"), r.URL.Path, stream)
 	return &serveState{
 		app: a, w: w, r: r,
-		obs:         &flowObs{a: a, id: flowID, logical: logical, slowMs: 30000},
+		obs:         &flowObs{a: a, id: flowID, logical: logical},
 		flowID:      flowID,
 		reqStart:    reqStart,
 		logical:     logical,
@@ -146,7 +145,7 @@ func newServeState(a *App, w http.ResponseWriter, r *http.Request, isResponses b
 func (s *serveState) run() {
 	defer func() {
 		// 退出顺序: 先按实际结局刷新展示状态, 再把这笔从"进行中"表里摘掉。
-		s.obs.finish(s.finalStatus, s.finalTtfb)
+		s.obs.finish(s.finalStatus)
 		s.app.flowEnd(s.flowID)
 	}()
 	if !s.pickAttempts() {
@@ -181,10 +180,12 @@ func (s *serveState) pickAttempts() bool {
 	}
 	s.app.mu.RUnlock()
 	if !aliasOK {
+		s.finalStatus = http.StatusNotFound
 		writeError(s.w, http.StatusNotFound, "model_not_found", "unknown model: "+s.logical)
 		return false
 	}
 	if len(s.attempts) == 0 {
+		s.finalStatus = http.StatusNotFound
 		writeError(s.w, http.StatusNotFound, "model_not_found",
 			"model "+s.logical+" has no configured upstream")
 		return false
@@ -195,7 +196,7 @@ func (s *serveState) pickAttempts() bool {
 // baseLog 填所有日志行共有的请求侧字段。
 func (s *serveState) baseLog() logRec {
 	return logRec{
-		Ts: time.Now().Format(time.RFC3339Nano), Logical: s.logical,
+		Ts: time.Now().Format(time.RFC3339Nano), Logical: s.logical, Req: s.flowID,
 		Path: s.r.URL.Path, Stream: s.stream,
 		Queued: s.queueMs >= 5, QueueMs: s.queueMs, SemMs: s.semMs,
 		Client: s.r.RemoteAddr, UA: s.r.Header.Get("User-Agent"),

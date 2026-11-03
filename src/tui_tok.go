@@ -39,10 +39,11 @@ type routeRow struct {
 	First, Last time.Time
 }
 
-// routeEvent 是路由历史里值得单独看一眼的一条 (从日志逐行还原)。
+// routeEvent 是路由历史里值得单独看一眼的一条 (观测面事件或从日志逐行还原)。
 type routeEvent struct {
 	Ts       time.Time
-	Kind     string // error | fallback | gate | slow | ok
+	Req      uint64 // 请求编号 (0 = 不挂某笔请求的锁 / 探测 / 启动事件)
+	Kind     string // stage | error | gate | queue | lock | unlock | probe | ok | start | reload
 	Logical  string
 	Upstream string
 	Model    string

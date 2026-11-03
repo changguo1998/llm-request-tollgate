@@ -87,6 +87,31 @@ func TestHTTPRouteAndPayloadErrors(t *testing.T) {
 	}
 }
 
+// 模型名解析失败也要有收尾事件: 状态码 404, 不能误报 200。
+func TestUnknownModelEmitsErrorEvent(t *testing.T) {
+	app := newTestApp(t, "http://127.0.0.1:1/v1", GateCfg{}, nil)
+	proxy := httptest.NewServer(app)
+	defer proxy.Close()
+	resp, err := http.Post(proxy.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"nope"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	evs, _ := app.eventsSince(0)
+	if len(evs) == 0 {
+		t.Fatal("应有一条收尾事件")
+	}
+	last := evs[len(evs)-1]
+	if last.Kind != "error" || last.Msg != "候选链结束, 状态码 404" {
+		t.Errorf("未知模型应记 404 收尾事件, 得到 %+v", last)
+	}
+	if last.Req == 0 || last.Logical != "nope" {
+		t.Errorf("收尾事件应挂请求编号与逻辑名, 得到 %+v", last)
+	}
+}
+
 // 观测面走完整 HTTP 服务: /v1/models 只给逻辑名 (GET 之外 405), /v1/state 给得出观测载荷。
 func TestHTTPServeModelsAndState(t *testing.T) {
 	app := newTestApp(t, "http://127.0.0.1:1/v1", GateCfg{}, nil)

@@ -12,7 +12,7 @@ import (
 
 const (
 	viewVer     = "tollgate-state/1" // 观测面版本 (TUI 用它判断对端是不是这个接口)
-	viewEvents  = 256                // 事件环容量
+	viewEvents  = 2048               // 事件环容量 (阶段事件每笔数条, 环要大些才接得住一轮)
 	viewActives = 512                // 进行中请求的上限 (防泄漏兜底, 正常远低于此)
 )
 
@@ -57,11 +57,14 @@ type flow struct {
 	stageDur [stageCount]int64 // 各阶段已结算的累计耗时 (纳秒, 下标 = stage*)
 }
 
-// viewEvent 是事件流的一条: 调度器动作 + 每笔请求的结局 (由引擎侧发出, 不经日志回读)。
+// viewEvent 是事件流的一条: 调度器动作 + 每笔请求的阶段与结局 (由引擎侧发出, 不经日志回读)。
+// Req = 请求编号 (flow.ID, 0 = 这条事件不挂在某笔请求上, 如锁 / 探测 / 启动);
+// 有 Req 的事件同时带 Logical, 没有 Req 但有 Upstream/Model 的事件按 供应商/模型 显示。
 type viewEvent struct {
 	Seq      uint64 `json:"seq"`
 	Ts       string `json:"ts"`
-	Kind     string `json:"kind"` // start | lock | unlock | fallback | gate | error | slow | ok | reload
+	Kind     string `json:"kind"` // stage | start | lock | unlock | gate | error | ok | probe | reload
+	Req      uint64 `json:"req,omitempty"`
 	Logical  string `json:"logical,omitempty"`
 	Upstream string `json:"upstream,omitempty"`
 	Model    string `json:"model,omitempty"`
@@ -111,7 +114,6 @@ type pulse struct {
 	Cands     []candView  `json:"cands"`
 	Events    []viewEvent `json:"events"`  // 序号 > 请求里的 since 的那些
 	MaxSeq    uint64      `json:"max_seq"` // 下次轮询带它作 since
-	SlowMs    int64       `json:"slow_ms"` // 慢请求告警线 (TUI 用同一口径)
 	MissingAt string      `json:"missing_at,omitempty"`
 }
 

@@ -193,7 +193,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
   (每上游一条: 队列长 / 在飞 / 并发上限 / 是否在试探 / 连续错误数 / 退避剩余 / 锁剩余
   / 锁原因 / 各记账组的额度锁 (`groups`: 组名 + 锁剩余, 按配置顺序) / 模型级定时锁
   (`models[].why`: `breaker` 熔断 / `lowperf` 低性能) / 距下次节拍), `events` (事件数组),
-  `max_seq`, `slow_ms`.
+  `max_seq`.
 - `active` 每笔: `id` / `logical` / `source` / `path` / `stream` / `start` / `upstream` /
   `backend` / `stage` / `attempt` / `gate`; 接收中的流式请求另带 `recv_tok` (已收到的
   输出 token 估计数)、`recv_bytes` (已转发的响应字节数) 与 `recv_start` (首字节到达时刻,
@@ -202,8 +202,11 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
   `segs` (各阶段已结算的累计耗时, 秒, 下标 =
   `stage`)、`cur_at` (当前阶段进入时刻, Unix 毫秒, TUI 用它现算正在走的那一段) 与
   `max_stage` (到过的最远阶段, TUI 据此决定写几段).
-- 事件 `kind`: `start` / `lock` / `unlock` / `fallback` / `gate` / `error` / `slow` /
-  `ok` / `reload`.
+- `events` 每条: `seq` / `ts` / `kind` / `req` (本进程内的请求编号, 省略 = 不挂某笔请求) /
+  `logical` / `upstream` / `model` / `msg`. `kind`: `stage` (请求阶段战报) / `ok` / `error`
+  (收尾) / `gate` (进入退避) / `lock` / `unlock` / `probe` / `start` / `reload`.
+  阶段战报与收尾带 `req` + `logical`; 锁 / 探测 / 启动没有 `req`, 消费方按 `upstream` /
+  `model` 显示. 仅仅首字节慢、没有触发锁的请求不发事件.
 - 其余方法返回 405.
 
 ## 7. JSONL 请求日志 (每行一笔)
@@ -214,6 +217,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 | 字段 | 含义 |
 |---|---|
 | `ts` | 结束时刻 (RFC3339Nano) |
+| `req` | 本进程内的请求编号 (与 `/v1/state` 事件的 `req` 对齐; 重启后从头计, 可省略) |
 | `logical` | 请求的逻辑模型名 |
 | `upstream` | 实际服务的上游 id |
 | `model` | 实际服务的真实模型 id |

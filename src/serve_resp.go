@@ -84,7 +84,7 @@ func (s *serveState) forward() {
 		a.notePerfRequest(s.servedUp.ID, realModel, completion, decodeMs, ttfbMs)
 	}
 
-	s.finalStatus, s.finalTtfb = status, ttfbMs
+	s.finalStatus = status
 	rec := s.baseLog()
 	rec.Upstream, rec.Model = s.servedUp.ID, realModel
 	rec.Status, rec.Usage, rec.Missing = status, usage, missing

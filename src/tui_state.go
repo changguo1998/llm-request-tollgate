@@ -34,7 +34,7 @@ func (m *tuiModel) pollState(app *App, since uint64) uint64 {
 		return since
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	var p pulse
 	if err := json.Unmarshal(b, &p); err != nil {
 		m.live, m.lastErr = false, "观测面返回异常: "+err.Error()
@@ -56,7 +56,7 @@ func (m *tuiModel) pollState(app *App, since uint64) uint64 {
 func (m *tuiModel) mergeEvents(evs []viewEvent) {
 	for _, e := range evs {
 		ts, _ := time.Parse(time.RFC3339Nano, e.Ts)
-		m.addEvent(routeEvent{Ts: ts, Kind: e.Kind, Logical: e.Logical, Upstream: e.Upstream,
+		m.addEvent(routeEvent{Ts: ts, Req: e.Req, Kind: e.Kind, Logical: e.Logical, Upstream: e.Upstream,
 			Model: e.Model, Msg: e.Msg})
 	}
 }

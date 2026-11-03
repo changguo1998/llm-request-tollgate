@@ -137,7 +137,6 @@ func (a *App) snapshot(since uint64) pulse {
 		Ver:    viewVer,
 		Listen: a.listenAddr(), Now: now.Format(time.RFC3339Nano),
 		Active: a.flowActives(), Cands: a.candViews(), Events: evs, MaxSeq: max,
-		SlowMs: 30000,
 	}
 }
 
@@ -180,7 +179,7 @@ func (a *App) startPulseLoop(path string) {
 			for _, c := range p.Cands {
 				busy := c.LockMs > 0 || c.PausedMs > 0
 				if prev, ok := seen[c.ID]; ok && prev && !busy {
-					a.evAdd("unlock", "", c.ID, "", "恢复: 锁/退避已到期")
+					a.evAdd("unlock", "", c.ID, "", "锁/退避到期, 恢复")
 				}
 				seen[c.ID] = busy
 			}

@@ -30,7 +30,7 @@ type gateState struct {
 // 熔断锁, 这一笔该换下一个候选; false 表示退避后重试同一候选。
 func (a *App) recordGenericFailure(c *cand, model string, g GateCfg) bool {
 	if !c.recordOther(model, g) {
-		a.evAdd("gate", "", c.id, model, "上游报错, 先退避再试")
+		a.evAdd("gate", "", c.id, model, "上游报错, 进入退避")
 		return false
 	}
 	a.addLockModel(c, model, "breaker", g.breakerLock())
@@ -40,7 +40,7 @@ func (a *App) recordGenericFailure(c *cand, model string, g GateCfg) bool {
 
 // addLockGroup 给额度组加锁并把锁状态落盘 —— 重启后仍在锁内。
 func (a *App) addLockGroup(c *cand, group, reason string, dur time.Duration) {
-	a.evAdd("lock", "", c.id, "", "加锁 额度限制 (组 "+groupLabel(group)+") "+durStr(dur))
+	a.evAdd("lock", "", c.id, "", "额度限制, 触发 额度锁 (组 "+groupLabel(group)+"), "+durStr(dur))
 	c.lockGroup(group, reason, dur)
 	if c.recoverProbe && recoverProbeable(reason) {
 		a.armLockRecovery(recoverRef{c: c, isModel: false, group: group, reason: reason}, time.Now().Add(dur))
@@ -50,7 +50,7 @@ func (a *App) addLockGroup(c *cand, group, reason string, dur time.Duration) {
 
 // addLockModel 给 upstream/model 加熔断锁并落盘 (只锁该模型, 同家别的模型照常发送)。
 func (a *App) addLockModel(c *cand, model, reason string, dur time.Duration) {
-	a.evAdd("lock", "", c.id, model, "加锁 连续错误到阈值, 熔断 "+durStr(dur))
+	a.evAdd("lock", "", c.id, model, "连错到阈值, 触发 熔断锁, "+durStr(dur))
 	c.lockModel(model, reason, dur)
 	if c.recoverProbe && recoverProbeable(reason) {
 		a.armLockRecovery(recoverRef{c: c, isModel: true, model: model, reason: reason}, time.Now().Add(dur))
@@ -62,9 +62,11 @@ func (a *App) addLockModel(c *cand, model, reason string, dur time.Duration) {
 // peak/avg 是低吞吐分支的峰值与平均 (tokens/s), latAvg 是高延迟分支的平均首字节时延
 // (ms); 哪个分支命中哪个非 0。
 func (a *App) addLockLowPerf(c *cand, model string, peak, avg, latAvg float64, dur time.Duration) {
-	a.evAdd("lock", "", c.id, model,
-		"加锁 低性能 (吞吐 峰 "+ftoa(peak, 1)+" / 均 "+ftoa(avg, 1)+" t/s, 平均首字节 "+
-			ftoa(latAvg, 0)+"ms) "+durStr(dur))
+	cause := "吞吐 峰 " + ftoa(peak, 1) + " / 均 " + ftoa(avg, 1) + " t/s"
+	if latAvg > 0 {
+		cause = "平均首字节 " + durStr(time.Duration(latAvg*float64(time.Millisecond)))
+	}
+	a.evAdd("lock", "", c.id, model, cause+", 触发 低性能锁, "+durStr(dur))
 	c.lockModel(model, lowPerfReason, dur)
 	if c.recoverProbe && recoverProbeable(lowPerfReason) {
 		a.armLockRecovery(recoverRef{c: c, isModel: true, model: model, reason: lowPerfReason}, time.Now().Add(dur))

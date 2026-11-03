@@ -53,6 +53,9 @@ func TestProxyForwardsAndRewritesModel(t *testing.T) {
 	if rec.Status != http.StatusOK || rec.Usage == nil || rec.Usage.Total != 5 || rec.Gate != "" {
 		t.Fatalf("日志不符: %+v", rec)
 	}
+	if rec.Req == 0 {
+		t.Errorf("日志行应带本进程的请求编号, 得到 %+v", rec)
+	}
 
 }
 

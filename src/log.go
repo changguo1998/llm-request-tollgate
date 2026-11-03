@@ -14,6 +14,7 @@ import (
 
 type logRec struct {
 	Ts           string  `json:"ts"`
+	Req          uint64  `json:"req,omitempty"` // 本进程内的请求编号 (与观测面事件对齐; 重启后从头计)
 	Logical      string  `json:"logical"`
 	Upstream     string  `json:"upstream"`
 	Model        string  `json:"model"`

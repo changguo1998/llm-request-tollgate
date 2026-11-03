@@ -149,14 +149,19 @@ func (m *tuiModel) absorb(line []byte) {
 		row.Last = ts
 	}
 
-	// 事件: 只挑值得看的 (闸门挡下 / 错误 / fallback / 锁跳过 / 慢 / 极慢的 ok)。
+	// 事件: 只挑改变了程序状态的那些 (闸门挡下 / 错误 / 换候选 / 排队); 仅仅首字节慢
+	// 而没有触发任何锁的请求不留事件, 低性能锁由锁事件自己记。
+	cand := ""
+	if c := candName(r.Upstream, r.Model); c != "" {
+		cand = c + " " // 第 2 页没有单独的 上游/模型 列, 候选写进文案
+	}
 	switch {
 	case r.Gate != "":
-		m.addEvent(routeEvent{Ts: ts, Kind: "gate", Logical: r.Logical, Upstream: r.Upstream,
+		m.addEvent(routeEvent{Ts: ts, Req: r.Req, Kind: "gate", Logical: r.Logical, Upstream: r.Upstream,
 			Model: r.Model, Status: r.Status,
-			Msg: "被挡下: " + gateReason(r.Gate) + " (排队 " + itoa64(r.QueueMs) + "ms, 等并发 " + itoa64(r.SemMs) + "ms)"})
+			Msg: cand + "被挡下: " + gateReason(r.Gate) + " (排队 " + itoa64(r.QueueMs) + "ms, 等并发 " + itoa64(r.SemMs) + "ms)"})
 	case r.Status >= 400 || r.Err != "":
-		msg := "状态码 " + strconv.Itoa(r.Status)
+		msg := cand + "状态码 " + strconv.Itoa(r.Status)
 		if r.Err != "" {
 			msg += " " + tuiTrunc(r.Err, 60)
 		}
@@ -166,21 +171,16 @@ func (m *tuiModel) absorb(line []byte) {
 		if r.BackoffSkips > 0 {
 			msg += " (跳过退避 " + strconv.Itoa(r.BackoffSkips) + " 次)"
 		}
-		m.addEvent(routeEvent{Ts: ts, Kind: "error", Logical: r.Logical, Upstream: r.Upstream,
+		m.addEvent(routeEvent{Ts: ts, Req: r.Req, Kind: "error", Logical: r.Logical, Upstream: r.Upstream,
 			Model: r.Model, Status: r.Status, Msg: msg})
 	case r.Fallbacks > 0:
-		m.addEvent(routeEvent{Ts: ts, Kind: "fallback", Logical: r.Logical, Upstream: r.Upstream,
+		m.addEvent(routeEvent{Ts: ts, Req: r.Req, Kind: "fallback", Logical: r.Logical, Upstream: r.Upstream,
 			Model: r.Model, Status: r.Status,
-			Msg: "换了 " + strconv.Itoa(r.Fallbacks) + " 次候选, 最后落到 " + r.Upstream +
+			Msg: cand + "换了 " + strconv.Itoa(r.Fallbacks) + " 次候选" +
 				lockNote(r.LockSkips) + backoffNote(r.BackoffSkips)})
 	case r.Queued:
-		m.addEvent(routeEvent{Ts: ts, Kind: "queue", Logical: r.Logical, Upstream: r.Upstream,
-			Model: r.Model, Status: r.Status, Msg: "排队 " + itoa64(r.QueueMs) + "ms"})
-	}
-	if r.TtfbMs >= 10000 {
-		m.addEvent(routeEvent{Ts: ts, Kind: "slow", Logical: r.Logical, Upstream: r.Upstream,
-			Model: r.Model, Status: r.Status,
-			Msg: "首字节 " + itoa64(r.TtfbMs) + "ms, 吞吐 " + ftoa(r.Tps, 1) + " token/s"})
+		m.addEvent(routeEvent{Ts: ts, Req: r.Req, Kind: "queue", Logical: r.Logical, Upstream: r.Upstream,
+			Model: r.Model, Status: r.Status, Msg: cand + "排队 " + itoa64(r.QueueMs) + "ms"})
 	}
 }
 

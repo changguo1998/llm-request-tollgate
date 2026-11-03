@@ -88,6 +88,7 @@ func (a *App) runRecovery(c *cand, t recoverRef) {
 		c.settleRecovery(t, true, g)
 		return
 	}
+	a.evAdd("probe", "", c.id, modelID, "锁到期, 开始探测")
 
 	body := []byte(strings.ReplaceAll(probeBody, "{model}", modelID))
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
@@ -96,6 +97,7 @@ func (a *App) runRecovery(c *cand, t recoverRef) {
 		// 构造失败极罕见: 按失败重锁重挂, 下次再探。
 		until := c.settleRecovery(t, false, g)
 		a.armLockRecovery(t, until)
+		a.evAdd("probe", "", c.id, modelID, "探测失败 (请求无法构造), 重新加锁, "+durStr(recoverLockDur(t.reason, g)))
 		return
 	}
 	req.ContentLength = int64(len(body))
@@ -106,7 +108,7 @@ func (a *App) runRecovery(c *cand, t recoverRef) {
 	if err != nil {
 		until := c.settleRecovery(t, false, g)
 		a.armLockRecovery(t, until)
-		a.evAdd("probe", "", c.id, t.model, "探测失败 (传输错误), 重新加锁")
+		a.evAdd("probe", "", c.id, modelID, "探测失败 (传输错误), 重新加锁, "+durStr(recoverLockDur(t.reason, g)))
 		return
 	}
 	io.Copy(io.Discard, resp.Body)
@@ -114,10 +116,11 @@ func (a *App) runRecovery(c *cand, t recoverRef) {
 	ok := resp.StatusCode == http.StatusOK
 	if ok {
 		c.settleRecovery(t, true, g)
-		a.evAdd("probe", "", c.id, t.model, "探测通过, 解锁")
+		a.evAdd("probe", "", c.id, modelID, "探测通过, 解锁")
 		return
 	}
 	until := c.settleRecovery(t, false, g)
 	a.armLockRecovery(t, until)
-	a.evAdd("probe", "", c.id, t.model, "探测失败 (HTTP "+strconv.Itoa(resp.StatusCode)+"), 重新加锁")
+	a.evAdd("probe", "", c.id, modelID,
+		"探测失败 (HTTP "+strconv.Itoa(resp.StatusCode)+"), 重新加锁, "+durStr(recoverLockDur(t.reason, g)))
 }

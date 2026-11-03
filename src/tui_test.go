@@ -21,7 +21,7 @@ func TestViewFlowAndEvents(t *testing.T) {
 	}()
 
 	id := a.flowStart("m1", "agent-x", "/v1/chat/completions", true)
-	a.flowStage(id, "up1", "real-m1", stageSend, "退避 3s", 2)
+	a.flowStage(id, "up1", "real-m1", stageSend, "退避 3s", 2, "")
 	act := a.flowActives()
 	if len(act) != 1 {
 		t.Fatalf("进行中的请求应有一条, 得到 %d", len(act))
@@ -196,14 +196,14 @@ func TestTUIPollLogAcrossArchive(t *testing.T) {
 	if !gotArch || !gotCur {
 		t.Errorf("聚合不对: arch=%v cur=%v", gotArch, gotCur)
 	}
-	// 事件: 归档里的 500 与慢请求都要在
+	// 事件: 归档里的 500 要在; 仅仅首字节慢 (没有触发锁) 不再单独记事件。
 	var hasErr, hasSlow bool
 	for _, e := range m.events {
 		hasErr = hasErr || e.Kind == "error"
 		hasSlow = hasSlow || e.Kind == "slow"
 	}
-	if !hasErr || !hasSlow {
-		t.Errorf("事件流缺少 error/slow: %+v", m.events)
+	if !hasErr || hasSlow {
+		t.Errorf("事件流应只有 error、不再有 slow: %+v", m.events)
 	}
 	// 增量: 再追加一行, 只应新增一条记录 (不重复计旧行)
 	f, _ = os.OpenFile(cur, os.O_APPEND|os.O_WRONLY, 0o644)

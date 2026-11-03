@@ -438,6 +438,16 @@ func TestFlowTablesAndEventsScroll(t *testing.T) {
 	if !strings.Contains(out, "事件流") {
 		t.Error("events 页缺少标题")
 	}
+	for _, head := range []string{"编号/逻辑名", "事件"} {
+		if !strings.Contains(out, head) {
+			t.Errorf("events 页缺少列名 %q", head)
+		}
+	}
+	for _, gone := range []string{"类型", "说明"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("events 页不该再有列名 %q", gone)
+		}
+	}
 	if !strings.Contains(out, "状态码 200 #") {
 		t.Error("滚动到底应显出最后几行事件, 实际画成空白")
 	}

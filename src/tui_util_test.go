@@ -70,25 +70,39 @@ func TestHumanTokens(t *testing.T) {
 	}
 }
 
-// tuiEventTag: 已知类型换成中文短语并按类别上色, 未知类型原样显示 (暗色)。
-func TestTuiEventTag(t *testing.T) {
+// eventColor: 锁 / 错误红, 等待类黄, 成功绿, 阶段事件不染色, 其余暗色。
+func TestEventColor(t *testing.T) {
+	cases := map[string]string{
+		"error": tuiRed, "lock": tuiRed,
+		"fallback": tuiYell, "queue": tuiYell, "gate": tuiYell,
+		"ok": tuiGreen, "unlock": tuiGreen,
+		"stage": "", "probe": tuiDim, "start": tuiDim, "自定义": tuiDim,
+	}
+	for kind, want := range cases {
+		if got := eventColor(kind); got != want {
+			t.Errorf("%q 的颜色应为 %q, 得到 %q", kind, want, got)
+		}
+	}
+}
+
+// eventWho: 请求写 编号/逻辑名, 日志回放写 -/逻辑名, 模型写 供应商/模型,
+// 供应商写 供应商, 都没有就写 -。
+func TestEventWho(t *testing.T) {
+	m := newTUIModel("cfg")
 	cases := []struct {
-		kind string
-		col  string
-		name string
+		e    routeEvent
+		want string
 	}{
-		{"error", tuiRed, tuiEventKinds["error"]},
-		{"lock", tuiRed, tuiEventKinds["lock"]},
-		{"fallback", tuiYell, tuiEventKinds["fallback"]},
-		{"queue", tuiYell, tuiEventKinds["queue"]},
-		{"ok", tuiGreen, tuiEventKinds["ok"]},
-		{"unlock", tuiGreen, tuiEventKinds["unlock"]},
-		{"自定义", tuiDim, "自定义"},
+		{routeEvent{Req: 12, Logical: "gpt-5"}, "12/gpt-5"},
+		{routeEvent{Req: 12}, "12"},
+		{routeEvent{Logical: "gpt-5"}, "-/gpt-5"},
+		{routeEvent{Upstream: "ustc", Model: "m1"}, "ustc/m1"},
+		{routeEvent{Upstream: "ustc"}, "ustc"},
+		{routeEvent{}, "-"},
 	}
 	for _, c := range cases {
-		want := c.col + c.name + tuiReset
-		if got := tuiEventTag(c.kind); got != want {
-			t.Errorf("%q 的标签应为 %q, 得到 %q", c.kind, want, got)
+		if got := m.eventWho(c.e); got != c.want {
+			t.Errorf("%+v 的标识应为 %q, 得到 %q", c.e, c.want, got)
 		}
 	}
 }

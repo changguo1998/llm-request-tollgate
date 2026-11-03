@@ -24,7 +24,9 @@ func (c *tuiCanvas) splitLines() []string {
 	return strings.Split(s, "\r\n")
 }
 
-// drawEvents: 事件流 (最新在前); 连续同类事件折成一行 xN, 免得刷屏。
+// drawEvents: 事件流 (最新在前), 三列: 时间 / 编号/逻辑名 / 事件。
+// 标识列一套格式对应三类主体: 请求 编号/逻辑名, 模型 供应商/模型, 供应商 供应商;
+// 连续相同事件折成一行 xN, 免得刷屏。
 func (m *tuiModel) drawEvents(c *tuiCanvas, body int) {
 	evs := make([]routeEvent, 0, len(m.events))
 	evs = append(evs, m.events...)
@@ -40,19 +42,53 @@ func (m *tuiModel) drawEvents(c *tuiCanvas, body int) {
 		if reps > 1 {
 			msg += "  x" + strconv.Itoa(reps)
 		}
+		if col := eventColor(e.Kind); col != "" {
+			msg = col + msg + tuiReset
+		}
 		rows = append(rows, []string{
 			e.Ts.Format("15:04:05"),
-			tuiEventTag(e.Kind),
-			e.Logical,
-			m.upModel(e.Upstream, e.Model),
+			m.eventWho(e),
 			msg,
 		})
 		i += reps
 	}
 	drawTable(c, "事件流 (最新在前)", []tuiCol{
-		{"时间", 8, false, false, 0}, {"类型", 10, false, false, 0}, {"逻辑名", 20, true, false, 1},
-		{"上游/模型", 30, true, false, 2}, {"说明", 60, true, false, 0},
+		{"时间", 8, false, false, 4}, {"编号/逻辑名", 20, true, false, 2},
+		{"事件", 40, true, false, 0},
 	}, rows, m.scrollWindow(len(rows), max(1, body-4)), max(1, body-4))
+}
+
+// eventWho 是标识格: 请求写 编号/逻辑名, 模型写 供应商/模型, 供应商写 供应商;
+// 锁 / 探测 / 启动这类不挂请求的事件没有编号, 也不再显示逻辑名。
+func (m *tuiModel) eventWho(e routeEvent) string {
+	switch {
+	case e.Req > 0:
+		if e.Logical != "" {
+			return strconv.FormatUint(e.Req, 10) + "/" + e.Logical
+		}
+		return strconv.FormatUint(e.Req, 10)
+	case e.Logical != "":
+		return "-/" + e.Logical // 日志回放的事件: 没有请求编号
+	case e.Upstream != "" || e.Model != "":
+		return m.upModel(e.Upstream, e.Model)
+	}
+	return "-"
+}
+
+// eventColor 给事件正文上色 (类型列已去掉, 靠颜色保住扫读时的层次):
+// 阶段事件不上色 (量最大, 保持素净); 锁 / 错误红, 等待类黄, 解锁 / 成功绿, 其余暗色。
+func eventColor(kind string) string {
+	switch kind {
+	case "error", "lock":
+		return tuiRed
+	case "fallback", "queue", "gate":
+		return tuiYell
+	case "ok", "unlock":
+		return tuiGreen
+	case "stage":
+		return ""
+	}
+	return tuiDim
 }
 
 // upName 给上游名上它的专属色; 空串原样返回。
@@ -78,34 +114,10 @@ func (m *tuiModel) upModel(up, model string) string {
 	return m.upName(up) + "/" + model
 }
 
-// sameEvent 判断两条事件能不能折叠成一行 (同类 + 同路由 + 同文案)。
+// sameEvent 判断两条事件能不能折叠成一行 (同请求 + 同类 + 同路由 + 同文案)。
 func sameEvent(a, b routeEvent) bool {
-	return a.Kind == b.Kind && a.Logical == b.Logical && a.Upstream == b.Upstream &&
-		a.Model == b.Model && a.Msg == b.Msg
-}
-
-// tuiEventKinds 把内部事件名换成屏幕上给的中文 (内部名字保持英文, 便于对日志)。
-var tuiEventKinds = map[string]string{
-	"start": "启动", "reload": "重载", "ok": "正常", "error": "错误",
-	"fallback": "换候选", "gate": "闸门", "queue": "排队", "slow": "慢",
-	"lock": "加锁", "unlock": "解锁", "breaker": "熔断", "probe": "探测",
-}
-
-// tuiEventTag 给事件类型上色; 窄终端不依赖颜色也能读。
-func tuiEventTag(kind string) string {
-	name, ok := tuiEventKinds[kind]
-	if !ok {
-		name = kind
-	}
-	switch kind {
-	case "error", "gate", "lock", "breaker":
-		return tuiRed + name + tuiReset
-	case "fallback", "slow", "queue":
-		return tuiYell + name + tuiReset
-	case "ok", "unlock":
-		return tuiGreen + name + tuiReset
-	}
-	return tuiDim + name + tuiReset
+	return a.Req == b.Req && a.Kind == b.Kind && a.Logical == b.Logical &&
+		a.Upstream == b.Upstream && a.Model == b.Model && a.Msg == b.Msg
 }
 
 // routeRows 按最后使用时间降序 (最近用过的排最上面); 同一时刻的按请求数兜底。

@@ -9,9 +9,15 @@ import (
 	"time"
 )
 
+// evAdd 记一条不挂在某笔请求上的事件 (锁 / 探测 / 解锁 / 启动 / 热载)。
 func (a *App) evAdd(kind, logical, upstream, model, msg string) {
+	a.evAddReq(0, kind, logical, upstream, model, msg)
+}
+
+// evAddReq 记一条事件; req = 请求编号, 0 = 不挂请求。两条路共用同一个环形缓冲与序号。
+func (a *App) evAddReq(req uint64, kind, logical, upstream, model, msg string) {
 	e := viewEvent{
-		Ts: time.Now().Format(time.RFC3339Nano), Kind: kind, Logical: logical,
+		Ts: time.Now().Format(time.RFC3339Nano), Kind: kind, Req: req, Logical: logical,
 		Upstream: upstream, Model: model, Msg: msg,
 	}
 	a.evMu.Lock()
@@ -57,28 +63,134 @@ func (a *App) flowStart(logical, source, path string, stream bool) uint64 {
 
 // flowStage 更新一笔进行中请求的展示状态; up/mod 为空表示不改这两列。
 // gate 由调用方先算好 (读 cand 的锁/节拍), 这里只写展示字段, 不碰调度。
-func (a *App) flowStage(id uint64, up, mod string, stage int, gate string, attempt int) {
+// note 是这次切换要带出的「旧阶段结果」(失败原因); 返回值 = 是否真的发了一条阶段事件,
+// 调用方据此决定要不要清空 note —— 静默过渡不发事件, 原因留给下一次切换。
+func (a *App) flowStage(id uint64, up, mod string, stage int, gate string, attempt int, note string) bool {
 	a.flowMu.Lock()
-	if f := a.flows[id]; f != nil {
-		now := time.Now()
-		if !f.stageAt.IsZero() && f.Stage >= 0 && f.Stage < stageCount {
-			f.stageDur[f.Stage] += now.Sub(f.stageAt).Nanoseconds()
-		}
-		f.Stage, f.stageAt = stage, now
-		// 已失败不是流程上的阶段 (候选链走完的结局), 不参与"到过哪一段"的记账;
-		// 回退到更早的阶段 (换候选) 也不该让已到过的段数缩回去。
-		if stage >= 0 && stage < stageCount && stage != stageFailed && stage > f.MaxStage {
-			f.MaxStage = stage
-		}
-		if up != "" {
-			f.Up = up
-		}
-		if mod != "" {
-			f.Model = mod
-		}
-		f.Gate, f.Attempt = gate, attempt
+	f := a.flows[id]
+	if f == nil {
+		a.flowMu.Unlock()
+		return false
 	}
+	now := time.Now()
+	oldStage, oldUp, oldMod := f.Stage, f.Up, f.Model
+	if !f.stageAt.IsZero() && f.Stage >= 0 && f.Stage < stageCount {
+		f.stageDur[f.Stage] += now.Sub(f.stageAt).Nanoseconds()
+	}
+	f.Stage, f.stageAt = stage, now
+	// 已失败不是流程上的阶段 (候选链走完的结局), 不参与"到过哪一段"的记账;
+	// 回退到更早的阶段 (换候选) 也不该让已到过的段数缩回去。
+	if stage >= 0 && stage < stageCount && stage != stageFailed && stage > f.MaxStage {
+		f.MaxStage = stage
+	}
+	if up != "" {
+		f.Up = up
+	}
+	if mod != "" {
+		f.Model = mod
+	}
+	f.Gate, f.Attempt = gate, attempt
+	text, said := stageMoveText(oldStage, oldUp, oldMod, stage, f.Up, f.Model, gate, note)
+	logical := f.Logical
 	a.flowMu.Unlock()
+	if said {
+		a.evAddReq(id, "stage", logical, "", "", text)
+	}
+	return said
+}
+
+// stageMoveText 写一条阶段切换的战报: 「旧阶段结果, 新阶段操作」。
+// 返回 said=false 表示这次切换不单独成事件 (失败回退只更新展示, 原因留给下一次切换)。
+func stageMoveText(oldStage int, oldUp, oldMod string, stage int, up, mod, gate, note string) (string, bool) {
+	oldC, newC := candName(oldUp, oldMod), candName(up, mod)
+	// 同一阶段、同一候选的重复上报 (acquire 会再报一次 sem) 不单独成事件。
+	if stage == oldStage && newC == oldC && note == "" {
+		return "", false
+	}
+	switch stage {
+	case stageSem:
+		if oldStage == stageParse {
+			return "收到请求, 等待信号量", true
+		}
+		head := note
+		if head == "" {
+			head = leaveText(oldStage, oldC)
+		}
+		if head == "" {
+			return "", false
+		}
+		if newC != "" && newC != oldC {
+			return head + ", 换到 " + newC + ", 等待信号量", true
+		}
+		return head + ", 重新等待信号量", true
+	case stageQueue:
+		if oldStage != stageSem {
+			return "", false
+		}
+		return "获得信号量, 加入频率控制队列", true
+	case stageModelWait:
+		if oldStage != stageQueue {
+			return "", false
+		}
+		text := "出频率控制队列, 加入 " + modelQueue(newC)
+		if isGateDetail(gate) {
+			text += " (" + gate + ")"
+		}
+		return text, true
+	case stageSend:
+		if oldStage == stageRecv {
+			return "", false // 非 2xx 回退标记: 失败原因在 note 里, 留给下一次切换
+		}
+		if oldStage != stageModelWait {
+			return "", false
+		}
+		return "出 " + modelQueue(oldC) + ", 发送请求", true
+	case stageRecv:
+		if oldStage != stageSend {
+			return "", false
+		}
+		return "收到响应头, 开始接收", true
+	case stageFailed:
+		return "", false // 传输失败只更新展示, 原因在下一次切换或收尾事件里写
+	}
+	return "", false
+}
+
+// leaveText 是旧阶段结束时的那半句 (没有失败 note 时用)。
+func leaveText(stage int, cand string) string {
+	switch stage {
+	case stageSem:
+		return "等信号量结束"
+	case stageQueue:
+		return "出频率控制队列"
+	case stageModelWait:
+		return "出 " + modelQueue(cand)
+	case stageSend:
+		return "已发出的请求失败"
+	case stageRecv:
+		return "响应失败"
+	case stageFailed:
+		return "候选失败"
+	}
+	return ""
+}
+
+// candName / modelQueue 把 上游/模型 拼成事件文案里的主语。
+func candName(up, mod string) string {
+	switch {
+	case up == "":
+		return mod
+	case mod == "":
+		return up
+	}
+	return up + "/" + mod
+}
+
+func modelQueue(cand string) string {
+	if cand == "" {
+		return "模型队列"
+	}
+	return cand + " 模型队列"
 }
 
 // flowLive 刷新「接收中」这一笔已收到的输出 token 数与字节数, 以及首字节时刻 (只写
@@ -99,34 +211,48 @@ type flowObs struct {
 	id      uint64
 	logical string
 
-	up      string // 当前候选 (换候选时记一条 fallback 事件)
+	up      string // 当前候选 (换候选时由阶段事件写清走向)
 	model   string // 当前候选的真实模型 id (换候选时一起更新)
 	group   string // 当前候选的额度组名 (查询组锁用; 换候选时一起更新)
 	attempt int
-	slowMs  int64 // 首字节超过它就另记一条 slow (0 = 不记)
+	note    string // 旧阶段结果 (失败 / 跳过原因), 逐次阶段切换时带出并清空
 	done    bool
 }
 
-// mark 刷新展示状态。status: 0 = 还没结论, -1 = 传输层失败, 其余为上游状态码。
-// 换到新候选时记一条 fallback 事件 (这条候选链的走向就是 TUI 要看的路由过程)。
-func (o *flowObs) mark(status int, msg string) {
-	if status != 0 {
-		o.a.evAdd("fallback", o.logical, o.up, o.model, firstLine(msg, status))
-	}
-	if status < 0 {
-		o.a.flowStage(o.id, o.up, o.model, stageFailed, "", o.attempt)
-		return
+// mark 刷新展示状态。status: 0 = 刚进入候选 (下一步取信号量), -1 = 传输层失败,
+// 其余为上游状态码 (该候选失败)。失败只记进 note: 由下一次阶段切换的战报写出来,
+// 避免同一次失败既发「换候选」又发「阶段切换」两条。
+func (o *flowObs) mark(status int) {
+	if status > 0 {
+		o.note = "收到 " + strconv.Itoa(status)
+	} else if status < 0 {
+		o.note = "连接失败"
 	}
 	st := stageSend
 	if status == 0 {
 		st = stageSem // 刚进入这个候选: 下一步就是取信号量
 	}
-	o.a.flowStage(o.id, o.up, o.model, st, o.gateNow(), o.attempt)
+	if status < 0 {
+		st = stageFailed
+	}
+	o.say(st)
 }
 
 // stage 把展示阶段推到调度器当前的步骤; acquire 的回调与发包前后调用它。
 func (o *flowObs) stage(st int) {
-	o.a.flowStage(o.id, "", "", st, o.gateNow(), o.attempt)
+	o.say(st)
+}
+
+// say 推进展示阶段; 只有真的记了一条阶段事件才清空 note (静默过渡要把原因留住)。
+func (o *flowObs) say(st int) {
+	if o.a.flowStage(o.id, o.up, o.model, st, o.gateNow(), o.attempt, o.note) {
+		o.note = ""
+	}
+}
+
+// failNote 写下一次阶段切换要带出的失败原因 (候选预检跳过 / 取资格失败)。
+func (o *flowObs) failNote(s string) {
+	o.note = s
 }
 
 // gateNow 是「这一笔现在卡在哪一步」: 模型锁 / 组额度锁 / 退避 / 出队节拍 / 已发出。
@@ -158,17 +284,6 @@ func (o *flowObs) gateNow() string {
 	return "已发出"
 }
 
-// firstLine 拼事件正文 (状态码优先, 没有就截断错误串)。
-func firstLine(msg string, status int) string {
-	if status > 0 {
-		return "状态码 " + strconv.Itoa(status)
-	}
-	if msg == "" {
-		return "连接失败"
-	}
-	return bodySnippet([]byte(msg), 120)
-}
-
 func (a *App) candOf(id string) *cand {
 	a.mu.RLock()
 	c := a.cands[id]
@@ -176,8 +291,9 @@ func (a *App) candOf(id string) *cand {
 	return c
 }
 
-// finish 是这笔请求的结局: 进事件流 (2xx 记 ok, 其余记 error; 慢请求另记一条)。
-func (o *flowObs) finish(status int, ttfbMs int64) {
+// finish 是这笔请求的结局: 进事件流 (2xx 记 ok 接收结束, 其余记 error 候选链结束)。
+// 只记状态变化: 仅仅首字节慢、但没触发任何锁的请求不在这里留痕。
+func (o *flowObs) finish(status int) {
 	if o.done {
 		return
 	}
@@ -186,13 +302,16 @@ func (o *flowObs) finish(status int, ttfbMs int64) {
 		status = 200 // 正常收尾 (含 4xx 透传之外的路径) 都算成功
 	}
 	if status >= 400 {
-		o.a.evAdd("error", o.logical, o.up, "", "状态码 "+strconv.Itoa(status))
+		msg := "候选链结束, 状态码 " + strconv.Itoa(status)
+		// 失败原因没被任何一次切换带出来时 (如唯一候选被锁到链尾) 补在收尾里;
+		// note 就是状态码本身时不重复写。
+		if o.note != "" && o.note != "收到 "+strconv.Itoa(status) {
+			msg += " (" + o.note + ")"
+		}
+		o.a.evAddReq(o.id, "error", o.logical, o.up, "", msg)
 		return
 	}
-	o.a.evAdd("ok", o.logical, o.up, "", "状态码 "+strconv.Itoa(status))
-	if o.slowMs > 0 && ttfbMs >= o.slowMs {
-		o.a.evAdd("slow", o.logical, o.up, "", "首字节 "+durStr(time.Duration(ttfbMs)*time.Millisecond))
-	}
+	o.a.evAddReq(o.id, "ok", o.logical, o.up, "", "接收结束, 状态码 "+strconv.Itoa(status))
 }
 
 // durStr 把时长写成屏幕上好读的形态 (时间段, 不是时刻): 前导的零段省掉 ——
