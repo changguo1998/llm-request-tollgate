@@ -262,6 +262,17 @@ func loadConfigOpt(path string, lenient bool) (*Config, error) {
 	if c.BlockWindowSec <= 0 {
 		c.BlockWindowSec = 35 // rowStatTau0 兜底
 	}
+	// 三项超时缺省: 旧配置/生成器可能没给扁平 `*_sec` (早期是嵌套 timeouts)。0 在
+	// idleConn 里会退化成"每次读写立即超时", 所以这里补回历史缺省, 不能留 0。
+	if c.ConnectSec <= 0 {
+		c.ConnectSec = 10
+	}
+	if c.ResponseHeaderSec <= 0 {
+		c.ResponseHeaderSec = 120
+	}
+	if c.StreamIdleSec <= 0 {
+		c.StreamIdleSec = 240
+	}
 	// 额度组: 同一上游里模型 id 唯一; 声明了 models 的上游, 别名引用的模型必须在表内
 	// (没列出的模型属于哪个组无从谈起, 早报错好过静默落进默认组)。
 	declared := map[string]map[string]bool{}

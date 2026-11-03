@@ -164,7 +164,11 @@ type idleConn struct {
 }
 
 func (c *idleConn) deadline() {
-	c.Conn.SetDeadline(time.Now().Add(time.Duration(c.a.streamIdlNs.Load())))
+	ns := c.a.streamIdlNs.Load()
+	if ns <= 0 {
+		return // 未配置流空闲超时 (或旧配置没给): 不设死线, 0 不能当成"立即超时"
+	}
+	c.Conn.SetDeadline(time.Now().Add(time.Duration(ns)))
 }
 
 func (c *idleConn) Read(b []byte) (int, error) {
