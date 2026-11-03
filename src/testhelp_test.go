@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newTestAppCfg 用现成的 Config 起 App: 补上日志路径、监听地址与超时 (测试里必备的非零值)。
@@ -54,20 +55,50 @@ func postJSON(t *testing.T, url, body string) (int, []byte) {
 	return resp.StatusCode, b
 }
 
-// lastLogRec 读最后一行请求日志。
-func lastLogRec(t *testing.T, app *App) logRec {
-	t.Helper()
+// readLastLog 读最后一行请求日志, 读到可解析记录返回 true (空文件/尾部空行不算)。
+func readLastLog(app *App) (logRec, bool) {
 	app.logMu.Lock()
 	path := app.logW.Name()
 	app.logMu.Unlock()
 	b, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatal(err)
+		return logRec{}, false
 	}
 	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
-	var rec logRec
-	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &rec); err != nil {
-		t.Fatalf("日志解析失败: %v", err)
+	for i := len(lines) - 1; i >= 0; i-- {
+		s := strings.TrimSpace(lines[i])
+		if s == "" {
+			continue
+		}
+		var rec logRec
+		if json.Unmarshal([]byte(s), &rec) == nil {
+			return rec, true
+		}
+	}
+	return logRec{}, false
+}
+
+// lastLogRec 立即读最后一行请求日志 (非流式请求在返回前已写日志, 可直接读)。
+func lastLogRec(t *testing.T, app *App) logRec {
+	t.Helper()
+	rec, ok := readLastLog(app)
+	if !ok {
+		t.Fatal("日志为空或最后一行不可解析")
 	}
 	return rec
+}
+
+// waitLogRec 轮询直到日志能读出最后一行 (处理流式请求收尾后才写日志的时序)。
+func waitLogRec(t *testing.T, app *App, timeout time.Duration) logRec {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if rec, ok := readLastLog(app); ok {
+			return rec
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("等待请求日志超时 (仍未写出行)")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

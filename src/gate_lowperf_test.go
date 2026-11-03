@@ -152,6 +152,10 @@ func TestProxyRecordsPerfSamples(t *testing.T) {
 	if nl != 1 {
 		t.Fatalf("流式成功后应记一笔首字节时延样本, 实为 %d 笔", nl)
 	}
+	// decode_ms 也应落进请求日志 (流式有解码段, 但要等 handler 收尾写完日志)。
+	if rec := waitLogRec(t, app, 2*time.Second); rec.DecodeMs <= 0 {
+		t.Errorf("流式请求的日志应带 decode_ms>0, 得到 %d", rec.DecodeMs)
+	}
 }
 
 // 低性能锁与熔断锁共用同一份落盘: 重启后按 reason=lowperf 恢复。
