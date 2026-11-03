@@ -4,6 +4,7 @@ package main
 
 import (
 	"strconv"
+	"strings"
 )
 
 // drawSettings 画设置页: 三列并排 —— 第 1 列 全局参数 + 供应商, 第 2 列 模型, 第 3 列 预览,
@@ -44,7 +45,13 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 	// ---- 第 1 列: 全局参数 + 供应商 ----
 	col1 := make([]string, 0, body)
 	col1 = append(col1, settingsTitle("全局参数", e.focus == 2))
-	// 字段左对齐; 值拆成数字+单位, 数字列右对齐 (小数点/最后一位对齐), 单位列固定。
+	// 标签左对齐; 冒号后补齐到固定数字列, 数字右对齐 (小数点/最后一位对齐), 单位第一字母对齐。
+	labelW := 0
+	for i := range gateLabels {
+		if w := tuiWidth(gateCN[i]); w > labelW {
+			labelW = w
+		}
+	}
 	numW := 0
 	for i := range gateLabels {
 		n, _ := e.gateNumUnit(i)
@@ -54,7 +61,8 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 	}
 	for i := range gateLabels {
 		n, u := e.gateNumUnit(i)
-		text := tuiIndent + gateCN[i] + ": " + tuiPadLeft(n, numW) + " " + u
+		pad := labelW - tuiWidth(gateCN[i])
+		text := tuiIndent + gateCN[i] + ": " + strings.Repeat(" ", pad) + tuiPadLeft(n, numW) + " " + u
 		if e.focus == 2 && i == e.gateSel {
 			if e.prompt != nil {
 				text = tuiEditBg + text + tuiReset // 正在 = 编辑: 蓝底强调
