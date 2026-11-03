@@ -193,5 +193,9 @@ func tuiTrunc(s string, w int) string {
 	if cut && w > 1 {
 		b.WriteString("~")
 	}
+	if cut && strings.Contains(s, "\x1b[") {
+		// 截断会把末尾的重置序列一起切掉, 补一个, 免得颜色串到后面的列。
+		b.WriteString(tuiReset)
+	}
 	return b.String()
 }

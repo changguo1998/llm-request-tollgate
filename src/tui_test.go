@@ -141,6 +141,9 @@ func TestTUIWidthAndTrunc(t *testing.T) {
 	if got := tuiTrunc("abcdef", 4); got != "abc~" {
 		t.Errorf("超长应截断并留 ~: %q", got)
 	}
+	if got := tuiTrunc(tuiRed+"宽宽宽宽"+tuiReset, 4); !strings.HasSuffix(got, tuiReset) {
+		t.Errorf("截断带颜色的单元格时要补重置序列, 得到 %q", got)
+	}
 	// 行总宽不超过画布: 这是"中文不再挤歪表"的回归点。
 	c := &tuiCanvas{cols: 20}
 	c.line("\x1b[1m" + strings.Repeat("宽", 30) + "\x1b[0m")
