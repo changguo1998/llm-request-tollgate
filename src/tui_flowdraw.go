@@ -115,14 +115,18 @@ func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 	m.drawWindow(c, full, max(1, body-2))
 }
 
-// colKeep 标出哪些列在 rows 里至少有一个非空值 (整列都空的列画出来只是空白)。
+// colKeep 标出哪些列在 rows 里至少有一个"有值"的格: 空串、0、- 都算空 ——
+// 于是整列全是 0 (如排队 / 连错都为零) 或全是 - 的列 (缺字段的速率) 会被整列收掉。
 func colKeep(cols []tuiCol, rows [][]string) []bool {
 	keep := make([]bool, len(cols))
 	for i := range keep {
 		for _, r := range rows {
-			if i < len(r) && strings.TrimSpace(r[i]) != "" {
-				keep[i] = true
-				break
+			if i < len(r) {
+				s := strings.TrimSpace(r[i])
+				if s != "" && s != "0" && s != "-" {
+					keep[i] = true
+					break
+				}
 			}
 		}
 	}

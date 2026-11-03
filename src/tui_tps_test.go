@@ -115,7 +115,8 @@ func TestRelayStreamCountsReasoning(t *testing.T) {
 	}
 }
 
-// 日志聚合层: 每笔请求的 completion token 与耗时进 1h 窗口, 非流式也算。
+// 日志聚合层: 每笔请求的 (prompt+completion) token 与耗时进 1h 窗口 (总吞吐),
+// 非流式也算; 没带 decode/bytes 的日志, 解码与字节速率不记样本。
 func TestModelRowsOneHourTokens(t *testing.T) {
 	m := newTUIModel("cfg")
 	now := time.Now()
@@ -129,8 +130,13 @@ func TestModelRowsOneHourTokens(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("应有一行, 得到 %d", len(rows))
 	}
-	avg, peak, ok := tokRate(rows[0].Tok, now.Add(2*time.Minute), tuiTokWindow)
-	if !ok || avg != 75 || peak != 100 {
-		t.Errorf("300 token / 4s 应为 平均 75 / 峰值 100, 得到 (%v, %v, %v)", avg, peak, ok)
+	r := rows[0]
+	avg, peak, ok := tokRate(r.TotalRate, now.Add(2*time.Minute), tuiTokWindow)
+	if !ok || avg != 80 || peak != 110 {
+		t.Errorf("(110+210) token / 4s 应为 平均 80 / 峰值 110, 得到 (%v, %v, %v)", avg, peak, ok)
+	}
+	if len(r.DecodeRate) != 0 || len(r.ByteRate) != 0 {
+		t.Errorf("没有 decode_ms / bytes 的日志不该产生解码/字节样本: len=%d/%d",
+			len(r.DecodeRate), len(r.ByteRate))
 	}
 }

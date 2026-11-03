@@ -708,7 +708,7 @@ func TestModelsColumnGroups(t *testing.T) {
 		"上游/模型",
 		"排队", "退避", "熔断", "连错",
 		"请求", "错误", "换候选",
-		"token", "缓存", "首字节", "吞吐",
+		"token", "缓存", "首字节", "解码", "总", "字节",
 		"最近",
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {

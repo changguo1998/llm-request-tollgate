@@ -140,20 +140,31 @@ func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 		paused := colorDur(r.PausedMs, tuiYell)
 		lock := colorDur(r.LockMs, tuiRed)
 		errs := colorCount(r.Errs)
-		ttfb, tps := "-", "-"
+		ttfb := "-"
 		if r.TtfbN > 0 {
 			ttfb = durStr(time.Duration(r.TtfbSum/int64(r.TtfbN)) * time.Millisecond)
 		}
-		if avg, peak, ok := tokRate(r.Tok, time.Now(), tuiTokWindow); ok {
-			// 一个格子里放两个数: 1h 平均 / 单笔峰值 (同一口径)。
-			tps = ftoa(avg, 1) + "/" + ftoa(peak, 1)
+		// 三种速度都写成 平均/峰值 (同一份 tokRate 口径: 平均=Σ体积/Σ时间, 峰值=单笔最高);
+		// 缺字段的格子显示 "-"(2B), 整列全空由 dropEmptyCols 收掉。
+		tps := func(pts []tokPoint) string {
+			if avg, peak, ok := tokRate(pts, time.Now(), tuiTokWindow); ok {
+				return ftoa(avg, 1) + "/" + ftoa(peak, 1)
+			}
+			return "-"
+		}
+		bsp := func(pts []tokPoint) string {
+			if avg, peak, ok := tokRate(pts, time.Now(), tuiTokWindow); ok {
+				return humanRate(avg) + "/" + humanRate(peak)
+			}
+			return "-"
 		}
 		// 与 modelCols 的顺序一一对应 (dropEmptyCols 按下标裁列)。
 		mrows = append(mrows, []string{
 			m.upModel(r.up, r.model),
 			strconv.Itoa(r.Queue), paused, lock, colorCount(r.Fails),
 			strconv.Itoa(r.Reqs), errs, strconv.Itoa(r.Fallbacks),
-			humanTokens(r.Total), humanTokens(r.Cached), ttfb, tps,
+			humanTokens(r.Total), humanTokens(r.Cached), ttfb,
+			tps(r.DecodeRate), tps(r.TotalRate), bsp(r.ByteRate),
 			mages(r.Last),
 		})
 	}
@@ -163,7 +174,9 @@ func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 
 // modelCols 是第 1 页模型/路由聚合表的列: 按类别从左到右排, 同类相邻 ——
 // 调度状态 (排队 / 退避 / 熔断锁 / 连续错误), 历史计数 (请求 / 错误 / 换候选),
-// 流量 (总 token / 缓存命中 / 首字节 / 吞吐), 时间 (最近一次)。
+// 流量 (总 token / 缓存命中 / 首字节 / 三种速度: 解码=completion/decode,
+// 总=(prompt+completion)/duration, 字节=bytes/duration), 时间 (最近一次)。
+// 三种速度各自一列, 都写 平均/峰值。
 // 全部按内容成长 (grow=true), 基准宽只贴标题/内容的典型宽度, 不留大补白 ——
 // 这样与第 1 页和其它表一样, 列与列之间视觉上只隔 1 格。
 func modelCols() []tuiCol {
@@ -173,7 +186,8 @@ func modelCols() []tuiCol {
 		{"熔断", 5, true, true, 4}, {"连错", 2, true, true, 2},
 		{"请求", 4, true, true, 0}, {"错误", 2, true, true, 0}, {"换候选", 4, true, true, 1},
 		{"token", 6, true, true, 3}, {"缓存", 5, true, true, 1},
-		{"首字节", 6, true, true, 3}, {"吞吐", 5, true, true, 1},
+		{"首字节", 6, true, true, 3},
+		{"解码", 11, true, true, 1}, {"总", 11, true, true, 0}, {"字节", 16, true, true, 1},
 		{"最近", 6, true, true, 2},
 	}
 }
@@ -181,17 +195,17 @@ func modelCols() []tuiCol {
 // modelRow 是第 1 页模型/路由聚合表的一行: 队列状态 (观测面) + 聚合统计 (日志, 按上游/模型求和,
 // 不区分逻辑名)。
 type modelRow struct {
-	up, model        string
-	Queue, Fails     int
-	PausedMs, LockMs int64
-	Reqs             int
-	Errs             int
-	Fallbacks        int
-	Total, Cached    int
-	TtfbSum          int64
-	TtfbN            int
-	Tok              []tokPoint
-	Last             time.Time
+	up, model                       string
+	Queue, Fails                    int
+	PausedMs, LockMs                int64
+	Reqs                            int
+	Errs                            int
+	Fallbacks                       int
+	Total, Cached                   int
+	TtfbSum                         int64
+	TtfbN                           int
+	DecodeRate, TotalRate, ByteRate []tokPoint
+	Last                            time.Time
 }
 
 // blank 判断这一行是否全无数据: 队列 / 退避 / 熔断 / 连错 / 请求 / 错误 / 换候选 /
@@ -199,7 +213,8 @@ type modelRow struct {
 func (r *modelRow) blank() bool {
 	return r.Queue == 0 && r.Fails == 0 && r.PausedMs == 0 && r.LockMs == 0 &&
 		r.Reqs == 0 && r.Errs == 0 && r.Fallbacks == 0 &&
-		r.Total == 0 && r.Cached == 0 && r.TtfbN == 0 && len(r.Tok) == 0 &&
+		r.Total == 0 && r.Cached == 0 && r.TtfbN == 0 &&
+		len(r.DecodeRate) == 0 && len(r.TotalRate) == 0 && len(r.ByteRate) == 0 &&
 		r.Last.IsZero()
 }
 
@@ -234,7 +249,9 @@ func (m *tuiModel) modelRows() []*modelRow {
 		r.Cached += rr.Cached
 		r.TtfbSum += rr.TtfbSum
 		r.TtfbN += rr.TtfbN
-		r.Tok = append(r.Tok, rr.Tok...)
+		r.DecodeRate = append(r.DecodeRate, rr.DecodeRate...)
+		r.TotalRate = append(r.TotalRate, rr.TotalRate...)
+		r.ByteRate = append(r.ByteRate, rr.ByteRate...)
 		if rr.Last.After(r.Last) {
 			r.Last = rr.Last
 		}

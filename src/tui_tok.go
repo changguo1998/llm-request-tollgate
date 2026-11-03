@@ -32,8 +32,11 @@ type routeRow struct {
 	Prompt, Cached, Total    int
 	TtfbSum                  int64
 	TtfbN                    int
-	Tok                      []tokPoint
-	First, Last              time.Time
+	// 三种速度的样本 (tokRate 平均/峰值): 分子/分母各不相同。
+	DecodeRate  []tokPoint // completion / decode_ms  (缺 decode 不记)
+	TotalRate   []tokPoint // (prompt+completion) / duration_ms
+	ByteRate    []tokPoint // response bytes / duration_ms
+	First, Last time.Time
 }
 
 // routeEvent 是路由历史里值得单独看一眼的一条 (从日志逐行还原)。
