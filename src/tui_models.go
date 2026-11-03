@@ -148,13 +148,13 @@ func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 		// 缺字段的格子显示 "-"(2B), 整列全空由 dropEmptyCols 收掉。
 		tps := func(pts []tokPoint) string {
 			if avg, peak, ok := tokRate(pts, time.Now(), m.rateWin); ok {
-				return ftoa(avg, 1) + "/" + ftoa(peak, 1)
+				return humanTPS(avg) + "/" + humanTPS(peak)
 			}
 			return "-"
 		}
 		bsp := func(pts []tokPoint) string {
 			if avg, peak, ok := tokRate(pts, time.Now(), m.rateWin); ok {
-				return humanRate(avg) + "/" + humanRate(peak)
+				return humanByte(avg) + "/" + humanByte(peak)
 			}
 			return "-"
 		}
@@ -187,7 +187,7 @@ func modelCols() []tuiCol {
 		{"请求", 4, true, true, 0}, {"错误", 2, true, true, 0}, {"换候选", 4, true, true, 1},
 		{"token", 6, true, true, 3}, {"缓存", 5, true, true, 1},
 		{"首字节", 6, true, true, 3},
-		{"解码", 11, true, true, 1}, {"总", 11, true, true, 0}, {"字节", 16, true, true, 1},
+		{"解码速率", 11, true, true, 1}, {"总速率", 11, true, true, 0}, {"下载速率", 16, true, true, 1},
 		{"最近", 6, true, true, 2},
 	}
 }

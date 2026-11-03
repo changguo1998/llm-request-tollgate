@@ -195,3 +195,26 @@ func humanRate(bps float64) string {
 }
 
 func itoa64(v int64) string { return strconv.FormatInt(v, 10) }
+
+// humanByte 把字节写成最简形式 (1024 进制, 不带 /s): 969B / 8.5K / 3.4M。
+func humanByte(v float64) string {
+	switch {
+	case v >= 1<<20:
+		return ftoa(v/(1<<20), 1) + "M"
+	case v >= 1<<10:
+		return ftoa(v/(1<<10), 1) + "K"
+	}
+	return itoa64(int64(v)) + "B"
+}
+
+// humanTPS 把吞吐 (tokens/s) 写成短形式: 小值 1 位小数, 千/百万进 K/M
+// (含输入的端到端速率动辄几万, 不缩写会把列撑破)。
+func humanTPS(v float64) string {
+	switch {
+	case v >= 1_000_000:
+		return ftoa(v/1e6, 1) + "M"
+	case v >= 1_000:
+		return ftoa(v/1e3, 1) + "K"
+	}
+	return ftoa(v, 1)
+}
