@@ -14,7 +14,7 @@ help:
 	@echo "  build       编译代理二进制"
 	@echo "  vet         静态检查 (go vet ./...)"
 	@echo "  test        单元与端到端测试 (go test ./...)"
-	@echo "  selftest    全量自测 (假上游, 17 组用例, 见 test/run_selftest.sh)"
+	@echo "  selftest    全量自测 (假上游, 16 组用例, 见 test/run_selftest.sh)"
 	@echo "  healthcheck 自检 (二进制/配置/端口; key_env 密钥请先 export)"
 	@echo "  install     安装 systemd 用户服务 (需先有 deploy/tollgate.service)"
 	@echo "  fmt         gofmt 检查 (gofmt -l .)"

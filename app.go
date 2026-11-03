@@ -17,7 +17,7 @@ type App struct {
 	mu        sync.RWMutex
 	cfg       *Config
 	upstreams map[string]*UpstreamCfg
-	// groups 是「上游 -> 真实模型 -> 额度组名」的索引 (applyConfig 重建), 探测等热路径
+	// groups 是「上游 -> 真实模型 -> 额度组名」的索引 (applyConfig 重建), 热路径
 	// 据此把 (上游, 模型) 解析成组, 不必每次扫 models 表。
 	groups map[string]map[string]string
 	// groupOrder 是「上游 -> 组名列表」, 按配置里首次出现的顺序 (含默认组的空串),
@@ -36,10 +36,6 @@ type App struct {
 	logW   *os.File
 	logger *log.Logger
 	logDay string // 当前日志文件所属的本地日期 (按天轮转用)
-
-	probeMu   sync.Mutex
-	probe     map[string]*probeStat // "上游|模型" -> 滚动统计 (主动探测 + 被动观测)
-	probePath string                // 指标状态文件 (var/probe.json)
 
 	// 只读观测面 (TUI): 进行中的请求、最近事件、事件序号。纯内存、不落盘、不参与记账,
 	// 服务重启即清空 —— 明细的事实来源仍是日志。
@@ -62,7 +58,6 @@ func newApp(c *Config) (*App, error) {
 		upstreams: map[string]*UpstreamCfg{},
 		aliases:   map[string][]aliasTarget{},
 		cands:     map[string]*cand{},
-		probe:     map[string]*probeStat{},
 		flows:     map[uint64]*flow{},
 	}
 	a.applyConfig(c)
@@ -74,10 +69,6 @@ func newApp(c *Config) (*App, error) {
 		a.gatePath = filepath.Join(filepath.Dir(c.LogPath), "gate-state.json")
 	}
 	a.loadGateState()
-	// 探测状态与锁状态同目录; 未配置 probe 时 probePath 为空, 一切探测都停用。
-	a.probePath = probePathFor(c)
-	a.loadProbeState()
-	a.startProbeLoop()
 	return a, nil
 }
 
@@ -90,7 +81,7 @@ func (a *App) applyConfig(c *Config) {
 	// 门控参数是全局的, 热加载直接生效; 队列与自适应上限按上游 id 保留 (爬了半天的
 	// 上限不该被 hup 清掉, 排队中的请求也不该被丢)。
 	a.gate = normGate(c.Gate)
-	// 只做报告的入口 (如 -probe) 会自己拼一个 App, 这里的表可能还没建。
+	// settings 页离线编辑时 (tui_model) 也会拼一个 App 再 applyConfig, 表可能还没建。
 	if a.cands == nil {
 		a.cands = map[string]*cand{}
 	}

@@ -2,7 +2,7 @@
 # llm-request-tollgate 自测: 对本地假上游跑代理, 按用例断言 (设计 §4.7)。
 #
 # 用法: test/run_selftest.sh <case|all>
-#   case: alias | keyenv | fallback | fallback-gate | breaker | quota | rotate | ratelimit | usage | usage-report | stream | logging | overhead | responses | hup | probe
+#   case: alias | keyenv | fallback | fallback-gate | breaker | quota | rotate | ratelimit | usage | usage-report | stream | logging | overhead | responses | hup
 # 每个用例独立起一个假上游 + 一个代理 (各自端口, 互不干扰)。
 set -u
 
@@ -890,75 +890,6 @@ case_responses() {
         pass "无终态事件时仍补 error 事件 (F6 未被削弱)" || fail "断流未补 error 事件"
 }
 
-case_probe() {
-    say "=== probe (只观测不切换: 被动采样 + 只探 fallback 的下一个候选) ==="
-    local DIR="$TMP/probe"
-    local LOG="$DIR/log.jsonl" CFG="$DIR/cfg.json"
-    rm -rf "$DIR"
-    mkdir -p "$DIR"
-    cat > "$CFG" << EOF
-{
-  "listen": "127.0.0.1:18821",
-  "log_path": "$LOG",
-  "timeouts": { "connect_ms": 1000, "response_header_ms": 5000, "stream_idle_ms": 3000 },
-  "gate": { "interval_ms": 20, "sem_wait_ms": 400, "queue_wait_ms": 400, "concurrency_lock_ms": 800, "quota_lock_ms": 2000, "breaker_lock_ms": 3000, "retry_backoff_ms": [10, 20, 30] },
-  "probe": { "enabled": true, "scope": "next", "interval_sec": 1, "max_tokens": 4,
-             "timeout_ms": 5000, "window": 3, "targets": ["probe-model"] },
-  "upstreams": [
-    { "id": "fu1", "base_url": "http://127.0.0.1:19021/v1", "auth_header": "Authorization", "key": "fake-key", "headers": {}, "include_usage": true },
-    { "id": "fu2", "base_url": "http://127.0.0.1:19021/v1", "auth_header": "Authorization", "key": "fake-key", "headers": {}, "include_usage": true }
-  ],
-  "aliases": {
-    "probe-model": [["fu1", "deepseek-v4.1-flash"], ["fu2", "deepseek-v4.1-flash"]],
-    "other-model": [["fu1", "glm-5.3"], ["fu2", "glm-5.3"]]
-  }
-}
-EOF
-    start_fake 19021 20
-    start_proxy 18821 "$CFG"
-
-    # 真实流式请求: 产生主候选的被动样本 (不额外发探测请求)
-    local out
-    out=$(post_stream 18821 '{"model":"probe-model","messages":[{"role":"user","content":"hi"}],"stream":true}')
-    [ "$(echo "$out" | awk '{print $3}')" = "200" ] && pass "流式请求 200" || fail "流式请求 $(echo "$out" | awk '{print $3}')"
-
-    # 等探测循环至少跑一轮 (interval 1s; probeOnce 在启动时先跑一次)
-    local rep="" i
-    for i in $(seq 1 40); do
-        rep=$(curl -s "http://127.0.0.1:18821/v1/probe")
-        [ "$(echo "$rep" | jq -r '.aliases["probe-model"][1].active // 0')" -ge 1 ] 2> /dev/null && break
-        sleep 0.25
-    done
-
-    [ -n "$rep" ] && pass "/v1/probe 有响应" || fail "/v1/probe 无响应"
-    [ "$(echo "$rep" | jq -r '.aliases["probe-model"][0].role')" = "primary" ] && pass "报告保持 fallback 顺序 (首个=primary)" || fail "role 顺序错"
-    [ "$(echo "$rep" | jq -r '.aliases["probe-model"][1].role')" = "next" ] && pass "第二个候选 role=next" || fail "next role 错"
-    local pas act ttfb
-    pas=$(echo "$rep" | jq -r '.aliases["probe-model"][0].passive')
-    act=$(echo "$rep" | jq -r '.aliases["probe-model"][1].active')
-    ttfb=$(echo "$rep" | jq -r '.aliases["probe-model"][1].ttfb_ms')
-    [ "${pas:-0}" -ge 1 ] && pass "主候选有被动样本 ($pas)" || fail "主候选被动样本=$pas"
-    [ "${act:-0}" -ge 1 ] && pass "下一个候选被主动探测 ($act)" || fail "下一个候选主动样本=$act"
-    awk -v t="${ttfb:-0}" 'BEGIN{exit !(t>0)}' && pass "探测取得 ttfb (${ttfb}ms)" || fail "ttfb=$ttfb"
-
-    # targets 之外的别名不探
-    [ "$(echo "$rep" | jq -r '.aliases["other-model"][1].active // 0')" = "0" ] && pass "targets 之外的别名未被探测" || fail "other-model 被探了"
-
-    # 探测流量只打下一个候选, 且以 source=probe 入日志
-    local probed
-    probed=$(jq -r 'select(.source=="probe") | .upstream' "$LOG" 2> /dev/null | sort -u | tr '\n' ' ')
-    [ "$probed" = "fu2 " ] && pass "探测只打下一个候选 (日志 source=probe: $probed)" || fail "探测候选=$probed (want fu2)"
-
-    # D14 不接入: 探测不改变候选顺序, 新请求仍走第一个候选
-    post 18821 '{"model":"probe-model","messages":[{"role":"user","content":"hi"}]}' > /dev/null
-    local lastup
-    lastup=$(jq -r 'select(.source!="probe") | .upstream' "$LOG" 2> /dev/null | tail -1)
-    [ "$lastup" = "fu1" ] && pass "顺序未被探测改变 (仍走 fu1)" || fail "落到了 $lastup"
-
-    [ -s "$DIR/probe.json" ] && pass "状态文件 probe.json 已写" || fail "probe.json 缺失"
-    "$BIN/tollgate" -probe "$CFG" 2> /dev/null | grep -q 'probe-model' && pass "-probe 离线报告可读" || fail "-probe 报告失败"
-}
-
 case_all() {
     case_alias
     case_keyenv
@@ -976,7 +907,6 @@ case_all() {
     case_overhead
     case_responses
     case_hup
-    case_probe
 }
 
 main() {
@@ -1000,7 +930,6 @@ main() {
         overhead) case_overhead ;;
         responses) case_responses ;;
         hup) case_hup ;;
-        probe) case_probe ;;
         all) case_all ;;
         *)
             say "unknown case: $1"

@@ -82,7 +82,7 @@ func (c *cand) locks() (out []gateLockRec) {
 	return out
 }
 
-// saveGateState 把未到期的定时锁落盘 (先写临时文件再改名, 与探测状态同一套路)。
+// saveGateState 把未到期的定时锁落盘 (先写临时文件再改名)。
 // 键只求唯一, 归属看记录自己的 upstream / group / model。
 func (a *App) saveGateState() {
 	if a.gatePath == "" {

@@ -110,8 +110,7 @@ ps -o cmd= -p "$(systemctl --user show -p MainPID --value tollgate.service)"
 重启. 热加载时调度状态按上游 id 保留: 队列里排着的请求、爬到的并发上限、退避与锁都不
 清.
 
-注意: 超时参数 (`timeouts`) 与 `probe` 参数是启动时固化的 (Transport / 探测参数启动时
-一次性确定), 改它们要重启.
+注意: 超时参数 (`timeouts`) 是启动时固化的 (Transport 一次性确定), 改它要重启.
 
 ## 5. 升级 / 回滚
 
@@ -202,10 +201,9 @@ python3 scripts/gen_tollgate_config.example.py
 |---|---|---|
 | `requests.jsonl` 与归档 | 每笔请求明细 | 永久保留, 外部清理 |
 | `gate-state.json` | 定时锁 (额度 / 熔断 / 低流量) 的到期时间与原因 | 锁内存在, 重启恢复 |
-| `probe.json` | 探测 / 被动延迟采样 | 启用 probe 时写, 重启恢复 |
 | `tui-pulse.json` | 每秒观测快照 (同进程 `-tui` 时) | 仅 `-tui` 时 |
 
-`/v1/state` 与 `/v1/probe` 的 HTTP 面是同一份数据的只读输出, 见 [api.md](api.md) §6.
+`/v1/state` 的 HTTP 面是只读输出, 见 [api.md](api.md) §6.
 
 ### 7.3 离线子命令
 
@@ -214,7 +212,6 @@ python3 scripts/gen_tollgate_config.example.py
 ./llm-request-tollgate -summary var/requests.jsonl           # 按 逻辑名×来源 汇总 (请求/429/token)
 ./llm-request-tollgate -summary var/                         # 传目录则跨天归档一起汇总
 ./llm-request-tollgate -usage var/ -windows 3h,12h,24h       # 上游+模型 × 窗口 token 分解
-./llm-request-tollgate -probe config.local.json              # 离线打印探测报告 (只读)
 ```
 
 ## 8. 自检与自测
@@ -232,13 +229,13 @@ python3 scripts/gen_tollgate_config.example.py
 ### 8.2 全量自测 (假上游, 不影响真上游)
 
 ```bash
-./test/run_selftest.sh all       # 17 组用例, 每用例独立起假上游 + 代理
-./test/run_selftest.sh <case>    # 跑单组: alias|keyenv|fallback|fallback-gate|breaker|quota|rotate|stream|usage|usage-report|ratelimit|logging|overhead|responses|hup|probe
+./test/run_selftest.sh all       # 16 组用例, 每用例独立起假上游 + 代理
+./test/run_selftest.sh <case>    # 跑单组: alias|keyenv|fallback|fallback-gate|breaker|quota|rotate|stream|usage|usage-report|ratelimit|logging|overhead|responses|hup
 ```
 
 产物在 `test/tmp/` (gitignored). 用例覆盖: 白名单 404 / 认证替换 / fallback 与闸门 /
 熔断与额度锁 / 隔天轮转 / 流式透传与断流 / usage 提取与兜底 / 节拍与并发挡下 / 日志字
-段 / 开销 / /v1/responses / SIGHUP 热加载 / 探测.
+段 / 开销 / /v1/responses / SIGHUP 热加载.
 
 ## 9. 排障
 
@@ -249,7 +246,7 @@ python3 scripts/gen_tollgate_config.example.py
 | 密钥没加载 (401) | `./deploy/tollgate.sh logs` 看 `Loaded xxx.ai`; `-check` 验证 key_env |
 | 一片 429 | 先分 `gate` 字段: `locked` 看 `var/gate-state.json` (锁到几点、什么原因); `sem_timeout` / `queue_timeout` 是并发 / 排队不够, 调 `gate` 参数 |
 | 某模型持续 429 / 慢 | 熔断锁只锁 `上游/模型`, 换别的模型或等锁到期; 看 `/v1/state` 的 `cands[].models` |
-| hup 后不生效 | 确认改的是别名 / 上游 / `gate`; `timeouts` 与 `probe` 参数要重启 |
+| hup 后不生效 | 确认改的是别名 / 上游 / `gate`; `timeouts` 参数要重启 |
 | 上游报错种类怪 | `unclassified upstream error` 会打进服务日志, 按 docs/providers-api.md 补 `errors` 规则后 hup |
 | 日志磁盘增长 | 归档不自动清理, 配 logrotate 或定时删除 |
 | 端口被占 | `listen` 改别的端口, 或找占用进程 |

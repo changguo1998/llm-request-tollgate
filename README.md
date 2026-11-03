@@ -46,16 +46,11 @@
 10. 日志按天轮转: 跨本地日期 (或隔天启动) 时把上一段日志归档为
     `<base>-YYYY-MM-DD.jsonl` (同名不覆盖, 依次加 -1/-2); `-summary` 与 `-usage`
     都跨归档读, 归档不自动删除 (留存交给外部)。
-11. 探测与延迟观测 (D14, 默认关闭, **只观测不接入**): 真实请求被动记 `ttfb_ms`
-    (流式另记 `tps` 与字节吞吐 `bytes` / `bps`); 开启 `probe` 后按 `interval_sec` 只主动探测
-    fallback 顺序里的**下一个**候选 (`scope=next`, 单候选别名不探)。结果看 `GET /v1/probe` 或
-    `-probe <config>`, 状态落 `var/probe.json`。探测不改变候选顺序, 不触发失败计数与锁。
-    自适应路由已决策不做 (设计 D15), 所以探测结果只进报告, 不接线路由。
-12. 双接口转发: `POST /v1/chat/completions` 与 `POST /v1/responses` (O5) 共用同一条链路
+11. 双接口转发: `POST /v1/chat/completions` 与 `POST /v1/responses` (O5) 共用同一条链路
     (白名单 / 闸门 / fallback / 记账)。`/responses` 没有 `stream_options`, 不做
     include_usage 注入; 用量按 `input/output_tokens` 口径归一, 流以 `response.completed`
     判正常收尾 (该接口不保证发 `[DONE]`), 事件里嵌在 `response` 下的 `model` 也改回逻辑名。
-13. 只读观测面与状态台: `GET /v1/state` 给出此刻进行中的请求, 以及每个上游的队列/并发上限/锁
+12. 只读观测面与状态台: `GET /v1/state` 给出此刻进行中的请求, 以及每个上游的队列/并发上限/锁
     (纯内存, 不落盘、不参与记账); `-tui` 把它连同日志聚合成三个页的实时状态台。
 
 ## 快速开始
@@ -64,7 +59,7 @@
 go build ./...
 # 填好 config.local.json (从 config.example.json 复制) 后:
 ./llm-request-tollgate -config config.local.json
-# 起假上游 + 全量自测 (17 组用例 131 项断言):
+# 起假上游 + 全量自测 (16 组用例 117 项断言):
 ./test/run_selftest.sh all
 # 常驻 (systemd 用户服务, 崩了自动拉起). 部署模板示例在
 # deploy/tollgate.service.example (仓库不跟踪本机版 tollgate.service:
@@ -75,8 +70,6 @@ go build ./...
 # 汇总请求日志 (按 逻辑名+来源, 含 token 用量; 传目录则跨天归档一起汇总):
 ./llm-request-tollgate -summary var/requests.jsonl
 ./llm-request-tollgate -summary var/
-# 看探测/延迟报告 (只读; 不接线路由), 或在线取 GET /v1/probe:
-./llm-request-tollgate -probe config.local.json
 
 # 按 上游/模型 × 窗口 (3h/12h/24h/全部) 看 token 分解:
 ./llm-request-tollgate -usage var/
@@ -129,7 +122,7 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 - 两个入口二选一: `-tui` 适合"本地起一份看" (同进程), `-tui-state` 适合看 systemd 常驻那份
   (`./deploy/tollgate.sh` 起的服务不变)。`settings` 页两种模式都能改: 写本机的 store 与
   配置 `gate` 段, 同进程模式热加载直接生效, 观察常驻服务时发 `SIGHUP`。`s` 只写 `gate`
-  与优先级; `timeouts` 与 `probe` 仍要改配置文件后重启。
+  与优先级; `timeouts` 仍要改配置文件后重启。
 - 列宽按内容分配 (长的列自己撑开, 顶到终端右边界为止), 余量先补齐差得少的列; 只有连各列
   最小宽都放不下时才按优先级丢列 (先丢流式、编号这类), 至少保留逻辑名、耗时、上游与真实
   模型、状态。
@@ -191,11 +184,6 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
   整个上游不写 `models` = 所有模型都在默认组 (与加组之前的配置完全等价)。声明了 `models`
   的上游, 别名引用的模型必须在表内, 否则启动 / 热加载直接报错。
 - `aliases`: 逻辑名 -> `[[上游 id, 真实模型 id], ...]`。
-- `probe` (可选, 默认关闭): `{ enabled, scope:"next"|"all", interval_sec:900, max_tokens:8, timeout_ms:30000, window:5, targets:[别名...], target_ttfb_ms, target_tps, switch_margin }`。
-  `scope=next` 只探第二个候选 (第一个候选由真实流量被动观测); `targets` 为空则探所有多候选
-  别名。`target_ttfb_ms` / `target_tps` 是两条标准, `switch_margin` 是"明显优势"阈值,
-  三个**只用于报告里给建议**, 不影响路由 —— 自适应路由已决策不做 (设计 D15)。
-  探测参数启动时固化, 改配置要重启。
 
 别名、上游与 `gate` 都支持 `SIGHUP` 热加载; 调度状态 (队列里排着的请求、爬到的并发上限、
 退避与锁) 按上游 id 保留, 不被 hup 清掉。
@@ -257,7 +245,7 @@ token) 与 `-usage` (上游 + 模型 × 窗口的 token 分解)。
 ## 当前边界
 
 - 转发覆盖 `POST /v1/chat/completions` 与 `POST /v1/responses` (O5); `GET /v1/models`
-  返回逻辑名清单 (O5)。只读观测面: `GET /v1/probe`、`GET /v1/state`。其余路径一律 404。
+  返回逻辑名清单 (O5)。只读观测面: `GET /v1/state`。其余路径一律 404。
 - 被闸门挡下的 429 在日志里带 `gate` (`locked` 候选在锁里 / `sem_timeout` 等不到并发
   槽位 / `queue_timeout` 排队超时 / `canceled` 客户端断开) 与等待时长 (`sem_ms` 等信号量、
   `queue_ms` 排队, 都是各候选之和), 便于区分「并发不够」「排队超时」和「被锁」。
@@ -272,11 +260,11 @@ token) 与 `-usage` (上游 + 模型 × 窗口的 token 分解)。
 
 - `*.go` 代理本体, 按职责分文件: `main.go` 入口, `config.go` 配置, `errclass.go` 报错分类,
   `gate*.go` 调度与锁, `serve*.go` 转发主链路, `relay.go` SSE 透传, `observe*.go` 观测面,
-  `probe*.go` 探测, `log.go` / `usage.go` 日志与用量, `rate.go` 吞吐口径, `summary.go`
+  `log.go` / `usage.go` 日志与用量, `rate.go` 吞吐口径, `summary.go`
   汇总命令 (含假上游自测所需的全部实现)。
 - `test/fakeupstream/` 假上游: 回放思考块 / 文本 / 工具调用 / usage 的 SSE,
   支持中途断流 (验证 F6)。
-- `test/run_selftest.sh` 自测: 17 组用例 131 项断言, 对本地假上游跑代理。
+- `test/run_selftest.sh` 自测: 16 组用例 117 项断言, 对本地假上游跑代理。
 - `test/healthcheck.example.sh` 自检示例: 二进制 / 配置 (-check) / 端口三项, 退出码
   0 = 全通过 (本机版 `healthcheck.sh` 在 dotfiles, 多一项 fff 密钥自动加载)。
 - `deploy/` 常驻: `tollgate.service.example` 模板 (公开示例, 本机版 `tollgate.service`

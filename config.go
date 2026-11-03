@@ -47,7 +47,6 @@ type Config struct {
 	Gate      GateCfg                `json:"gate"`
 	Upstreams []UpstreamCfg          `json:"upstreams"`
 	Aliases   map[string][][2]string `json:"aliases"`
-	Probe     *ProbeCfg              `json:"probe,omitempty"`
 }
 
 // GateCfg 是所有上游共用的门控参数。
@@ -147,8 +146,8 @@ func loadConfig(path string) (*Config, error) {
 	return loadConfigOpt(path, false)
 }
 
-// loadConfigOpt 读配置。lenient=true 时缺 key 环境变量不报错 (只给离线报告用:
-// -probe 只关心上游 id 与别名顺序, 不发请求, 所以不需要真 key)。
+// loadConfigOpt 读配置。lenient=true 时缺 key 环境变量不报错 (settings 页离线编辑
+// 配置时不需要真 key, 只关心上游 id 与别名结构)。
 func loadConfigOpt(path string, lenient bool) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {

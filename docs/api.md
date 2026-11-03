@@ -13,7 +13,6 @@
 | `/v1/responses` | POST | 转发 Responses API, 同一链路 | 客户端, 即各 agent |
 | `/v1/models` | GET | 逻辑模型名清单 (不暴露真实上游 id) | 客户端与运维 |
 | `/v1/state` | GET | 只读观测面: 进行中的请求 + 候选调度状态 + 事件 | 运维 (TUI) |
-| `/v1/probe` | GET | 只读延迟 / 吞吐报告 (只观测, 不改路由) | 运维 |
 
 其余路径一律 404 `not_found`. base URL 是配置里的 `listen` (缺省
 `127.0.0.1:8787`), 客户端 base URL 指到 `http://127.0.0.1:8787/v1`.
@@ -127,7 +126,7 @@ key):
 | 400 | `invalid_request_error` | 请求体读不出 / 不是合法 JSON / 缺 `model` |
 | 404 | `not_found` | 不支持的路径或方法 |
 | 404 | `model_not_found` | 未注册的逻辑名; 或该别名没有任何可用上游 |
-| 405 | `method_not_allowed` | `/v1/models` `/v1/state` `/v1/probe` 非 GET |
+| 405 | `method_not_allowed` | `/v1/models` `/v1/state` 非 GET |
 | 429 | `rate_limit_error` | 闸门挡下, 请求没发出去 (带 `Retry-After`) |
 | 429 | `upstream_locked` | 候选全在锁里 (上游限制的传导, 带 `Retry-After`) |
 | 500 | `internal_error` | `/v1/state` 载荷编码失败 |
@@ -199,21 +198,6 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 - 事件 `kind`: `start` / `lock` / `unlock` / `fallback` / `gate` / `error` / `slow` /
   `ok` / `reload`.
 - 其余方法返回 405.
-
-### 6.3 GET /v1/probe
-
-只读延迟 / 吞吐报告 (D14, 只观测不接入: 不改变候选顺序、不动失败计数与锁). 开启
-`probe` 后代理按 `interval_sec` 主动探测 fallback 顺序里的**下一个**候选
-(`scope=next`), 真实请求被动记 `ttfb_ms` (流式另记 `tps`).
-
-载荷: `generated_at` / `standards` (`target_ttfb_ms` / `target_tps` /
-`switch_margin`, 仅报告判定) / `probe` (当前探测配置) / `aliases`: 每别名按 fallback
-顺序列出候选行, 每行 `role` (`primary` / `next` / `candidate`), 上游 / 模型,
-`ttfb_ms` / `tps` (EWMA), `samples` / `ok` / `fail`, `active` / `passive` (主动 / 被
-动样本数), `meets_targets`, `advantage` (相对主候选有明显优势, 仅建议).
-
-状态落盘到日志同目录 `var/probe.json` (与锁状态同目录). 探测参数启动时固化, 改配置要
-重启; 探测结果只进报告, 不接线路由.
 
 ## 7. JSONL 请求日志 (每行一笔)
 

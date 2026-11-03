@@ -49,7 +49,6 @@ func (c *cand) noteTps(model string, p tokPoint, g GateCfg) (peak, avg float64, 
 }
 
 // noteDecodeTps 记一笔真实请求的解码吞吐 (只有流式能拆出解码段), 触发时加低流量锁。
-// 探测请求走自己的链路, 不经过这里: 它们不该把模型的吞吐判低。
 func (a *App) noteDecodeTps(upID, model string, tok int, decodeMs int64) {
 	a.mu.RLock()
 	c, g := a.cands[upID], a.gate

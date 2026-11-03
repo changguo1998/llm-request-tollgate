@@ -203,7 +203,7 @@ func (e *tuiEditor) setGatePrompt(i int, text string) {
 // marshalConfig 按固定的顶层顺序写回配置文件: 手写 JSON 是因为 map 会把键排序,
 // 让整份配置产生无关的 diff。raw 里没认识的键按字典序补在最后, 不丢数据。
 func marshalConfig(top map[string]json.RawMessage) ([]byte, error) {
-	known := []string{"listen", "log_path", "timeouts", "gate", "upstreams", "aliases", "probe"}
+	known := []string{"listen", "log_path", "timeouts", "gate", "upstreams", "aliases"}
 	rest := make([]string, 0)
 	for k := range top {
 		seen := false

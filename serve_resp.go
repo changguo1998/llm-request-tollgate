@@ -65,8 +65,7 @@ func (s *serveState) forward() {
 		s.w.Write(buf)
 	}
 
-	// 被动时延采样: 真实流量本身就是主候选的观测, 不额外发探测请求。
-	// 只有流式能拆出解码段, 所以 tps / bps 仅流式有值。
+	// 吞吐口径: 真实流式请求才有解码段, 所以 tps / bps 仅流式有值。
 	tps, bps := 0.0, 0.0
 	completion := 0
 	if usage != nil {
@@ -83,16 +82,6 @@ func (s *serveState) forward() {
 	if s.stream && tps > 0 {
 		// 低流量锁的样本: 只有能拆出解码段的流式成功请求才进。
 		a.noteDecodeTps(s.servedUp.ID, realModel, completion, decodeMs)
-	}
-	if ttfbMs > 0 {
-		window := 5
-		if pc := a.probeCfg(); pc != nil {
-			window = pc.Window
-		}
-		a.recordProbeSample(s.servedUp.ID, realModel, probeSample{
-			Ts: time.Now().Format(time.RFC3339Nano), TtfbMs: ttfbMs, Tps: tps,
-			Tokens: completion, OK: status < 400, Passive: true,
-		}, window)
 	}
 
 	s.finalStatus, s.finalTtfb = status, ttfbMs

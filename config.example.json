@@ -23,18 +23,6 @@
       30000
     ]
   },
-  "probe": {
-    "enabled": false,
-    "scope": "next",
-    "interval_sec": 900,
-    "max_tokens": 8,
-    "timeout_ms": 30000,
-    "window": 5,
-    "targets": [],
-    "target_ttfb_ms": 0,
-    "target_tps": 0,
-    "switch_margin": 0.2
-  },
   "upstreams": [
     {
       "id": "ustc",

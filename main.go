@@ -23,9 +23,6 @@
 //  9. 定时锁: 熔断只锁出错的 上游/模型, 额度只锁 上游/记账组, 低流量 (窗口内解码吞吐的
 //     峰值与平均都低于门槛) 也只锁该 上游/模型; 锁内不真发, 排队中的请求整队迁移到下一个
 //     候选。
-//  10. 探测与延迟观测 (只观测, 不接入调度): 真实请求被动记 ttfb_ms/tps; 开启 probe 后
-//     只主动探测 fallback 顺序里的下一个候选 (scope=next), 结果进 GET /v1/probe 与
-//     var/probe.json; 不改候选顺序、不动失败计数与锁, 已建立的流不迁移。
 //
 // 配置: config.local.json (gitignored, 指向私有配置); SIGHUP 热加载别名与上游。
 // key: 支持 key_env 字段只存环境变量名, 真 key 启动/热加载时从环境变量取, 不落盘。
@@ -33,7 +30,7 @@
 // <base>-<YYYY-MM-DD>.jsonl, -summary 与 -usage 都能跨归档读。
 //
 // 代码按职责分文件: main/config 入口与配置, errclass 报错分类, gate* 调度与锁,
-// serve* 转发主链路, observe* 观测面, probe* 探测, log/usage 日志与用量, rate 吞吐口径,
+// serve* 转发主链路, observe* 观测面, log/usage 日志与用量, rate 吞吐口径,
 // summary 汇总命令, tui* 状态台, tui_gate/tui_store/tui_settings*/tui_prio* 参数编辑器。
 package main
 
@@ -125,7 +122,6 @@ func main() {
 	usage := flag.String("usage", "", "list token usage by upstream/model and window, then exit")
 	windows := flag.String("windows", "3h,12h,24h", "windows for -usage, comma separated")
 	check := flag.Bool("check", false, "validate config and exit")
-	probe := flag.String("probe", "", "print the latency/probe report for a config file and exit")
 	tui := flag.Bool("tui", false, "run the terminal dashboard with an in-process proxy (q to quit)")
 	var tuiState tuiStateArg
 	flag.Var(&tuiState, "tui-state", "run the terminal dashboard against a running proxy (default URL: "+
@@ -140,11 +136,6 @@ func main() {
 	}
 	if enabled {
 		runTUI(*cfgPath, baseURL)
-		return
-	}
-
-	if *probe != "" {
-		runProbeReport(*probe)
 		return
 	}
 

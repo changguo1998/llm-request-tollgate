@@ -29,8 +29,6 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // serveSide 处理不参与转发的旁路请求, 返回是否已经应答。
 func (a *App) serveSide(w http.ResponseWriter, r *http.Request) bool {
 	switch r.URL.Path {
-	case "/v1/probe":
-		a.serveProbe(w, r)
 	case "/v1/state":
 		a.serveState(w, r)
 	case "/v1/models":

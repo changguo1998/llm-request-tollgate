@@ -7,6 +7,14 @@ import (
 	"time"
 )
 
+// msCeil 把时长向上取整为毫秒 (>0 才计, 不计负值或 0)。
+func msCeil(d time.Duration) int64 {
+	if d <= 0 {
+		return 0
+	}
+	return int64((d + time.Millisecond - 1) / time.Millisecond)
+}
+
 // tokPoint 是一笔采样: 输出 token 与当分母的耗时 (毫秒)。
 // TUI 用整笔请求耗时 (非空闲吞吐), 调度器用解码段耗时 (解码吞吐)。
 type tokPoint struct {
