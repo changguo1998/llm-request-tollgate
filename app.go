@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,10 +26,13 @@ type App struct {
 	groupOrder map[string][]string
 	aliases    map[string][]aliasTarget
 	// 调度: 每个上游一份队列与自适应并发上限, 门控参数对所有上游共用。
-	cands     map[string]*cand
-	gate      GateCfg
-	transport *http.Transport
-	streamIdl time.Duration
+	cands map[string]*cand
+	gate  GateCfg
+	// transport 启动时建一次 (连接池复用); 三项超时单独原子存, applyConfig 热加载时
+	// 更新, 新连接 / 每次读写取当前值, 不必重启进程。
+	transport   *http.Transport
+	connectNs   atomic.Int64 // 建连超时 (纳秒)
+	streamIdlNs atomic.Int64 // 流空闲超时 (纳秒)
 
 	gatePath string // 定时锁状态文件 (var/gate-state.json)
 
@@ -77,7 +81,11 @@ func (a *App) applyConfig(c *Config) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.cfg = c
-	a.streamIdl = time.Duration(c.Timeouts.StreamIdleMs) * time.Millisecond
+	// 三项超时热加载: connect / stream_idle 原子存, 建连与每次读写取当前值;
+	// response_header 写回已建 Transport (net/http 每笔请求开始时读该字段即生效)。
+	a.connectNs.Store(int64(time.Duration(c.Timeouts.ConnectMs) * time.Millisecond))
+	a.streamIdlNs.Store(int64(time.Duration(c.Timeouts.StreamIdleMs) * time.Millisecond))
+	rh := time.Duration(c.Timeouts.ResponseHeaderMs) * time.Millisecond
 	// 门控参数是全局的, 热加载直接生效; 队列与自适应上限按上游 id 保留 (爬了半天的
 	// 上限不该被 hup 清掉, 排队中的请求也不该被丢)。
 	a.gate = normGate(c.Gate)
@@ -124,35 +132,40 @@ func (a *App) applyConfig(c *Config) {
 		}
 	}
 	a.aliases = aliases
-	// 超时参数启动时一次性固化为 Transport (热加载不重建连接池)。
+	// transport 启动时建一次 (不重建连接池); 热加载只更新 response_header 超时。
 	if a.transport == nil {
-		connect := time.Duration(c.Timeouts.ConnectMs) * time.Millisecond
 		a.transport = &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				d := net.Dialer{Timeout: connect}
+				d := net.Dialer{Timeout: time.Duration(a.connectNs.Load())}
 				conn, err := d.DialContext(ctx, network, addr)
 				if err != nil {
 					return nil, err
 				}
-				// 每次读都重设 idle 死线, 实现流空闲超时。
-				return &idleConn{Conn: conn, idle: a.streamIdl}, nil
+				// 每次读写重设 idle 死线 (取自实时值) 实现流空闲超时。
+				return &idleConn{Conn: conn, a: a}, nil
 			},
-			ResponseHeaderTimeout: time.Duration(c.Timeouts.ResponseHeaderMs) * time.Millisecond,
+			ResponseHeaderTimeout: rh,
 		}
+	} else {
+		a.transport.ResponseHeaderTimeout = rh
 	}
 }
 
 type idleConn struct {
 	net.Conn
-	idle time.Duration
+	a *App
+}
+
+func (c *idleConn) deadline() {
+	c.Conn.SetDeadline(time.Now().Add(time.Duration(c.a.streamIdlNs.Load())))
 }
 
 func (c *idleConn) Read(b []byte) (int, error) {
-	c.Conn.SetReadDeadline(time.Now().Add(c.idle))
+	c.deadline()
 	return c.Conn.Read(b)
 }
 
 func (c *idleConn) Write(b []byte) (int, error) {
-	c.Conn.SetWriteDeadline(time.Now().Add(c.idle))
+	c.deadline()
 	return c.Conn.Write(b)
 }

@@ -110,7 +110,9 @@ ps -o cmd= -p "$(systemctl --user show -p MainPID --value tollgate.service)"
 重启. 热加载时调度状态按上游 id 保留: 队列里排着的请求、爬到的并发上限、退避与锁都不
 清.
 
-注意: 超时参数 (`timeouts`) 是启动时固化的 (Transport 一次性确定), 改它要重启.
+注意: `timeouts` 三值 (connect / response_header / stream_idle) 同样随 `SIGHUP` 热加载:
+connect 与 stream_idle 取每次建连 / 读写时的当前值, response_header 从下一笔请求起生效;
+已建立的连接保留各自的 stream_idle. 只有 `listen` / `log_path` 要重启.
 
 ## 5. 升级 / 回滚
 
@@ -246,7 +248,7 @@ python3 scripts/gen_tollgate_config.example.py
 | 密钥没加载 (401) | `./deploy/tollgate.sh logs` 看 `Loaded xxx.ai`; `-check` 验证 key_env |
 | 一片 429 | 先分 `gate` 字段: `locked` 看 `var/gate-state.json` (锁到几点、什么原因); `sem_timeout` / `queue_timeout` 是并发 / 排队不够, 调 `gate` 参数 |
 | 某模型持续 429 / 慢 | 熔断锁只锁 `上游/模型`, 换别的模型或等锁到期; 看 `/v1/state` 的 `cands[].models` |
-| hup 后不生效 | 确认改的是别名 / 上游 / `gate`; `timeouts` 参数要重启 |
+| hup 后不生效 | 确认改的是别名 / 上游 / `gate` / `timeouts`; 只有 `listen` / `log_path` 要重启 |
 | 上游报错种类怪 | `unclassified upstream error` 会打进服务日志, 按 docs/providers-api.md 补 `errors` 规则后 hup |
 | 日志磁盘增长 | 归档不自动清理, 配 logrotate 或定时删除 |
 | 端口被占 | `listen` 改别的端口, 或找占用进程 |
