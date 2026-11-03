@@ -79,9 +79,9 @@ func (s *serveState) forward() {
 			bps = float64(bytesOut) / (float64(decodeMs) / 1000)
 		}
 	}
-	if s.stream && tps > 0 {
-		// 低流量锁的样本: 只有能拆出解码段的流式成功请求才进。
-		a.noteDecodeTps(s.servedUp.ID, realModel, completion, decodeMs)
+	if status < 400 {
+		// 低性能锁的样本: 吞吐只取能拆出解码段的流式成功请求, 首字节时延取任何成功响应。
+		a.notePerfRequest(s.servedUp.ID, realModel, completion, decodeMs, ttfbMs)
 	}
 
 	s.finalStatus, s.finalTtfb = status, ttfbMs

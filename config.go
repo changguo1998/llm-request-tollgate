@@ -57,12 +57,14 @@ type GateCfg struct {
 	ConcurrencyLockMs int `json:"concurrency_lock_ms"`
 	QuotaLockMs       int `json:"quota_lock_ms"`
 	BreakerLockMs     int `json:"breaker_lock_ms"`
-	// 低流量锁: 窗口内解码吞吐的峰值与平均都低于阈值时锁住该模型。
-	LowTpsWindowMs int   `json:"lowtps_window_ms"`
-	LowTpsPeakMax  int   `json:"lowtps_peak_max"` // 峰值上限 (tokens/s)
-	LowTpsAvgMax   int   `json:"lowtps_avg_max"`  // 平均上限 (tokens/s)
-	LowTpsLockMs   int   `json:"lowtps_lock_ms"`
-	RetryBackoffMs []int `json:"retry_backoff_ms"`
+	// 低性能锁: 覆盖两种「慢到没有实用价值」—— 低吞吐 (窗口内解码吞吐的峰值与平均都
+	// 低于门槛) 或 高延迟 (窗口内平均首字节时延超过阈值), 任一命中即锁该 上游/模型。
+	LowPerfWindowMs  int   `json:"lowperf_window_ms"`
+	LowPerfPeakMax   int   `json:"lowperf_peak_max"`    // 低吞吐峰值上限 (tokens/s)
+	LowPerfAvgMax    int   `json:"lowperf_avg_max"`     // 低吞吐平均上限 (tokens/s)
+	LowPerfTtfbMaxMs int   `json:"lowperf_ttfb_max_ms"` // 高延迟阈值 (平均首字节时延, ms); 0 = 关闭该项
+	LowPerfLockMs    int   `json:"lowperf_lock_ms"`
+	RetryBackoffMs   []int `json:"retry_backoff_ms"`
 }
 
 // gateIntervalMs 是出队节拍的缺省值。
@@ -88,18 +90,19 @@ func normGate(g GateCfg) GateCfg {
 	if g.BreakerLockMs <= 0 {
 		g.BreakerLockMs = 300000
 	}
-	if g.LowTpsWindowMs <= 0 {
-		g.LowTpsWindowMs = 600000
+	if g.LowPerfWindowMs <= 0 {
+		g.LowPerfWindowMs = 600000
 	}
-	if g.LowTpsPeakMax <= 0 {
-		g.LowTpsPeakMax = 5
+	if g.LowPerfPeakMax <= 0 {
+		g.LowPerfPeakMax = 5
 	}
-	if g.LowTpsAvgMax <= 0 {
-		g.LowTpsAvgMax = 1
+	if g.LowPerfAvgMax <= 0 {
+		g.LowPerfAvgMax = 1
 	}
-	if g.LowTpsLockMs <= 0 {
-		g.LowTpsLockMs = 300000
+	if g.LowPerfLockMs <= 0 {
+		g.LowPerfLockMs = 300000
 	}
+	// LowPerfTtfbMaxMs 缺省 0 = 高延迟判定关闭, 只保留低吞吐逻辑。
 	if len(g.RetryBackoffMs) == 0 {
 		g.RetryBackoffMs = []int{10000, 20000, 30000}
 	}
@@ -122,12 +125,17 @@ func (g GateCfg) breakerLock() time.Duration {
 	return time.Duration(g.BreakerLockMs) * time.Millisecond
 }
 
-// 低流量锁的窗口 / 门槛 / 锁时长 (门槛是整数 tokens/s)。
-func (g GateCfg) lowTpsWindow() time.Duration {
-	return time.Duration(g.LowTpsWindowMs) * time.Millisecond
+// 低性能锁的窗口 / 门槛 / 高延迟阈值 / 锁时长。
+func (g GateCfg) lowPerfWindow() time.Duration {
+	return time.Duration(g.LowPerfWindowMs) * time.Millisecond
 }
-func (g GateCfg) lowTpsLock() time.Duration {
-	return time.Duration(g.LowTpsLockMs) * time.Millisecond
+func (g GateCfg) lowPerfLock() time.Duration {
+	return time.Duration(g.LowPerfLockMs) * time.Millisecond
+}
+
+// lowPerfTtfbMax 是高延迟阈值; 0 = 关闭该项。
+func (g GateCfg) lowPerfTtfbMax() time.Duration {
+	return time.Duration(g.LowPerfTtfbMaxMs) * time.Millisecond
 }
 
 // backoff 返回第 n 次连续失败该暂停多久; 超出序列长度返回 0 (那一次该进熔断)。

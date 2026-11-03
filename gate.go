@@ -62,12 +62,19 @@ type cand struct {
 	wake       chan struct{}
 }
 
-// modelGate 是一个 upstream/model 的失败状态与吞吐采样。
+// modelGate 是一个 upstream/model 的失败状态与性能采样。
 type modelGate struct {
 	fails       int        // 连续错误计数, 成功清零
 	pausedUntil time.Time  // 退避到什么时候: 退避期间该模型不出队
-	lock        lockState  // 定时锁 (熔断 / 低流量): 只锁该 upstream/model
-	tps         []tokPoint // 低流量锁的判定样本: 窗口内每笔的解码吞吐
+	lock        lockState  // 定时锁 (熔断 / 低性能): 只锁该 upstream/model
+	tps         []tokPoint // 低性能锁的吞吐样本: 窗口内每笔流式成功请求的解码吞吐
+	lat         []latPoint // 低性能锁的延迟样本: 窗口内每笔成功响应的首字节时延
+}
+
+// latPoint 是低性能锁的一笔首字节时延样本。
+type latPoint struct {
+	ts time.Time
+	ms int64
 }
 
 func newCand(id string) *cand {

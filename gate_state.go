@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// gateLockRec 是落盘的一条定时锁。Model 非空 = 该模型的定时锁 (熔断 / 低流量);
+// gateLockRec 是落盘的一条定时锁。Model 非空 = 该模型的定时锁 (熔断 / 低性能);
 // 否则是额度组锁, Group 给出组名 (空 = 默认组)。
 type gateLockRec struct {
 	UntilMs  int64  `json:"until_unix_ms"`
@@ -52,11 +52,14 @@ func (a *App) addLockModel(c *cand, model, reason string, dur time.Duration) {
 	a.saveGateState()
 }
 
-// addLockLowTps 给 upstream/model 加低流量锁并落盘 (作用域同熔断锁: 只锁该模型)。
-func (a *App) addLockLowTps(c *cand, model string, peak, avg float64, dur time.Duration) {
+// addLockLowPerf 给 upstream/model 加低性能锁并落盘 (作用域同熔断锁: 只锁该模型)。
+// peak/avg 是低吞吐分支的峰值与平均 (tokens/s), latAvg 是高延迟分支的平均首字节时延
+// (ms); 哪个分支命中哪个非 0。
+func (a *App) addLockLowPerf(c *cand, model string, peak, avg, latAvg float64, dur time.Duration) {
 	a.evAdd("lock", "", c.id, model,
-		"加锁 吞吐过低 (峰值 "+ftoa(peak, 1)+" / 平均 "+ftoa(avg, 1)+" t/s) "+durStr(dur))
-	c.lockModel(model, lowTpsReason, dur)
+		"加锁 低性能 (吞吐 峰 "+ftoa(peak, 1)+" / 均 "+ftoa(avg, 1)+" t/s, 平均首字节 "+
+			ftoa(latAvg, 0)+"ms) "+durStr(dur))
+	c.lockModel(model, lowPerfReason, dur)
 	a.saveGateState()
 }
 

@@ -17,7 +17,7 @@ import (
 var gateLabels = []string{
 	"interval_ms", "sem_wait_ms", "queue_wait_ms",
 	"concurrency_lock_ms", "quota_lock_ms", "breaker_lock_ms",
-	"lowtps_window_ms", "lowtps_peak_max", "lowtps_avg_max", "lowtps_lock_ms",
+	"lowperf_window_ms", "lowperf_peak_max", "lowperf_avg_max", "lowperf_ttfb_max_ms", "lowperf_lock_ms",
 	"retry_backoff_ms",
 }
 
@@ -28,10 +28,12 @@ func gateStep(i int) int {
 		return 100
 	case 1, 2:
 		return 500
-	case 3, 4, 5, 6, 9:
+	case 3, 4, 5, 6, 10:
 		return 60000
 	case 7, 8:
 		return 1
+	case 9:
+		return 1000
 	}
 	return 0
 }
@@ -53,13 +55,15 @@ func (e *tuiEditor) gateField(i int) int {
 	case 5:
 		return g.BreakerLockMs
 	case 6:
-		return g.LowTpsWindowMs
+		return g.LowPerfWindowMs
 	case 7:
-		return g.LowTpsPeakMax
+		return g.LowPerfPeakMax
 	case 8:
-		return g.LowTpsAvgMax
+		return g.LowPerfAvgMax
 	case 9:
-		return g.LowTpsLockMs
+		return g.LowPerfTtfbMaxMs
+	case 10:
+		return g.LowPerfLockMs
 	}
 	return 0
 }
@@ -128,16 +132,19 @@ func (e *tuiEditor) adjustGate(delta int) {
 		e.gate.BreakerLockMs = v
 	case 6:
 		v = clampInt(v, 1000, 86400000)
-		e.gate.LowTpsWindowMs = v
+		e.gate.LowPerfWindowMs = v
 	case 7:
 		v = clampInt(v, 1, 100000)
-		e.gate.LowTpsPeakMax = v
+		e.gate.LowPerfPeakMax = v
 	case 8:
 		v = clampInt(v, 1, 100000)
-		e.gate.LowTpsAvgMax = v
+		e.gate.LowPerfAvgMax = v
 	case 9:
+		v = clampInt(v, 0, 86400000)
+		e.gate.LowPerfTtfbMaxMs = v
+	case 10:
 		v = clampInt(v, 1000, 86400000)
-		e.gate.LowTpsLockMs = v
+		e.gate.LowPerfLockMs = v
 	}
 	e.gateDirty = true
 	e.message = gateLabels[i] + " = " + strconv.Itoa(v)
@@ -170,7 +177,7 @@ func (e *tuiEditor) setGatePrompt(i int, text string) {
 		return
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(text))
-	if err != nil || n <= 0 {
+	if err != nil || n < 0 || (n == 0 && i != 9) {
 		e.message = gateLabels[i] + " 要正整数"
 		return
 	}
@@ -188,13 +195,15 @@ func (e *tuiEditor) setGatePrompt(i int, text string) {
 	case 5:
 		e.gate.BreakerLockMs = n
 	case 6:
-		e.gate.LowTpsWindowMs = n
+		e.gate.LowPerfWindowMs = n
 	case 7:
-		e.gate.LowTpsPeakMax = n
+		e.gate.LowPerfPeakMax = n
 	case 8:
-		e.gate.LowTpsAvgMax = n
+		e.gate.LowPerfAvgMax = n
 	case 9:
-		e.gate.LowTpsLockMs = n
+		e.gate.LowPerfTtfbMaxMs = n // 0 = 关闭高延迟判定
+	case 10:
+		e.gate.LowPerfLockMs = n
 	}
 	e.gateDirty = true
 	e.message = gateLabels[i] + " = " + strconv.Itoa(n)

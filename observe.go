@@ -68,14 +68,14 @@ type viewEvent struct {
 	Msg      string `json:"msg"`
 }
 
-// candModelLock 是某个 upstream/model 头上的定时锁 (熔断 / 低流量), 供状态台显示。
+// candModelLock 是某个 upstream/model 头上的定时锁 (熔断 / 低性能), 供状态台显示。
 type candModelLock struct {
 	Model    string `json:"model"`
 	Queue    int    `json:"queue"`     // 该真实模型的队列长度
 	Fails    int    `json:"fails"`     // 连续错误数
 	PausedMs int64  `json:"paused_ms"` // > 0 = 退避中, 剩这么久
 	LeftMs   int64  `json:"left_ms"`   // > 0 = 模型定时锁, 剩这么久
-	Why      string `json:"why"`       // breaker | lowtps
+	Why      string `json:"why"`       // breaker | lowperf
 }
 
 // candGroup 是某上游一个记账组的瞬时状态 (额度锁剩余)。组名空串 = 默认组。
@@ -118,7 +118,7 @@ type pulse struct {
 // stageName 是屏幕上「状态」那一列: 只写变化的部分 (在等什么 / 卡在哪一步)。
 // 所处阶段由块标题说明 (并发池 / 频率队列 / 状态锁 / 已发送 / 接收中 / 已失败),
 // 标题与所在位置覆盖得到的不重复写 (在频率队列里 = 在等出队, 在已发送块 = 已发出),
-// 这里只留真正卡住的原因: 额度锁 / 熔断锁 / 低流量锁 / 退避的倒计时 (解析中一闪而过也保留)。
+// 这里只留真正卡住的原因: 额度锁 / 熔断锁 / 低性能锁 / 退避的倒计时 (解析中一闪而过也保留)。
 func stageName(f flow) string {
 	switch f.Stage {
 	case stageParse:
@@ -132,7 +132,7 @@ func stageName(f flow) string {
 		return "" // 在频率队列里就说明在等出队节拍
 	case stageModelWait:
 		if isGateDetail(f.Gate) {
-			return f.Gate // 退避 … / 熔断锁 … / 低流量锁 … / 额度锁 …
+			return f.Gate // 退避 … / 熔断锁 … / 低性能锁 … / 额度锁 …
 		}
 		return "" // 块标题「状态锁」已说明
 	case stageRecv:
@@ -149,7 +149,7 @@ func stageName(f flow) string {
 // isGateDetail 判断 Gate 是不是值得在状态列单独写的细节: 锁与退避是「为什么卡住」的
 // 原因; 等节拍 (在队列里必然在等) 与 已发出 (已发送块已隐含) 不写。
 func isGateDetail(g string) bool {
-	for _, p := range []string{"额度锁", "熔断锁", "低流量锁", "退避"} {
+	for _, p := range []string{"额度锁", "熔断锁", "低性能锁", "退避"} {
 		if strings.HasPrefix(g, p) {
 			return true
 		}

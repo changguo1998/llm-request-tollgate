@@ -141,8 +141,8 @@ func (o *flowObs) gateNow() string {
 		switch reason {
 		case "breaker":
 			why = "熔断"
-		case lowTpsReason:
-			why = "低流量"
+		case lowPerfReason:
+			why = "低性能"
 		}
 		return why + "锁 " + durStr(left)
 	}
