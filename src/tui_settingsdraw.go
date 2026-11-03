@@ -44,8 +44,15 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 	// ---- 第 1 列: 全局参数 + 供应商 ----
 	col1 := make([]string, 0, body)
 	col1 = append(col1, settingsTitle("全局参数", e.focus == 2))
+	// 冒号紧跟文字后面; 值列右对齐到固定宽, 让数字 (与单位) 成列对齐。
+	valueW := 0
 	for i := range gateLabels {
-		text := tuiIndent + gateLabels[i] + "  " + e.gateText(i)
+		if w := tuiWidth(e.gateText(i)); w > valueW {
+			valueW = w
+		}
+	}
+	for i := range gateLabels {
+		text := tuiIndent + gateCN[i] + ": " + tuiPadLeft(e.gateText(i), valueW)
 		if e.focus == 2 && i == e.gateSel {
 			text = tuiRev + text + tuiReset
 		}
@@ -105,12 +112,13 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 		}
 	}
 
-	// 第 1 / 2 列按内容宽, 第 3 列吃掉剩余; 各列不足的行补空。
+	// 第 1 / 2 列按内容宽, 第 3 列吃掉剩余; 内容区不足的行补空, 让三列贴满整个内容高度
+	// (中间空白), 消息行固定落在内容区最底一行 —— 不再让它浮在中间。
 	w1 := colWidth(col1)
 	w2 := colWidth(col2)
 	w3 := max(6, m.cols-2-w1-w2-2)
-	n := max(len(col1), max(len(col2), len(col3)))
-	for i := 0; i < n; i++ {
+	gridH := max(1, body-1)
+	for i := 0; i < gridH; i++ {
 		c.line(tuiPad(atSlice(col1, i), w1) + " " + tuiPad(atSlice(col2, i), w2) + " " + tuiPad(atSlice(col3, i), w3))
 	}
 	c.line(m.prioMessage(e))

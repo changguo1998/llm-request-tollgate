@@ -88,12 +88,12 @@ func TestModelRowsDecodeAndByteRates(t *testing.T) {
 func TestTUISettingsWindowsEditAndSave(t *testing.T) {
 	_, cfg := prioFixture(t)
 	e := newTuiEditor(cfg)
-	e.gateSel = 11 // rate_window_ms (gateLabels 下标)
+	e.gateSel = 12 // rate_window_sec (gateLabels 下标)
 	e.adjustGate(1)
 	if e.rateWinMs != 3600000+600000 {
 		t.Fatalf("rate +10min 应到 %d, 得到 %d", 3600000+600000, e.rateWinMs)
 	}
-	e.gateSel = 12
+	e.gateSel = 13
 	e.adjustGate(1)
 	if e.blockWinMs != 35000+5000 {
 		t.Fatalf("block +5s 应到 %d, 得到 %d", 35000+5000, e.blockWinMs)

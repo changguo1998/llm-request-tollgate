@@ -486,7 +486,7 @@ func TestSettingsProbeEditAndSave(t *testing.T) {
 	if m.prio.focus != 2 {
 		t.Fatalf("g 应切到调度参数, 得到 %d", m.prio.focus)
 	}
-	m.prio.gateSel = 13
+	m.prio.gateSel = gateIdxProbe
 	if !m.prio.probeOn {
 		t.Fatal("夹具未写 probe_enabled, 缺省应为开")
 	}
@@ -521,7 +521,7 @@ func TestSettingsProbeEditAndSave(t *testing.T) {
 	}
 	e.probeOn = false
 	e.gateDirty = true
-	e.setGatePrompt(13, "on")
+	e.setGatePrompt(gateIdxProbe, "on")
 	if !e.probeOn {
 		t.Fatal("= on 应打开开关")
 	}
@@ -542,12 +542,12 @@ func TestSettingsProbeEditAndSave(t *testing.T) {
 func TestSettingsBackoffInput(t *testing.T) {
 	_, cfg := prioFixture(t)
 	e := newTuiEditor(cfg)
-	e.setGatePrompt(len(gateLabels)-1, "1, 2,3")
+	e.setGatePrompt(gateIdxRetry, "1, 2,3")
 	if got := strings.Join(itoaSlice(e.gate.RetryBackoffMs), ","); got != "1000,2000,3000" {
 		t.Errorf("退避序列(秒)解析不对: %q", got)
 	}
 	e.gateDirty = false
-	e.setGatePrompt(len(gateLabels)-1, "1,x")
+	e.setGatePrompt(gateIdxRetry, "1,x")
 	if e.gateDirty {
 		t.Errorf("非法输入不该标记未保存")
 	}

@@ -125,7 +125,7 @@ func (e *tuiEditor) key(b byte) (quit bool, handled bool) {
 			e.adjust(-1)
 		case '=':
 			i := e.gateSel
-			e.prompt = &tuiPrompt{label: "新的 " + gateLabels[i] + ":", commit: func(v string) {
+			e.prompt = &tuiPrompt{label: "新的 " + gateCN[i] + ":", commit: func(v string) {
 				e.setGatePrompt(i, v)
 			}}
 		default:

@@ -155,6 +155,14 @@ func tuiPad(s string, w int) string {
 	return s
 }
 
+// tuiPadLeft 左补空格到 w 列 (右对齐显示用, 不截断)。
+func tuiPadLeft(s string, w int) string {
+	if n := tuiWidth(s); n < w {
+		return strings.Repeat(" ", w-n) + s
+	}
+	return s
+}
+
 // tuiTrunc 截到 w 列以内 (只看可见字符, ANSI 序列不占列宽); 截断时末尾留 ~。
 func tuiTrunc(s string, w int) string {
 	if tuiWidth(s) <= w {

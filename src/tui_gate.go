@@ -13,16 +13,32 @@ import (
 )
 
 // gateLabels 是设置页里 gate 参数的顺序与名字, 与 GateCfg 的字段一一对应;
+// 同类配置归到一起: 调度等待 -> 各锁时长 -> 低性能判定 -> 显示窗口 -> 恢复探测。
 // 时间字段与配置文件的顶层键一致用秒 (`*_sec`, 可小数), 单位见各 gateText;
-// 最后一项是退避序列, 只能用 = 按逗号输入 (秒)。probe_enabled 是开关 (0/1 = 关/开)。
+// 退避序列只能用 = 按逗号输入 (秒); probe_enabled 是开关 (0/1 = 关/开)。
 var gateLabels = []string{
-	"interval_sec", "sem_wait_sec", "queue_wait_sec",
-	"concurrency_lock_sec", "quota_lock_sec", "breaker_lock_sec",
-	"lowperf_window_sec", "lowperf_peak_max", "lowperf_avg_max", "lowperf_ttfb_max_sec", "lowperf_lock_sec",
-	"rate_window_sec", "block_window_sec",
-	"probe_enabled",
-	"retry_backoff_sec",
+	"interval_sec", "sem_wait_sec", "queue_wait_sec", "retry_backoff_sec",
+	"concurrency_lock_sec", "quota_lock_sec", "breaker_lock_sec", "lowperf_lock_sec",
+	"lowperf_window_sec", "lowperf_peak_max", "lowperf_avg_max", "lowperf_ttfb_max_sec",
+	"rate_window_sec", "block_window_sec", "probe_enabled",
 }
+
+// gateCN 与 gateLabels 一一对应的中文显示名 (设置页用)。
+var gateCN = []string{
+	"出队间隔", "等并发槽位", "排队上限", "退避序列",
+	"并发锁时长", "额度锁时长", "熔断锁时长", "低性能锁时长",
+	"低性能窗口", "低吞吐峰值", "低吞吐平均", "高延迟阈值",
+	"速度窗口", "采样尺度", "恢复探测",
+}
+
+// 特殊字段的下标 (code 里按下标分支, 集中在这些常量上, 重排顺序只改 gateLabels/gateCN)。
+const (
+	gateIdxRetry = 3  // 退避序列: 逗号秒串, 只能 = 输入
+	gateIdxTtfb  = 11 // 高延迟阈值 (0 = 关闭该项)
+	gateIdxPeak  = 9  // 低吞吐峰值门槛 (t/s)
+	gateIdxAvg   = 10 // 低吞吐平均门槛 (t/s)
+	gateIdxProbe = 14 // 恢复探测开关
+)
 
 // gateStep 是 +/- 一次调整的步长 (退避序列返回 0 = 不用加减键)。
 func gateStep(i int) int {
@@ -31,24 +47,26 @@ func gateStep(i int) int {
 		return 100
 	case 1, 2:
 		return 500
-	case 3, 4, 5, 6, 10:
-		return 60000
-	case 7, 8:
-		return 1
-	case 9:
-		return 1000
+	case 3:
+		return 0 // retry: 用 = 按逗号输入
+	case 4, 5, 6, 7, 8:
+		return 60000 // 四把锁 + 低性能判定窗口
+	case 9, 10:
+		return 1 // 低吞吐门槛 t/s
 	case 11:
-		return 600000 // rate_window_ms: 每次 10 分钟
+		return 1000 // 高延迟阈值
 	case 12:
-		return 5000 // block_window_ms: 每次 5 秒
+		return 600000 // rate_window: 每次 10 分钟
 	case 13:
+		return 5000 // block_window: 每次 5 秒
+	case 14:
 		return 1 // probe_enabled: 每次翻转 0/1
 	}
 	return 0
 }
 
-// gateField 取/设一个 gate 参数 (i 是 gateLabels 的下标);
-// 11/12 是扁平顶层窗口参数 (rate/block), 不走 GateCfg。
+// gateField 取一个 gate 参数 (i 是 gateLabels 的下标);
+// 12/13 是扁平顶层窗口参数 (rate/block), 不走 GateCfg。
 func (e *tuiEditor) gateField(i int) int {
 	g := e.gate
 	switch i {
@@ -58,27 +76,27 @@ func (e *tuiEditor) gateField(i int) int {
 		return g.SemWaitMs
 	case 2:
 		return g.QueueWaitMs
-	case 3:
-		return g.ConcurrencyLockMs
 	case 4:
-		return g.QuotaLockMs
+		return g.ConcurrencyLockMs
 	case 5:
-		return g.BreakerLockMs
+		return g.QuotaLockMs
 	case 6:
-		return g.LowPerfWindowMs
+		return g.BreakerLockMs
 	case 7:
-		return g.LowPerfPeakMax
-	case 8:
-		return g.LowPerfAvgMax
-	case 9:
-		return g.LowPerfTtfbMaxMs
-	case 10:
 		return g.LowPerfLockMs
+	case 8:
+		return g.LowPerfWindowMs
+	case 9:
+		return g.LowPerfPeakMax
+	case 10:
+		return g.LowPerfAvgMax
 	case 11:
-		return e.rateWinMs
+		return g.LowPerfTtfbMaxMs
 	case 12:
-		return e.blockWinMs
+		return e.rateWinMs
 	case 13:
+		return e.blockWinMs
+	case 14:
 		if e.probeOn {
 			return 1
 		}
@@ -87,26 +105,26 @@ func (e *tuiEditor) gateField(i int) int {
 	return 0
 }
 
-// gateText 是设置页里那一行的值: 时间字段与配置一致按秒 (可小数), 退避序列写成逗号秒串,
-// 两个门槛的单位是 tokens/s, 开关写 开/关。
+// gateText 是设置页里那一行的值+单位: 时间字段与配置一致按秒 (可小数, 单位 s),
+// 退避序列写成逗号秒串, 两个门槛的单位是 t/s, 开关写 开/关。
 func (e *tuiEditor) gateText(i int) string {
-	if i == len(gateLabels)-1 {
+	if i == gateIdxRetry {
 		parts := make([]string, 0, len(e.gate.RetryBackoffMs))
 		for _, v := range e.gate.RetryBackoffMs {
 			parts = append(parts, fsec(v))
 		}
-		return strings.Join(parts, ",")
+		return strings.Join(parts, ",") + " s"
 	}
-	if i == 7 || i == 8 {
+	if i == gateIdxPeak || i == gateIdxAvg {
 		return strconv.Itoa(e.gateField(i)) + " t/s"
 	}
-	if i == 13 {
+	if i == gateIdxProbe {
 		if e.probeOn {
 			return "开"
 		}
 		return "关"
 	}
-	return fsec(e.gateField(i)) // 秒, 可小数
+	return fsec(e.gateField(i)) + " s" // 秒, 可小数
 }
 
 // fsec 把内部毫秒按配置口径写成秒的显示串 (去尾零, 保留小数)。
@@ -117,7 +135,7 @@ func fsec(ms int) string {
 // isSecField 是否时间类字段 (显示/输入都用秒)。
 func isSecField(i int) bool {
 	switch i {
-	case 0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12:
+	case 0, 1, 2, 4, 5, 6, 7, 8, 11, 12, 13:
 		return true
 	}
 	return false
@@ -179,48 +197,48 @@ func (e *tuiEditor) adjustGate(delta int) {
 	case 2:
 		v = clampInt(v, 100, 600000)
 		e.gate.QueueWaitMs = v
-	case 3:
-		v = clampInt(v, 1000, 86400000)
-		e.gate.ConcurrencyLockMs = v
 	case 4:
 		v = clampInt(v, 1000, 86400000)
-		e.gate.QuotaLockMs = v
+		e.gate.ConcurrencyLockMs = v
 	case 5:
 		v = clampInt(v, 1000, 86400000)
-		e.gate.BreakerLockMs = v
+		e.gate.QuotaLockMs = v
 	case 6:
 		v = clampInt(v, 1000, 86400000)
-		e.gate.LowPerfWindowMs = v
+		e.gate.BreakerLockMs = v
 	case 7:
-		v = clampInt(v, 1, 100000)
-		e.gate.LowPerfPeakMax = v
-	case 8:
-		v = clampInt(v, 1, 100000)
-		e.gate.LowPerfAvgMax = v
-	case 9:
-		v = clampInt(v, 0, 86400000)
-		e.gate.LowPerfTtfbMaxMs = v
-	case 10:
 		v = clampInt(v, 1000, 86400000)
 		e.gate.LowPerfLockMs = v
+	case 8:
+		v = clampInt(v, 1000, 86400000)
+		e.gate.LowPerfWindowMs = v
+	case 9:
+		v = clampInt(v, 1, 100000)
+		e.gate.LowPerfPeakMax = v
+	case 10:
+		v = clampInt(v, 1, 100000)
+		e.gate.LowPerfAvgMax = v
 	case 11:
+		v = clampInt(v, 0, 86400000)
+		e.gate.LowPerfTtfbMaxMs = v
+	case 12:
 		v = clampInt(v, 60000, 86400000)
 		e.rateWinMs = v
-	case 12:
+	case 13:
 		v = clampInt(v, 1000, 86400000)
 		e.blockWinMs = v
-	case 13:
+	case 14:
 		v = clampInt(v, 0, 1)
 		e.probeOn = v == 1
 	}
 	e.gateDirty = true
-	e.message = gateLabels[i] + " = " + e.gateText(i)
+	e.message = gateCN[i] + " = " + e.gateText(i)
 }
 
 // setGatePrompt 处理 = 输入: 时间字段与退避序列都用秒 (可小数, 与配置文件一致),
 // 两个门槛是整数 t/s, 开关用 0/1 / on/off / 开/关。
 func (e *tuiEditor) setGatePrompt(i int, text string) {
-	if i == len(gateLabels)-1 {
+	if i == gateIdxRetry {
 		// retry_backoff: 逗号分隔的正秒数 (可小数)。
 		parts := strings.Split(text, ",")
 		seq := make([]int, 0, len(parts))
@@ -245,7 +263,7 @@ func (e *tuiEditor) setGatePrompt(i int, text string) {
 		e.message = "retry_backoff_sec = " + text
 		return
 	}
-	if i == 13 {
+	if i == gateIdxProbe {
 		switch strings.ToLower(strings.TrimSpace(text)) {
 		case "0", "false", "off", "关":
 			e.probeOn = false
@@ -265,28 +283,28 @@ func (e *tuiEditor) setGatePrompt(i int, text string) {
 	}
 	if isSecField(i) {
 		ms, err := parseSec(text)
-		if err != nil || (ms == 0 && i != 9) {
-			e.message = gateLabels[i] + " 要非负秒数 (可小数)"
+		if err != nil || (ms == 0 && i != gateIdxTtfb) {
+			e.message = gateCN[i] + " 要非负秒数 (可小数)"
 			return
 		}
 		e.setSecField(i, ms)
 		e.gateDirty = true
-		e.message = gateLabels[i] + " = " + fsec(ms)
+		e.message = gateCN[i] + " = " + fsec(ms)
 		return
 	}
 	// lowperf_peak_max / lowperf_avg_max: 整数 t/s。
 	n, err := strconv.Atoi(strings.TrimSpace(text))
 	if err != nil || n < 1 {
-		e.message = gateLabels[i] + " 要正整数 (t/s)"
+		e.message = gateCN[i] + " 要正整数 (t/s)"
 		return
 	}
-	if i == 7 {
+	if i == gateIdxPeak {
 		e.gate.LowPerfPeakMax = n
-	} else if i == 8 {
+	} else if i == gateIdxAvg {
 		e.gate.LowPerfAvgMax = n
 	}
 	e.gateDirty = true
-	e.message = gateLabels[i] + " = " + strconv.Itoa(n)
+	e.message = gateCN[i] + " = " + strconv.Itoa(n)
 }
 
 // setSecField 把一个时间字段 (毫秒) 写回, i 是 gateLabels 下标 (isSecField 内的那些)。
@@ -298,21 +316,21 @@ func (e *tuiEditor) setSecField(i, ms int) {
 		e.gate.SemWaitMs = ms
 	case 2:
 		e.gate.QueueWaitMs = ms
-	case 3:
-		e.gate.ConcurrencyLockMs = ms
 	case 4:
-		e.gate.QuotaLockMs = ms
+		e.gate.ConcurrencyLockMs = ms
 	case 5:
-		e.gate.BreakerLockMs = ms
+		e.gate.QuotaLockMs = ms
 	case 6:
-		e.gate.LowPerfWindowMs = ms
-	case 9:
-		e.gate.LowPerfTtfbMaxMs = ms // 0 = 关闭高延迟判定
-	case 10:
+		e.gate.BreakerLockMs = ms
+	case 7:
 		e.gate.LowPerfLockMs = ms
+	case 8:
+		e.gate.LowPerfWindowMs = ms
 	case 11:
-		e.rateWinMs = ms
+		e.gate.LowPerfTtfbMaxMs = ms // 0 = 关闭高延迟判定
 	case 12:
+		e.rateWinMs = ms
+	case 13:
 		e.blockWinMs = ms
 	}
 }
