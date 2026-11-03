@@ -16,6 +16,8 @@ const (
 	tuiRed   = "\x1b[31m"
 	tuiGreen = "\x1b[32m"
 	tuiYell  = "\x1b[33m"
+	// tuiTitle 是 settings 页各区标题的颜色 (亮青, 区别于红/黄/绿的语义色)。
+	tuiTitle = "\x1b[36m"
 )
 
 // upPalette 是上游的专属色: 状态用红 / 黄 / 绿的正色 (31 / 32 / 33), 这里用青 / 品红 /

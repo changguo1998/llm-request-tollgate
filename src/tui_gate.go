@@ -13,14 +13,15 @@ import (
 )
 
 // gateLabels 是设置页里 gate 参数的顺序与名字, 与 GateCfg 的字段一一对应;
-// 最后一项是退避序列, 只能用 = 按逗号输入。probe_enabled 是扁平顶层开关 (0/1 = 关/开)。
+// 时间字段与配置文件的顶层键一致用秒 (`*_sec`, 可小数), 单位见各 gateText;
+// 最后一项是退避序列, 只能用 = 按逗号输入 (秒)。probe_enabled 是开关 (0/1 = 关/开)。
 var gateLabels = []string{
-	"interval_ms", "sem_wait_ms", "queue_wait_ms",
-	"concurrency_lock_ms", "quota_lock_ms", "breaker_lock_ms",
-	"lowperf_window_ms", "lowperf_peak_max", "lowperf_avg_max", "lowperf_ttfb_max_ms", "lowperf_lock_ms",
-	"rate_window_ms", "block_window_ms",
+	"interval_sec", "sem_wait_sec", "queue_wait_sec",
+	"concurrency_lock_sec", "quota_lock_sec", "breaker_lock_sec",
+	"lowperf_window_sec", "lowperf_peak_max", "lowperf_avg_max", "lowperf_ttfb_max_sec", "lowperf_lock_sec",
+	"rate_window_sec", "block_window_sec",
 	"probe_enabled",
-	"retry_backoff_ms",
+	"retry_backoff_sec",
 }
 
 // gateStep 是 +/- 一次调整的步长 (退避序列返回 0 = 不用加减键)。
@@ -86,15 +87,15 @@ func (e *tuiEditor) gateField(i int) int {
 	return 0
 }
 
-// gateText 是设置页里那一行的值 (退避序列写成逗号串, 与输入格式一致;
-// 两个门槛的单位是 tokens/s, 其余是毫秒)。
+// gateText 是设置页里那一行的值: 时间字段与配置一致按秒 (可小数), 退避序列写成逗号秒串,
+// 两个门槛的单位是 tokens/s, 开关写 开/关。
 func (e *tuiEditor) gateText(i int) string {
 	if i == len(gateLabels)-1 {
 		parts := make([]string, 0, len(e.gate.RetryBackoffMs))
 		for _, v := range e.gate.RetryBackoffMs {
-			parts = append(parts, strconv.Itoa(v))
+			parts = append(parts, fsec(v))
 		}
-		return strings.Join(parts, ",") + " ms"
+		return strings.Join(parts, ",")
 	}
 	if i == 7 || i == 8 {
 		return strconv.Itoa(e.gateField(i)) + " t/s"
@@ -105,7 +106,30 @@ func (e *tuiEditor) gateText(i int) string {
 		}
 		return "关"
 	}
-	return strconv.Itoa(e.gateField(i)) + " ms"
+	return fsec(e.gateField(i)) // 秒, 可小数
+}
+
+// fsec 把内部毫秒按配置口径写成秒的显示串 (去尾零, 保留小数)。
+func fsec(ms int) string {
+	return strconv.FormatFloat(msToSec(ms), 'f', -1, 64)
+}
+
+// isSecField 是否时间类字段 (显示/输入都用秒)。
+func isSecField(i int) bool {
+	switch i {
+	case 0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12:
+		return true
+	}
+	return false
+}
+
+// parseSec 把"秒"(可小数) 解析成内部毫秒。
+func parseSec(text string) (int, error) {
+	f, err := strconv.ParseFloat(strings.TrimSpace(text), 64)
+	if err != nil || f < 0 {
+		return 0, err
+	}
+	return secToMs(f), nil
 }
 
 // loadGate 读配置文件 (扁平顶层键, 时间为秒); 内部转为毫秒的 GateCfg 显示用。
@@ -190,12 +214,14 @@ func (e *tuiEditor) adjustGate(delta int) {
 		e.probeOn = v == 1
 	}
 	e.gateDirty = true
-	e.message = gateLabels[i] + " = " + strconv.Itoa(v)
+	e.message = gateLabels[i] + " = " + e.gateText(i)
 }
 
-// setGatePrompt 处理 = 输入: 普通参数一个整数, 退避序列是逗号分隔的毫秒数。
+// setGatePrompt 处理 = 输入: 时间字段与退避序列都用秒 (可小数, 与配置文件一致),
+// 两个门槛是整数 t/s, 开关用 0/1 / on/off / 开/关。
 func (e *tuiEditor) setGatePrompt(i int, text string) {
 	if i == len(gateLabels)-1 {
+		// retry_backoff: 逗号分隔的正秒数 (可小数)。
 		parts := strings.Split(text, ",")
 		seq := make([]int, 0, len(parts))
 		for _, p := range parts {
@@ -203,12 +229,12 @@ func (e *tuiEditor) setGatePrompt(i int, text string) {
 			if p == "" {
 				continue
 			}
-			n, err := strconv.Atoi(p)
-			if err != nil || n <= 0 {
-				e.message = "退避序列要逗号分隔的正整数"
+			ms, err := parseSec(p)
+			if err != nil || ms <= 0 {
+				e.message = "退避序列要逗号分隔的正秒数 (可小数)"
 				return
 			}
-			seq = append(seq, n)
+			seq = append(seq, ms)
 		}
 		if len(seq) == 0 {
 			e.message = "退避序列不能为空"
@@ -216,7 +242,7 @@ func (e *tuiEditor) setGatePrompt(i int, text string) {
 		}
 		e.gate.RetryBackoffMs = seq
 		e.gateDirty = true
-		e.message = "retry_backoff_ms = " + text
+		e.message = "retry_backoff_sec = " + text
 		return
 	}
 	if i == 13 {
@@ -237,41 +263,58 @@ func (e *tuiEditor) setGatePrompt(i int, text string) {
 		}
 		return
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(text))
-	if err != nil || n < 0 || (n == 0 && i != 9) {
-		e.message = gateLabels[i] + " 要正整数"
+	if isSecField(i) {
+		ms, err := parseSec(text)
+		if err != nil || (ms == 0 && i != 9) {
+			e.message = gateLabels[i] + " 要非负秒数 (可小数)"
+			return
+		}
+		e.setSecField(i, ms)
+		e.gateDirty = true
+		e.message = gateLabels[i] + " = " + fsec(ms)
 		return
 	}
-	switch i {
-	case 0:
-		e.gate.IntervalMs = n
-	case 1:
-		e.gate.SemWaitMs = n
-	case 2:
-		e.gate.QueueWaitMs = n
-	case 3:
-		e.gate.ConcurrencyLockMs = n
-	case 4:
-		e.gate.QuotaLockMs = n
-	case 5:
-		e.gate.BreakerLockMs = n
-	case 6:
-		e.gate.LowPerfWindowMs = n
-	case 7:
+	// lowperf_peak_max / lowperf_avg_max: 整数 t/s。
+	n, err := strconv.Atoi(strings.TrimSpace(text))
+	if err != nil || n < 1 {
+		e.message = gateLabels[i] + " 要正整数 (t/s)"
+		return
+	}
+	if i == 7 {
 		e.gate.LowPerfPeakMax = n
-	case 8:
+	} else if i == 8 {
 		e.gate.LowPerfAvgMax = n
-	case 9:
-		e.gate.LowPerfTtfbMaxMs = n // 0 = 关闭高延迟判定
-	case 10:
-		e.gate.LowPerfLockMs = n
-	case 11:
-		e.rateWinMs = n
-	case 12:
-		e.blockWinMs = n
 	}
 	e.gateDirty = true
 	e.message = gateLabels[i] + " = " + strconv.Itoa(n)
+}
+
+// setSecField 把一个时间字段 (毫秒) 写回, i 是 gateLabels 下标 (isSecField 内的那些)。
+func (e *tuiEditor) setSecField(i, ms int) {
+	switch i {
+	case 0:
+		e.gate.IntervalMs = ms
+	case 1:
+		e.gate.SemWaitMs = ms
+	case 2:
+		e.gate.QueueWaitMs = ms
+	case 3:
+		e.gate.ConcurrencyLockMs = ms
+	case 4:
+		e.gate.QuotaLockMs = ms
+	case 5:
+		e.gate.BreakerLockMs = ms
+	case 6:
+		e.gate.LowPerfWindowMs = ms
+	case 9:
+		e.gate.LowPerfTtfbMaxMs = ms // 0 = 关闭高延迟判定
+	case 10:
+		e.gate.LowPerfLockMs = ms
+	case 11:
+		e.rateWinMs = ms
+	case 12:
+		e.blockWinMs = ms
+	}
 }
 
 // marshalConfig 按固定的顶层顺序写回配置文件: 手写 JSON 是因为 map 会把键排序,

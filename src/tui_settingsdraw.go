@@ -6,9 +6,9 @@ import (
 	"strconv"
 )
 
-// drawSettings 画设置页: 左栏调度参数 (gate) + provider 面板 + 模型列表, 右栏候选顺序
-// 预览, 底部消息行。列宽按内容算, 右栏一直顶到终端右边界; 不补装饰空行, 短的一栏就
-// 让右侧继续显示。
+// drawSettings 画设置页: 三列并排 —— 第 1 列 全局参数 + 供应商, 第 2 列 模型, 第 3 列 预览,
+// 底部消息行。各区标题中文, 焦点区用 [ 标题 ] 括起; 标题用 tuiTitle 色。列宽按内容算,
+// 第 3 列吃掉剩余宽度, 一直顶到终端右边界。
 func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 	e := m.prio
 	if e == nil {
@@ -18,10 +18,8 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 	gateLines := 1 + len(gateLabels)
 	provH := 0
 	if e.usable() {
-		// 上游列表优先显示全 (通常就 4-6 个), 剩下的行给模型列表。
 		provH = min(len(e.providers), max(1, body-gateLines-7))
 	}
-	// 段与段之间留一个空行: gate / Providers / 模型。
 	visible := max(1, body-gateLines-provH-5)
 	rows := e.filtered()
 	if len(rows) == 0 {
@@ -43,24 +41,19 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 		e.top = max(0, len(rows)-1)
 	}
 
-	left := make([]string, 0, body)
-	focusGate := ""
-	if e.focus == 2 {
-		focusGate = " (焦点)"
-	}
-	left = append(left, tuiBold+"全局参数 (global)"+focusGate+tuiReset)
+	// ---- 第 1 列: 全局参数 + 供应商 ----
+	col1 := make([]string, 0, body)
+	col1 = append(col1, settingsTitle("全局参数", e.focus == 2))
 	for i := range gateLabels {
 		text := tuiIndent + gateLabels[i] + "  " + e.gateText(i)
 		if e.focus == 2 && i == e.gateSel {
 			text = tuiRev + text + tuiReset
 		}
-		left = append(left, text)
+		col1 = append(col1, text)
 	}
-	left = append(left, "")
-	if !e.usable() {
-		left = append(left, tuiYell+"store 读不到: "+e.err+tuiReset)
-	} else {
-		left = append(left, tuiBold+e.provTitle()+tuiReset)
+	col1 = append(col1, "")
+	col1 = append(col1, settingsTitle("供应商", e.focus == 1))
+	if e.usable() {
 		for i, name := range e.providers {
 			if i >= provH {
 				break
@@ -69,28 +62,38 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 			if e.focus == 1 && i == e.provSel {
 				attr = tuiRev
 			}
-			left = append(left, attr+tuiIndent+name+"  priority="+strconv.Itoa(prioOf(e.provEntry(name)))+tuiReset)
+			col1 = append(col1, attr+tuiIndent+name+"  priority="+strconv.Itoa(prioOf(e.provEntry(name)))+tuiReset)
 		}
-		left = append(left, "")
-		hidden := len(e.droplist())
-		left = append(left, tuiBold+e.listTitle(len(rows), hidden)+tuiReset)
-		for i := e.top; i < min(len(rows), e.top+visible); i++ {
-			row := rows[i]
-			attr := ""
-			if e.focus == 0 && i == e.modelSel {
-				attr = tuiRev
-			}
-			text := tuiIndent + "M" + strconv.Itoa(prioOf(row.model)) + " P" + strconv.Itoa(prioOf(row.entry)) +
-				" " + row.provider + "/" + modelID(row.model)
-			left = append(left, attr+text+tuiReset)
-		}
+	} else {
+		col1 = append(col1, tuiYell+"store 读不到: "+e.err+tuiReset)
 	}
 
-	right := make([]string, 0, body)
-	right = append(right, tuiBold+tuiIndent+"候选顺序预览"+tuiReset)
+	// ---- 第 2 列: 模型 ----
+	col2 := make([]string, 0, body)
+	hidden := len(e.droplist())
+	flt := e.filter
+	if flt == "" {
+		flt = "-"
+	}
+	t := "模型 (过滤: " + flt + ", " + strconv.Itoa(len(rows)) + " 个, 黑名单剔除 " + strconv.Itoa(hidden) + ")"
+	col2 = append(col2, settingsTitle(t, e.focus == 0))
+	for i := e.top; i < min(len(rows), e.top+visible); i++ {
+		row := rows[i]
+		attr := ""
+		if e.focus == 0 && i == e.modelSel {
+			attr = tuiRev
+		}
+		text := tuiIndent + "M" + strconv.Itoa(prioOf(row.model)) + " P" + strconv.Itoa(prioOf(row.entry)) +
+			" " + row.provider + "/" + modelID(row.model)
+		col2 = append(col2, attr+text+tuiReset)
+	}
+
+	// ---- 第 3 列: 预览 ----
+	col3 := make([]string, 0, body)
+	col3 = append(col3, settingsTitle("预览", false))
 	if row := e.selected(); row != nil {
 		cands := e.candsFor(row.alias)
-		right = append(right, tuiBold+tuiIndent+row.alias+" ("+strconv.Itoa(len(cands))+" 候选)"+tuiReset)
+		col3 = append(col3, tuiBold+tuiIndent+row.alias+" ("+strconv.Itoa(len(cands))+" 候选)"+tuiReset)
 		for i, cand := range cands {
 			attr := ""
 			if cand.provider == row.provider && cand.modelID == modelID(row.model) {
@@ -98,51 +101,46 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 			}
 			text := tuiIndent + strconv.Itoa(i+1) + ". " + cand.provider + "/" + cand.modelID +
 				"  M" + strconv.Itoa(cand.modelPrio) + " P" + strconv.Itoa(cand.provPrio)
-			right = append(right, attr+text+tuiReset)
+			col3 = append(col3, attr+text+tuiReset)
 		}
 	}
 
-	// 左右宽度都按内容算; 右栏吃掉剩余宽度, 一直顶到终端右边界。
-	leftW := 32
-	for _, s := range left {
-		leftW = max(leftW, tuiWidth(s)+1)
-	}
-	leftW = min(leftW, max(24, m.cols-16))
-	rightW := max(8, m.cols-leftW-1)
-
-	n := max(len(left), len(right))
+	// 第 1 / 2 列按内容宽, 第 3 列吃掉剩余; 各列不足的行补空。
+	w1 := colWidth(col1)
+	w2 := colWidth(col2)
+	w3 := max(6, m.cols-2-w1-w2-2)
+	n := max(len(col1), max(len(col2), len(col3)))
 	for i := 0; i < n; i++ {
-		l, r := "", ""
-		if i < len(left) {
-			l = left[i]
-		}
-		if i < len(right) {
-			r = right[i]
-		}
-		c.line(tuiPad(l, leftW) + tuiPad(r, rightW))
+		c.line(tuiPad(atSlice(col1, i), w1) + " " + tuiPad(atSlice(col2, i), w2) + " " + tuiPad(atSlice(col3, i), w3))
 	}
 	c.line(m.prioMessage(e))
 }
 
-func (e *tuiEditor) provTitle() string {
-	focus := ""
-	if e.focus == 1 {
-		focus = " (焦点)"
+// atSlice 取切片第 i 项, 越界给空串 (三列行数不同时补空)。
+func atSlice(s []string, i int) string {
+	if i < len(s) {
+		return s[i]
 	}
-	return tuiIndent + "Providers" + focus
+	return ""
 }
 
-func (e *tuiEditor) listTitle(shown, hidden int) string {
-	focus := ""
-	if e.focus == 0 {
-		focus = " (焦点)"
+// colWidth 是切片里最宽一行的显示宽度。
+func colWidth(s []string) int {
+	w := 0
+	for _, l := range s {
+		if n := tuiWidth(l); n > w {
+			w = n
+		}
 	}
-	filter := e.filter
-	if filter == "" {
-		filter = "-"
+	return w
+}
+
+// settingsTitle 拼区标题: 焦点时加方括号, 一律用标题色。
+func settingsTitle(text string, focused bool) string {
+	if focused {
+		return tuiTitle + "[ " + text + " ]" + tuiReset
 	}
-	return tuiIndent + "模型 (过滤: " + filter + ", " + strconv.Itoa(shown) + " 个, 黑名单剔除 " +
-		strconv.Itoa(hidden) + ")" + focus
+	return tuiTitle + text + tuiReset
 }
 
 // prioMessage 拼底部消息行 (输入态、未保存提醒、错误都在这一行)。

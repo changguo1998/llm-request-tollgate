@@ -345,8 +345,8 @@ func TestPrioDraw(t *testing.T) {
 	if !strings.Contains(frame, "[优先级未保存]") {
 		t.Errorf("改了没存应显示 [优先级未保存]")
 	}
-	if !strings.Contains(frame, "候选顺序预览") {
-		t.Errorf("右栏应是候选顺序预览")
+	if !strings.Contains(frame, "预览") {
+		t.Errorf("右栏应是预览")
 	}
 
 	// store 读不到时只报错, 不 panic (把 FFF_HOME 指到空目录, 免得退回真 store)。
@@ -538,16 +538,16 @@ func TestSettingsProbeEditAndSave(t *testing.T) {
 	}
 }
 
-// 退避序列只能按逗号输入, 非法输入不落盘。
+// 退避序列只能用 = 按逗号输入秒, 非法输入不落盘。
 func TestSettingsBackoffInput(t *testing.T) {
 	_, cfg := prioFixture(t)
 	e := newTuiEditor(cfg)
-	e.setGatePrompt(len(gateLabels)-1, "1000, 2000,3000")
+	e.setGatePrompt(len(gateLabels)-1, "1, 2,3")
 	if got := strings.Join(itoaSlice(e.gate.RetryBackoffMs), ","); got != "1000,2000,3000" {
-		t.Errorf("退避序列解析不对: %q", got)
+		t.Errorf("退避序列(秒)解析不对: %q", got)
 	}
 	e.gateDirty = false
-	e.setGatePrompt(len(gateLabels)-1, "1000,x")
+	e.setGatePrompt(len(gateLabels)-1, "1,x")
 	if e.gateDirty {
 		t.Errorf("非法输入不该标记未保存")
 	}
