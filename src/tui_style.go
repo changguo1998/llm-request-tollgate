@@ -18,6 +18,8 @@ const (
 	tuiYell  = "\x1b[33m"
 	// tuiTitle 是 settings 页各区标题的颜色 (亮青, 区别于红/黄/绿的语义色)。
 	tuiTitle = "\x1b[36m"
+	// tuiEditBg 是 settings 页进入输入编辑 (=) 时的强调背景色 (蓝底), 区别于普通反显。
+	tuiEditBg = "\x1b[44m"
 )
 
 // upPalette 是上游的专属色: 状态用红 / 黄 / 绿的正色 (31 / 32 / 33), 这里用青 / 品红 /

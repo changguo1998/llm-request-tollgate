@@ -132,6 +132,28 @@ func fsec(ms int) string {
 	return strconv.FormatFloat(msToSec(ms), 'f', -1, 64)
 }
 
+// gateNumUnit 把一行的值拆成「数字」与「单位」: 数字列右对齐 (小数点/最后一位对齐),
+// 单位跟在后面成列。开关行没有数字, 开/关本身当单位摆进单位列。
+func (e *tuiEditor) gateNumUnit(i int) (num, unit string) {
+	if i == gateIdxRetry {
+		parts := make([]string, 0, len(e.gate.RetryBackoffMs))
+		for _, v := range e.gate.RetryBackoffMs {
+			parts = append(parts, fsec(v))
+		}
+		return strings.Join(parts, ","), "s"
+	}
+	if i == gateIdxPeak || i == gateIdxAvg {
+		return strconv.Itoa(e.gateField(i)), "t/s"
+	}
+	if i == gateIdxProbe {
+		if e.probeOn {
+			return "", "开"
+		}
+		return "", "关"
+	}
+	return fsec(e.gateField(i)), "s"
+}
+
 // isSecField 是否时间类字段 (显示/输入都用秒)。
 func isSecField(i int) bool {
 	switch i {

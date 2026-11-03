@@ -44,17 +44,23 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 	// ---- 第 1 列: 全局参数 + 供应商 ----
 	col1 := make([]string, 0, body)
 	col1 = append(col1, settingsTitle("全局参数", e.focus == 2))
-	// 冒号紧跟文字后面; 值列右对齐到固定宽, 让数字 (与单位) 成列对齐。
-	valueW := 0
+	// 字段左对齐; 值拆成数字+单位, 数字列右对齐 (小数点/最后一位对齐), 单位列固定。
+	numW := 0
 	for i := range gateLabels {
-		if w := tuiWidth(e.gateText(i)); w > valueW {
-			valueW = w
+		n, _ := e.gateNumUnit(i)
+		if w := tuiWidth(n); w > numW {
+			numW = w
 		}
 	}
 	for i := range gateLabels {
-		text := tuiIndent + gateCN[i] + ": " + tuiPadLeft(e.gateText(i), valueW)
+		n, u := e.gateNumUnit(i)
+		text := tuiIndent + gateCN[i] + ": " + tuiPadLeft(n, numW) + " " + u
 		if e.focus == 2 && i == e.gateSel {
-			text = tuiRev + text + tuiReset
+			if e.prompt != nil {
+				text = tuiEditBg + text + tuiReset // 正在 = 编辑: 蓝底强调
+			} else {
+				text = tuiRev + text + tuiReset
+			}
 		}
 		col1 = append(col1, text)
 	}
@@ -169,5 +175,9 @@ func (m *tuiModel) prioMessage(e *tuiEditor) string {
 	if e.err != "" {
 		text += " store 读不到: " + e.err
 	}
-	return tuiRev + tuiPad(tuiIndent+text+" ", m.cols-1) + tuiReset
+	bg := tuiRev
+	if e.prompt != nil {
+		bg = tuiEditBg // = 编辑输入态: 整行换强调背景色
+	}
+	return bg + tuiPad(tuiIndent+text+" ", m.cols-1) + tuiReset
 }
