@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$HOME/.config/systemd/user/tollgate.service"
 
 if [ ! -x "$ROOT/llm-request-tollgate" ]; then
-  echo "缺少二进制: 先在仓库根目录 go build -o llm-request-tollgate ."; exit 1
+  echo "缺少二进制: 先在仓库根目录 make build (cd src && go build -o ../llm-request-tollgate .)"; exit 1
 fi
 if [ ! -f "$ROOT/config.local.json" ]; then
   echo "缺少 config.local.json: 从 config.example.json 复制并填写后再装"; exit 1

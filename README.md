@@ -59,7 +59,7 @@
 ## 快速开始
 
 ```bash
-go build ./...
+make build   # 源码在 src/, 二进制产出到根目录 (等价 cd src && go build -o ../llm-request-tollgate .)
 # 填好 config.local.json (从 config.example.json 复制) 后:
 ./llm-request-tollgate -config config.local.json
 # 起假上游 + 全量自测 (16 组用例 117 项断言):
@@ -135,7 +135,7 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 
 - 安装常驻: `./deploy/tollgate.sh install` (systemd 用户服务, 崩了自动拉起)。
 - 日常操作: `./deploy/tollgate.sh <status|logs|restart|stop|start|hup|uninstall>`
-  - `restart` 更新代码后用它: 先 `go build -o llm-request-tollgate .`
+  - `restart` 更新代码后用它: 先 `make build` (源码在 `src/`, 二进制产出到根目录)
     再 `./deploy/tollgate.sh restart` (二进制被替换不会自动重启, 需手动 restart)。
   - `hup` 改 `config.local.json` 别名/上游后热加载, 不用重启。
 - 自检: `./test/healthcheck.example.sh` (公开仓库的示例版, 密钥要自己 export; 本机版
@@ -262,12 +262,14 @@ token) 与 `-usage` (上游 + 模型 × 窗口的 token 分解)。
 
 ## 目录
 
-- `*.go` 代理本体, 按职责分文件: `main.go` 入口, `config.go` 配置, `errclass.go` 报错分类,
-  `gate*.go` 调度与锁, `serve*.go` 转发主链路, `relay.go` SSE 透传, `observe*.go` 观测面,
-  `log.go` / `usage.go` 日志与用量, `rate.go` 吞吐口径, `summary.go`
-  汇总命令 (含假上游自测所需的全部实现)。
-- `test/fakeupstream/` 假上游: 回放思考块 / 文本 / 工具调用 / usage 的 SSE,
-  支持中途断流 (验证 F6)。
+- `src/` 整个 Go 模块 (源码 + `go.mod`): `*.go` 代理本体按职责分文件 —— `main.go` 入口,
+  `config.go` 配置, `errclass.go` 报错分类, `gate*.go` 调度与锁, `serve*.go` 转发主链路,
+  `relay.go` SSE 透传, `observe*.go` 观测面, `log.go` / `usage.go` 日志与用量,
+  `rate.go` 吞吐口径, `summary.go` 汇总命令 (含假上游自测所需的全部实现);
+  以及 `src/test/fakeupstream/` 假上游 (回放思考块 / 文本 / 工具调用 / usage 的 SSE,
+  支持中途断流, 验证 F6)。
+- `analysis/` 历史请求日志的分析脚本 (只读 `var/` 的 JSONL 归档, 评估锁阈值)。
+- `Makefile` 根目录唯一构建入口 (build / vet / test / fmt 都在 `src/` 下跑, 二进制产出到根目录)。
 - `test/run_selftest.sh` 自测: 16 组用例 117 项断言, 对本地假上游跑代理。
 - `test/healthcheck.example.sh` 自检示例: 二进制 / 配置 (-check) / 端口三项, 退出码
   0 = 全通过 (本机版 `healthcheck.sh` 在 dotfiles, 多一项 fff 密钥自动加载)。
@@ -284,8 +286,8 @@ token) 与 `-usage` (上游 + 模型 × 窗口的 token 分解)。
   表格, `tui_flow*.go` / `tui_rows.go` active 页, `tui_models.go` / `tui_events.go` 后两页,
   `tui_settings*.go` / `tui_gate.go` / `tui_store.go` / `tui_prio*.go` settings 页调 gate
   参数与权重 (写配置与 store, 候选顺序实时预览, 界面内即可保存 / 重生成配置 / 热加载)。
-- `gate_test.go` / `proxy_test.go` / `tui_*_test.go` 单元与端到端测试 (`go test .`): 调度
-  核心 (排队节拍、试探放宽、四类锁、错误归类、退避熔断、锁落盘)、经代理转发的完整链路,
-  以及状态台版式与 settings 页存盘。
+- `src/` 下的 `gate_test.go` / `proxy_test.go` / `tui_*_test.go` 单元与端到端测试
+  (`cd src && go test .`): 调度核心 (排队节拍、试探放宽、四类锁、错误归类、退避熔断、
+  锁落盘)、经代理转发的完整链路, 以及状态台版式与 settings 页存盘。
 - `test/tmp/` 与 `var/` 是运行产物 (自测二进制/假上游日志; 请求日志与 `gate-state.json`
   等状态), 都在 `.gitignore` 内。

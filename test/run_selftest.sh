@@ -32,12 +32,12 @@ cleanup() {
 trap cleanup EXIT
 
 build() {
-    say "[build] tollgate + fakeupstream"
-    go build -o "$BIN/tollgate" . || {
+    say "[build] tollgate + fakeupstream (源码在 src/)"
+    ( cd "$ROOT/src" && go build -o "$BIN/tollgate" . ) || {
         say "build tollgate failed"
         exit 1
     }
-    go build -o "$BIN/fakeupstream" ./test/fakeupstream || {
+    ( cd "$ROOT/src" && go build -o "$BIN/fakeupstream" ./test/fakeupstream ) || {
         say "build fakeupstream failed"
         exit 1
     }

@@ -6,7 +6,7 @@
 ## 1. 快速上手
 
 ```bash
-go build -o llm-request-tollgate .
+make build   # 源码在 src/, 二进制产出到根目录 (等价 cd src && go build -o ../llm-request-tollgate .)
 # 从模板复制并填好配置 (密钥走环境变量, 见 §3):
 cp config.example.json config.local.json
 ./llm-request-tollgate -config config.local.json
@@ -120,7 +120,7 @@ connect 与 stream_idle 取每次建连 / 读写时的当前值, response_header
 
 ```bash
 git pull                    # 或手动更新到目标版本
-go build -o llm-request-tollgate .
+make build                  # 源码在 src/, 二进制产出到根目录
 ./deploy/tollgate.sh restart   # 二进制被替换不会自动重启, 需手动 restart
 ```
 
@@ -130,7 +130,7 @@ go build -o llm-request-tollgate .
 
 ```bash
 # 方法一: git 回旧版本重建
-git checkout <旧版本> && go build -o llm-request-tollgate . && ./deploy/tollgate.sh restart
+git checkout <旧版本> && make build && ./deploy/tollgate.sh restart
 # 方法二: 升级前先备份旧二进制
 cp llm-request-tollgate llm-request-tollgate.bak
 # 出问题时:
@@ -244,7 +244,7 @@ python3 scripts/gen_tollgate_config.example.py
 | 症状 | 排查方向 |
 |---|---|
 | 服务起不来 / 崩了重启 | `./deploy/tollgate.sh status`; systemctl 失败原因看 `journalctl --user -u tollgate.service -e` |
-| 提示缺二进制 / 缺配置 | install 会检查; 先 `go build -o llm-request-tollgate .` 与备好 `config.local.json` |
+| 提示缺二进制 / 缺配置 | install 会检查; 先 `make build` 与备好 `config.local.json` |
 | 密钥没加载 (401) | `./deploy/tollgate.sh logs` 看 `Loaded xxx.ai`; `-check` 验证 key_env |
 | 一片 429 | 先分 `gate` 字段: `locked` 看 `var/gate-state.json` (锁到几点、什么原因); `sem_timeout` / `queue_timeout` 是并发 / 排队不够, 调 `gate` 参数 |
 | 某模型持续 429 / 慢 | 熔断锁只锁 `上游/模型`, 换别的模型或等锁到期; 看 `/v1/state` 的 `cands[].models` |
