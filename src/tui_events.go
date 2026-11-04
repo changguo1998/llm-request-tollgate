@@ -3,6 +3,7 @@
 package main
 
 import (
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -136,8 +137,8 @@ func (m *tuiModel) routeRows() []*routeRow {
 }
 
 func (m *tuiModel) routeSummary(rows []*routeRow) string {
-	var reqs, errs, fb, total, cached, ttfbN int
-	var ttfbSum int64
+	var reqs, errs, fb, total, cached int
+	var ttfbPts []ttfbPoint
 	var first, last time.Time
 	for _, r := range rows {
 		reqs += r.Reqs
@@ -145,8 +146,7 @@ func (m *tuiModel) routeSummary(rows []*routeRow) string {
 		fb += r.Fallbacks
 		total += r.Total
 		cached += r.Cached
-		ttfbSum += r.TtfbSum
-		ttfbN += r.TtfbN
+		ttfbPts = append(ttfbPts, r.TtfbPts...)
 		if r.First.IsZero() {
 			continue
 		}
@@ -165,14 +165,18 @@ func (m *tuiModel) routeSummary(rows []*routeRow) string {
 	if total > 0 {
 		cache = ftoa(float64(cached)*100/float64(total), 0) + "%"
 	}
+	// 首字节汇总与表格列同口径: 平均/谷值。
 	ttfb := "-"
-	if ttfbN > 0 {
-		ttfb = durStr(time.Duration(ttfbSum/int64(ttfbN)) * time.Millisecond)
+	if len(ttfbPts) > 0 {
+		if avg, ok := ttfbAvg(ttfbPts, time.Now(), m.rateWin); ok {
+			ttfb = durStr(time.Duration(avg)*time.Millisecond) + "/" +
+				durStr(time.Duration(ttfbMin(ttfbPts))*time.Millisecond)
+		}
 	}
 	return "窗口 " + durStr(m.window) + " (实际 " + span + ")   " + strconv.Itoa(len(rows)) + " 条路由   " +
 		strconv.Itoa(reqs) + " 请求   " + strconv.Itoa(errs) + " 错误   " +
-		strconv.Itoa(fb) + " 次换候选   " + humanTokens(total) + " token (缓存 " + cache +
-		")   首字节平均 " + ttfb
+		strconv.Itoa(fb) + " 次换候选   " + strings.TrimLeft(humanTokens(total), " ") + " token (缓存 " + cache +
+		")   首字节 平均/谷值: " + ttfb
 }
 
 // mages 是"最近一次"列的写法: 距现在多久 (与其它时长同一口径)。
@@ -183,50 +187,73 @@ func mages(t time.Time) string {
 	return durStr(time.Since(t))
 }
 
-func humanTokens(n int) string {
-	switch {
-	case n >= 1_000_000:
-		return ftoa(float64(n)/1e6, 1) + "M"
-	case n >= 1_000:
-		return ftoa(float64(n)/1e3, 1) + "k"
+// unit4 把带单位的数字右对齐到固定 4 字符 (如 "1K" -> "  1K", "100K" 不变), 表格列内
+// 数字对齐靠它 + 列自身的右对齐; 超过 4 字符的极端大值原样返回, 不截断。
+func unit4(s string) string {
+	if len(s) >= 4 {
+		return s
 	}
-	return strconv.Itoa(n)
+	return strings.Repeat(" ", 4-len(s)) + s
+}
+
+// humanTokens 把 token 数写成短形式 (1000 进制): 千以上不保留小数, 四舍五入成整数 +
+// 单位 (K/M), 整体右对齐到 4 字符; 千以内的整数原样输出。
+func humanTokens(n int) string {
+	if n < 1_000 {
+		return strconv.Itoa(n)
+	}
+	if k := int(math.Round(float64(n) / 1e3)); k < 1_000 {
+		return unit4(strconv.Itoa(k) + "K")
+	}
+	return unit4(strconv.Itoa(int(math.Round(float64(n)/1e6))) + "M")
 }
 
 func ftoa(f float64, prec int) string { return strconv.FormatFloat(f, 'f', prec, 64) }
 
-// humanRate 把字节速率写成带单位的字符串 (1024 进制): 1.2 KB/s / 3.4 MB/s。
+// humanRate 把字节速率写成带单位的字符串 (1024 进制): 4 MB/s / 31 KB/s / 969 B/s,
+// 大单位不保留小数 (四舍五入成整数)。
 func humanRate(bps float64) string {
 	switch {
 	case bps >= 1<<20:
-		return ftoa(bps/(1<<20), 1) + " MB/s"
+		return strconv.Itoa(int(math.Round(bps/(1<<20)))) + " MB/s"
 	case bps >= 1<<10:
-		return ftoa(bps/(1<<10), 1) + " KB/s"
+		return strconv.Itoa(int(math.Round(bps/(1<<10)))) + " KB/s"
 	}
-	return itoa64(int64(bps)) + " B/s"
+	return strconv.Itoa(int(math.Round(bps))) + " B/s"
 }
 
 func itoa64(v int64) string { return strconv.FormatInt(v, 10) }
 
-// humanByte 把字节写成最简形式 (1024 进制, 不带 /s): 969B / 8.5K / 3.4M。
+// humanByte 把字节写成最简形式 (1024 进制, 不带 /s): 969B / 8K / 3M。K/M 分支不保留
+// 小数 (四舍五入成整数), 数字+单位整体右对齐到 4 字符。
 func humanByte(v float64) string {
 	switch {
 	case v >= 1<<20:
-		return ftoa(v/(1<<20), 1) + "M"
+		m := int(math.Round(v / (1 << 20)))
+		return unit4(strconv.Itoa(m) + "M")
 	case v >= 1<<10:
-		return ftoa(v/(1<<10), 1) + "K"
+		k := int(math.Round(v / (1 << 10)))
+		if k >= 1<<10 { // 四舍五入到 1024 就进位成 M
+			return unit4(strconv.Itoa(int(math.Round(v/(1<<20)))) + "M")
+		}
+		return unit4(strconv.Itoa(k) + "K")
 	}
-	return itoa64(int64(v)) + "B"
+	return unit4(itoa64(int64(v)) + "B")
 }
 
-// humanTPS 把吞吐 (tokens/s) 写成短形式: 小值 1 位小数, 千/百万进 K/M
-// (含输入的端到端速率动辄几万, 不缩写会把列撑破)。
+// humanTPS 把吞吐 (tokens/s) 写成短形式: 千/百万进 K/M 且不保留小数 (四舍五入成整数,
+// 整体右对齐到 4 字符), 千以内的小值保留 1 位小数 (含输入的端到端速率动辄几万,
+// 不缩写会把列撑破)。
 func humanTPS(v float64) string {
 	switch {
 	case v >= 1_000_000:
-		return ftoa(v/1e6, 1) + "M"
+		return unit4(strconv.Itoa(int(math.Round(v/1e6))) + "M")
 	case v >= 1_000:
-		return ftoa(v/1e3, 1) + "K"
+		k := int(math.Round(v / 1e3))
+		if k >= 1_000 { // 四舍五入到 1000 就进位成 M
+			return unit4(strconv.Itoa(int(math.Round(v/1e6))) + "M")
+		}
+		return unit4(strconv.Itoa(k) + "K")
 	}
 	return ftoa(v, 1)
 }

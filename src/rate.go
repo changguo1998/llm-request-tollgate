@@ -42,3 +42,28 @@ func tokRate(pts []tokPoint, now time.Time, window time.Duration) (avg, peak flo
 	}
 	return float64(tok) / (float64(dur) / 1000), peak, true
 }
+
+// rateShow 是 TUI 显示口径 (tokens/s): 平均 = avgWin 窗口内各样本速率 (tok/dur) 的
+// 算术平均, 峰值 = peakWin 窗口内单笔最高。与调度器低性能锁的 tokRate (体积加权,
+// 单一窗口) 分开: 显示口径的平均只看短期窗口、峰值看回看窗口。窗口内没有样本时 ok=false。
+func rateShow(pts []tokPoint, now time.Time, avgWin, peakWin time.Duration) (avg, peak float64, ok bool) {
+	var sum float64
+	var n int
+	for _, p := range pts {
+		if p.dur <= 0 {
+			continue
+		}
+		v := float64(p.tok) / (float64(p.dur) / 1000)
+		if now.Sub(p.ts) <= avgWin {
+			sum += v
+			n++
+		}
+		if now.Sub(p.ts) <= peakWin && v > peak {
+			peak = v
+		}
+	}
+	if n == 0 {
+		return 0, 0, false
+	}
+	return sum / float64(n), peak, true
+}

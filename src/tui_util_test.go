@@ -57,15 +57,63 @@ func TestAppLogPath(t *testing.T) {
 	}
 }
 
-// humanTokens: 千 / 百万按一位小数缩写, 更小的原样输出。
+// humanTokens: 千 / 百万按整数缩写 (四舍五入, 不保留小数), 数字+单位整体右对齐到 4
+// 字符; 更小的原样输出。进位边界 (999999 -> 1M) 也验证。
 func TestHumanTokens(t *testing.T) {
 	cases := map[int]string{
-		0: "0", 999: "999", 1000: "1.0k", 1500: "1.5k",
-		999_999: "1000.0k", 1_000_000: "1.0M", 2_345_678: "2.3M",
+		0: "0", 999: "999",
+		1000: "  1K", 1500: "  2K", 100_000: "100K", 100_100: "100K",
+		999_999: "  1M", 1_000_000: "  1M", 2_345_678: "  2M",
 	}
 	for in, want := range cases {
 		if got := humanTokens(in); got != want {
 			t.Errorf("%d 应写作 %q, 得到 %q", in, want, got)
+		}
+	}
+}
+
+// humanTPS: 千 / 百万整数缩写 + 4 字符宽 (平均/峰值拼列用), 千以内小值保留 1 位小数。
+func TestHumanTPS(t *testing.T) {
+	cases := map[float64]string{
+		100: "100.0", 999.94: "999.9",
+		1000: "  1K", 1234.5: "  1K", 1500: "  2K",
+		100_000: "100K", 987_654: "988K", 999_500: "  1M",
+		1_000_000: "  1M", 12_345_678: " 12M",
+	}
+	for in, want := range cases {
+		if got := humanTPS(in); got != want {
+			t.Errorf("humanTPS(%v) 应为 %q, 得到 %q", in, want, got)
+		}
+	}
+}
+
+// humanByte: 1024 进制 B/K/M, 整数缩写 + 4 字符宽; 四舍五入到 1024 进位成 M。
+func TestHumanByte(t *testing.T) {
+	cases := map[float64]string{
+		0: "  0B", 969: "969B", 1024: "  1K",
+		1126.4: "  1K", 8704: "  9K", 123_456: "121K",
+		1 << 20: "  1M", 1_048_575: "  1M", 2_621_440: "  3M",
+	}
+	for in, want := range cases {
+		if got := humanByte(in); got != want {
+			t.Errorf("humanByte(%v) 应为 %q, 得到 %q", in, want, got)
+		}
+	}
+}
+
+// humanRate: KB/s / MB/s 整数缩写 (不保留小数), B/s 原样取整。
+func TestHumanRate(t *testing.T) {
+	cases := map[float64]string{
+		300:     "300 B/s",
+		969:     "969 B/s",
+		2500:    "2 KB/s",
+		3000:    "3 KB/s",
+		500_000: "488 KB/s", // 未到 MB 门限, 停在 KB
+		5 << 20: "5 MB/s",
+	}
+	for in, want := range cases {
+		if got := humanRate(in); got != want {
+			t.Errorf("humanRate(%v) 应为 %q, 得到 %q", in, want, got)
 		}
 	}
 }

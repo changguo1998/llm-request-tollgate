@@ -716,8 +716,7 @@ func TestModelsColumnGroups(t *testing.T) {
 	}
 	want := []string{
 		"上游/模型",
-		"排队", "退避", "熔断", "错误",
-		"请求", "换候选",
+		"排队", "退避", "熔断",
 		"Token", "首字节", "解码速率", "总速率", "下载速率",
 		"最近",
 	}
@@ -738,11 +737,13 @@ func TestModelsMergedRow(t *testing.T) {
 	m.routes = map[string]*routeRow{
 		"alias-a\x00ustc\x00m1": {
 			Logical: "alias-a", Upstream: "ustc", Model: "m1", Reqs: 2, Total: 100,
-			TtfbSum: 200, TtfbN: 2, Last: now.Add(-time.Minute),
+			TtfbPts: []ttfbPoint{{ts: now.Add(-2 * time.Minute), ms: 200}, {ts: now.Add(-25 * time.Minute), ms: 500}},
+			Last:    now.Add(-time.Minute),
 		},
 		"alias-b\x00ustc\x00m1": {
 			Logical: "alias-b", Upstream: "ustc", Model: "m1", Reqs: 3, Total: 50,
-			TtfbSum: 100, TtfbN: 2, Last: now,
+			TtfbPts: []ttfbPoint{{ts: now.Add(-time.Minute), ms: 100}},
+			Last:    now,
 		},
 	}
 	rows := m.modelRows()
@@ -750,7 +751,8 @@ func TestModelsMergedRow(t *testing.T) {
 		t.Fatalf("同上游/模型应合成一行, 得到 %d 行", len(rows))
 	}
 	r := rows[0]
-	if r.Reqs != 5 || r.Total != 150 || r.Queue != 4 || r.Fails != 1 || r.TtfbN != 4 {
+	// 首字节样本按行拼接: 平均 = rateWin 内 (200+500+100)/3, 谷值 = 100ms。
+	if r.Reqs != 5 || r.Total != 150 || r.Queue != 4 || r.Fails != 1 || len(r.TtfbPts) != 3 {
 		t.Errorf("合并结果不对: %+v", r)
 	}
 	out := stripANSI(m.draw())
@@ -829,7 +831,8 @@ func TestColorStandard(t *testing.T) {
 		Models: []candModelLock{{Model: "m1", PausedMs: 8000, LeftMs: 300000, Fails: 2}},
 	}}
 	m.routes = map[string]*routeRow{
-		"k": {Upstream: "ustc", Model: "m1", Reqs: 1, Errs: 1, TtfbSum: 100, TtfbN: 1, Last: time.Now()},
+		"k": {Upstream: "ustc", Model: "m1", Reqs: 1, Errs: 1,
+			TtfbPts: []ttfbPoint{{ts: time.Now(), ms: 100}}, Last: time.Now()},
 	}
 	raw := m.draw()
 	for _, want := range []string{
@@ -837,8 +840,6 @@ func TestColorStandard(t *testing.T) {
 		tuiGreen + "g2" + tuiReset,  // 没锁的记账组: 绿色组名
 		tuiYell + "8s" + tuiReset,   // 退避
 		tuiRed + "05:00" + tuiReset, // 熔断锁
-		tuiRed + "1" + tuiReset,     // 错误数
-		tuiRed + "2" + tuiReset,     // 连续错误
 		tuiYell + "(+1)" + tuiReset, // 超发试探
 	} {
 		if !strings.Contains(raw, want) {

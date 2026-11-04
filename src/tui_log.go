@@ -114,6 +114,7 @@ func (m *tuiModel) absorb(line []byte) {
 		row.Errs++
 	}
 	row.Fallbacks += r.Fallbacks
+	now := time.Now()
 	if r.Usage != nil {
 		total := r.Usage.Total
 		if total == 0 {
@@ -122,25 +123,24 @@ func (m *tuiModel) absorb(line []byte) {
 		row.Prompt += r.Usage.Prompt
 		row.Cached += r.Usage.Cached
 		row.Total += total
-		now := time.Now()
 		if r.DurationMs > 0 {
 			if r.Usage.Prompt+r.Usage.Completion > 0 {
+				// 样本按回看窗口 (3h) 保留: 平均看 rateWin, 峰值看整窗口。
 				row.TotalRate = addTok(row.TotalRate,
-					tokPoint{ts: ts, tok: r.Usage.Prompt + r.Usage.Completion, dur: r.DurationMs}, now, m.rateWin)
+					tokPoint{ts: ts, tok: r.Usage.Prompt + r.Usage.Completion, dur: r.DurationMs}, now, m.window)
 			}
 			if r.Bytes > 0 {
 				row.ByteRate = addTok(row.ByteRate,
-					tokPoint{ts: ts, tok: int(r.Bytes), dur: r.DurationMs}, now, m.rateWin)
+					tokPoint{ts: ts, tok: int(r.Bytes), dur: r.DurationMs}, now, m.window)
 			}
 		}
 		if r.DecodeMs > 0 && r.Usage.Completion > 0 {
 			row.DecodeRate = addTok(row.DecodeRate,
-				tokPoint{ts: ts, tok: r.Usage.Completion, dur: r.DecodeMs}, now, m.rateWin)
+				tokPoint{ts: ts, tok: r.Usage.Completion, dur: r.DecodeMs}, now, m.window)
 		}
 	}
 	if r.TtfbMs > 0 {
-		row.TtfbSum += r.TtfbMs
-		row.TtfbN++
+		row.TtfbPts = addTtfb(row.TtfbPts, ttfbPoint{ts: ts, ms: r.TtfbMs}, now, m.window)
 	}
 	if row.First.IsZero() || ts.Before(row.First) {
 		row.First = ts

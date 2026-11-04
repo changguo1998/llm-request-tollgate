@@ -139,22 +139,25 @@ func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 		// 队列的锁都画在队列表里: 退避 = 黄 (等待), 熔断锁 = 红 (锁)。
 		paused := colorDur(r.PausedMs, tuiYell)
 		lock := colorDur(r.LockMs, tuiRed)
-		// 连续错误与累计错误合成一格 (连错/错误): 0 绿, 大于 0 红。
-		errs := colorCount(r.Fails) + "/" + colorCount(r.Errs)
+		// 首字节列写 平均/谷值 (与速率列的 平均/峰值 同一口径): 平均 = rateWin 内
+		// 算术平均, 谷值 = 回看窗口内最低的一次时延。
 		ttfb := "-"
-		if r.TtfbN > 0 {
-			ttfb = durStr(time.Duration(r.TtfbSum/int64(r.TtfbN)) * time.Millisecond)
+		if len(r.TtfbPts) > 0 {
+			if avg, ok := ttfbAvg(r.TtfbPts, time.Now(), m.rateWin); ok {
+				ttfb = durStr(time.Duration(avg)*time.Millisecond) + "/" +
+					durStr(time.Duration(ttfbMin(r.TtfbPts))*time.Millisecond)
+			}
 		}
-		// 三种速度都写成 平均/峰值 (同一份 tokRate 口径: 平均=Σ体积/Σ时间, 峰值=单笔最高);
-		// 缺字段的格子显示 "-"(2B), 整列全空由 dropEmptyCols 收掉。
+		// 三种速度都写成 平均/峰值 (rateShow: 平均 = rateWin 内算术平均, 峰值 = 回看窗口
+		// 内单笔最高); 缺字段的格子显示 "-"(2B), 整列全空由 dropEmptyCols 收掉。
 		tps := func(pts []tokPoint) string {
-			if avg, peak, ok := tokRate(pts, time.Now(), m.rateWin); ok {
+			if avg, peak, ok := rateShow(pts, time.Now(), m.rateWin, m.window); ok {
 				return humanTPS(avg) + "/" + humanTPS(peak)
 			}
 			return "-"
 		}
 		bsp := func(pts []tokPoint) string {
-			if avg, peak, ok := tokRate(pts, time.Now(), m.rateWin); ok {
+			if avg, peak, ok := rateShow(pts, time.Now(), m.rateWin, m.window); ok {
 				return humanByte(avg) + "/" + humanByte(peak)
 			}
 			return "-"
@@ -162,8 +165,7 @@ func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 		// 与 modelCols 的顺序一一对应 (dropEmptyCols 按下标裁列)。
 		mrows = append(mrows, []string{
 			m.upModel(r.up, r.model),
-			strconv.Itoa(r.Queue), paused, lock, errs,
-			strconv.Itoa(r.Reqs), strconv.Itoa(r.Fallbacks),
+			strconv.Itoa(r.Queue), paused, lock,
 			// 缓存命中与总 token 合成一格 (cached/total)。
 			humanTokens(r.Cached) + "/" + humanTokens(r.Total), ttfb,
 			tps(r.DecodeRate), tps(r.TotalRate), bsp(r.ByteRate),
@@ -175,20 +177,21 @@ func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 }
 
 // modelCols 是第 1 页模型/路由聚合表的列: 按类别从左到右排, 同类相邻 ——
-// 调度状态 (排队 / 退避 / 熔断锁), 错误 (连错/错误, 一格两数), 历史计数
-// (请求 / 换候选), 流量 (Token = cached/total / 首字节 / 三种速度: 解码=completion/decode,
-// 总=(prompt+completion)/duration, 字节=bytes/duration), 时间 (最近一次)。
-// 三种速度各自一列, 都写 平均/峰值。
+// 调度状态 (排队 / 退避 / 熔断锁), 流量 (Token = cached/total / 首字节 / 三种速度:
+// 解码=completion/decode, 总=(prompt+completion)/duration, 字节=bytes/duration), 时间 (最近一次)。
+// 三种速度各自一列, 都写 平均/峰值; 首字节写 平均/谷值 (同一套窗口口径)。
 // 全部按内容成长 (grow=true), 基准宽只贴标题/内容的典型宽度, 不留大补白 ——
 // 这样与第 1 页和其它表一样, 列与列之间视觉上只隔 1 格。
 func modelCols() []tuiCol {
 	return []tuiCol{
 		{"上游/模型", 20, true, false, 4},
-		{"排队", 2, true, true, 0}, {"退避", 4, true, true, 4},
-		{"熔断", 5, true, true, 4}, {"错误", 5, true, true, 2},
-		{"请求", 4, true, true, 0}, {"换候选", 4, true, true, 1},
-		{"Token", 9, true, true, 3}, {"首字节", 6, true, true, 3},
-		{"解码速率", 11, true, true, 1}, {"总速率", 11, true, true, 0}, {"下载速率", 16, true, true, 1},
+		{"排队", 2, true, true, 0}, {"退避", 4, true, true, 4}, {"熔断", 5, true, true, 4},
+		// 首字节列写 最后一次/平均, 两个时长值加斜杠, 下限 9 不被压窄。
+		{"Token", 9, true, true, 3}, {"首字节", 9, true, true, 3},
+		// 三种速度各一列, 都写 平均/峰值: 带单位的数字整体 4 字符, 两个值加斜杠正好 9,
+		// 列宽下限 9 保证 "100K/101K" 这类格不被压窄。窄终端丢列时解码速率保住 (hide=4),
+		// 总速率与下载速率先丢 (hide=1)。
+		{"解码速率", 9, true, true, 4}, {"总速率", 9, true, true, 1}, {"下载速率", 9, true, true, 1},
 		{"最近", 6, true, true, 2},
 	}
 }
@@ -203,8 +206,7 @@ type modelRow struct {
 	Errs                            int
 	Fallbacks                       int
 	Total, Cached                   int
-	TtfbSum                         int64
-	TtfbN                           int
+	TtfbPts                         []ttfbPoint // 窗口内各请求的首字节时延样本 (平均/谷值用)
 	DecodeRate, TotalRate, ByteRate []tokPoint
 	Last                            time.Time
 }
@@ -214,7 +216,7 @@ type modelRow struct {
 func (r *modelRow) blank() bool {
 	return r.Queue == 0 && r.Fails == 0 && r.PausedMs == 0 && r.LockMs == 0 &&
 		r.Reqs == 0 && r.Errs == 0 && r.Fallbacks == 0 &&
-		r.Total == 0 && r.Cached == 0 && r.TtfbN == 0 &&
+		r.Total == 0 && r.Cached == 0 && len(r.TtfbPts) == 0 &&
 		len(r.DecodeRate) == 0 && len(r.TotalRate) == 0 && len(r.ByteRate) == 0 &&
 		r.Last.IsZero()
 }
@@ -248,8 +250,7 @@ func (m *tuiModel) modelRows() []*modelRow {
 		r.Fallbacks += rr.Fallbacks
 		r.Total += rr.Total
 		r.Cached += rr.Cached
-		r.TtfbSum += rr.TtfbSum
-		r.TtfbN += rr.TtfbN
+		r.TtfbPts = append(r.TtfbPts, rr.TtfbPts...)
 		r.DecodeRate = append(r.DecodeRate, rr.DecodeRate...)
 		r.TotalRate = append(r.TotalRate, rr.TotalRate...)
 		r.ByteRate = append(r.ByteRate, rr.ByteRate...)

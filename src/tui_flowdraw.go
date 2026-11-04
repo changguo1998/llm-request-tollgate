@@ -25,9 +25,10 @@ func (m *tuiModel) flowCells(f flow) []string {
 		if el := time.Since(time.UnixMilli(f.RecvStart)).Seconds(); el > 0 {
 			var parts []string
 			if f.RecvTok > 0 {
-				parts = append(parts, humanTPS(float64(f.RecvTok)/el)+" t/s")
+				// unit4 把带单位的数字补齐到 4 字符, 段落里拼读先去掉前导空格。
+				parts = append(parts, strings.TrimLeft(humanTPS(float64(f.RecvTok)/el), " ")+" t/s")
 				if tot := time.Since(f.StartTime).Seconds(); tot > 0 {
-					parts = append(parts, humanTPS(float64(f.RecvTok)/tot)+" t/s")
+					parts = append(parts, strings.TrimLeft(humanTPS(float64(f.RecvTok)/tot), " ")+" t/s")
 				}
 			}
 			if f.RecvBytes > 0 {

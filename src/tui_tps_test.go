@@ -30,6 +30,45 @@ func TestTokRate(t *testing.T) {
 	}
 }
 
+// 显示口径 (rateShow): 平均 = avgWin 窗口内各样本速率的算术平均, 峰值 = peakWin 窗口内
+// 单笔最高; 两个窗口互相独立, 窗口外的样本不计。
+func TestRateShow(t *testing.T) {
+	now := time.Now()
+	pts := []tokPoint{
+		{ts: now.Add(-10 * time.Minute), tok: 1000, dur: 10000}, // 100 t/s, avgWin 内
+		{ts: now.Add(-30 * time.Minute), tok: 1000, dur: 10000}, // 100 t/s, avgWin 内
+		{ts: now.Add(-2 * time.Hour), tok: 5000, dur: 10000},    // 500 t/s, 只在 peakWin 内
+		{ts: now.Add(-4 * time.Hour), tok: 9999, dur: 10000},    // 两个窗口外, 不计
+	}
+	avg, peak, ok := rateShow(pts, now, time.Hour, 3*time.Hour)
+	if !ok || avg != 100 || peak != 500 {
+		t.Errorf("应为 平均 100 / 峰值 500, 得到 (%v, %v, %v)", avg, peak, ok)
+	}
+	if _, _, ok := rateShow(pts, now.Add(5*time.Hour), time.Hour, 3*time.Hour); ok {
+		t.Error("窗口内没有样本时应 ok=false")
+	}
+}
+
+// 首字节口口径: 平均 = win 窗口内算术平均, 谷值 = 全部样本中的最小一次。
+func TestTtfbAvgMin(t *testing.T) {
+	now := time.Now()
+	pts := []ttfbPoint{
+		{ts: now.Add(-10 * time.Minute), ms: 100},
+		{ts: now.Add(-20 * time.Minute), ms: 300},
+		{ts: now.Add(-2 * time.Hour), ms: 500}, // rateWin(1h) 外: 平均不计, 谷值仍算
+	}
+	avg, ok := ttfbAvg(pts, now, time.Hour)
+	if !ok || avg != 200 {
+		t.Errorf("1h 窗口内算术平均应为 200, 得到 (%v, %v)", avg, ok)
+	}
+	if got := ttfbMin(pts); got != 100 {
+		t.Errorf("谷值应为 100, 得到 %d", got)
+	}
+	if _, ok := ttfbAvg(pts, now.Add(2*time.Hour), time.Hour); ok {
+		t.Error("窗口内没有样本时应 ok=false")
+	}
+}
+
 // 第 1 页「接收中」的行在状态列按模型/路由表的同三个速度写实时吞吐, 不加前缀:
 // 解码 = 已收到的输出 token / 首字节到达至今, 总 = 同一份输出 token / 请求总耗时,
 // 下载 = 已转发的响应字节 / 首字节到达至今。
@@ -39,13 +78,13 @@ func TestFlowCellLiveTps(t *testing.T) {
 		RecvStart: time.Now().Add(-100 * time.Second).UnixMilli(),
 		StartTime: time.Now().Add(-500 * time.Second)}
 	cells := m.flowCells(recv)
-	if got := cells[len(cells)-1]; got != "60.0 t/s 12.0 t/s 10.0 KB/s" {
+	if got := cells[len(cells)-1]; got != "60.0 t/s 12.0 t/s 10 KB/s" {
 		t.Errorf("接收中的状态列应写 6000/100s, 6000/500s 与 1MB/100s, 得到 %q", got)
 	}
 	// 只有字节 (没有可计的输出 token) 时只显示下载吞吐。
 	onlyBytes := flow{ID: 4, Logical: "m1", Stage: stageRecv, RecvBytes: 512_000,
 		RecvStart: time.Now().Add(-100 * time.Second).UnixMilli()}
-	if got := m.flowCells(onlyBytes); got[len(got)-1] != "5.0 KB/s" {
+	if got := m.flowCells(onlyBytes); got[len(got)-1] != "5 KB/s" {
 		t.Errorf("只有字节时应只写下载吞吐, 得到 %q", got[len(got)-1])
 	}
 	// 还没收到任何东西 (非流式 / 刚开流) 时不显示, 与旧行为一致。

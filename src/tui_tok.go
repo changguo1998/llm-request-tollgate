@@ -25,14 +25,57 @@ func addTok(pts []tokPoint, p tokPoint, now time.Time, win time.Duration) []tokP
 	return pts[start:]
 }
 
+// ttfbPoint 是一笔首字节时延样本 (ms)。
+type ttfbPoint struct {
+	ts time.Time
+	ms int64
+}
+
+// addTtfb 追加一笔首字节样本并裁掉超出 win 窗口的过期样本。
+func addTtfb(pts []ttfbPoint, p ttfbPoint, now time.Time, win time.Duration) []ttfbPoint {
+	pts = append(pts, p)
+	start := 0
+	for start < len(pts) && now.Sub(pts[start].ts) > win {
+		start++
+	}
+	return pts[start:]
+}
+
+// ttfbAvg 算 win 窗口内首字节时延的算术平均 (ms); 窗口内没有样本时 ok=false。
+func ttfbAvg(pts []ttfbPoint, now time.Time, win time.Duration) (avg float64, ok bool) {
+	var sum int64
+	var n int
+	for _, p := range pts {
+		if now.Sub(p.ts) > win {
+			continue
+		}
+		sum += p.ms
+		n++
+	}
+	if n == 0 {
+		return 0, false
+	}
+	return float64(sum) / float64(n), true
+}
+
+// ttfbMin 返回样本里最小的首字节时延 (谷值, ms); 样本为空时返回 0。
+func ttfbMin(pts []ttfbPoint) int64 {
+	var min int64
+	for i, p := range pts {
+		if i == 0 || p.ms < min {
+			min = p.ms
+		}
+	}
+	return min
+}
+
 // routeRow 是「逻辑名 x 上游 x 真实模型」的一行聚合 (来自日志)。
 type routeRow struct {
 	Logical, Upstream, Model string
 	Reqs, Errs, Fallbacks    int
 	Prompt, Cached, Total    int
-	TtfbSum                  int64
-	TtfbN                    int
-	// 三种速度的样本 (tokRate 平均/峰值): 分子/分母各不相同。
+	TtfbPts                  []ttfbPoint // 窗口内各请求的首字节时延样本 (平均/谷值用)
+	// 三种速度的样本 (rateShow 平均/峰值): 分子/分母各不相同。
 	DecodeRate  []tokPoint // completion / decode_ms  (缺 decode 不记)
 	TotalRate   []tokPoint // (prompt+completion) / duration_ms
 	ByteRate    []tokPoint // response bytes / duration_ms

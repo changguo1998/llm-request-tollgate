@@ -188,7 +188,7 @@ func TestTUIPollLogAcrossArchive(t *testing.T) {
 	for _, r := range m.routes {
 		switch r.Upstream {
 		case "up2":
-			gotArch = r.Errs == 1 && r.TtfbN == 1
+			gotArch = r.Errs == 1 && len(r.TtfbPts) == 1 && r.TtfbPts[0].ms == 12000
 		case "up1":
 			gotCur = r.Upstream == "up1" && r.Model == "real1"
 		}
