@@ -6,23 +6,26 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-// fakeProbeUp 是假上游: 记录收到的请求, 按配置的状态码回。
+// fakeProbeUp 是假上游: 记录收到的请求路径与请求体, 按配置的状态码回。
 type fakeProbeUp struct {
 	mu     sync.Mutex
 	status int
 	hits   []string
+	paths  []string
 }
 
 func (f *fakeProbeUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b, _ := io.ReadAll(r.Body)
 	f.mu.Lock()
 	f.hits = append(f.hits, string(b))
+	f.paths = append(f.paths, r.URL.Path)
 	f.mu.Unlock()
 	w.WriteHeader(f.status)
 	w.Write([]byte(`{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"p"},"finish_reason":"stop"}]}`))
@@ -41,6 +44,16 @@ func (f *fakeProbeUp) first() (string, bool) {
 		return "", false
 	}
 	return f.hits[0], true
+}
+
+// firstPath 返回第一笔请求落到的上游路径 (探测应走锁记录的那条)。
+func (f *fakeProbeUp) firstPath() (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.paths) == 0 {
+		return "", false
+	}
+	return f.paths[0], true
 }
 
 // recoverApp 起一个指向假上游、开启了恢复探测的单候选 App。
@@ -93,7 +106,7 @@ func TestRecoverProbeableCategories(t *testing.T) {
 func TestRecoveryLockedSemantics(t *testing.T) {
 	c := newCand("u1")
 	c.recoverProbe = true
-	c.lockModel("m1", "breaker", time.Minute)
+	c.lockModel("m1", "breaker", time.Minute, "")
 	if locked, _, _ := c.locked("m1", ""); !locked {
 		t.Fatal("活跃锁应锁定")
 	}
@@ -115,7 +128,7 @@ func TestRecoveryLockedSemantics(t *testing.T) {
 func TestRecoveryClaimDedupAndSettle(t *testing.T) {
 	c := newCand("u1")
 	c.recoverProbe = true
-	c.lockModel("m1", "breaker", time.Minute)
+	c.lockModel("m1", "breaker", time.Minute, "")
 	c.mu.Lock()
 	g := c.gate("m1")
 	g.lock = lockState{reason: "breaker", until: time.Now().Add(-time.Second)}
@@ -138,7 +151,7 @@ func TestRecoveryClaimDedupAndSettle(t *testing.T) {
 func TestRecoveryFailRelocks(t *testing.T) {
 	c := newCand("u1")
 	c.recoverProbe = true
-	c.lockModel("m1", "breaker", time.Minute)
+	c.lockModel("m1", "breaker", time.Minute, "")
 	c.mu.Lock()
 	g := c.gate("m1")
 	g.lock = lockState{reason: "breaker", until: time.Now().Add(-time.Second)}
@@ -165,7 +178,7 @@ func TestRecoveryFailRelocks(t *testing.T) {
 func TestRecoveryGroupLockSemantics(t *testing.T) {
 	c := newCand("u1")
 	c.recoverProbe = true
-	c.lockGroup("g1", "quota", time.Minute)
+	c.lockGroup("g1", "quota", time.Minute, "")
 	c.mu.Lock()
 	c.groupLocks["g1"] = lockState{reason: "quota", until: time.Now().Add(-time.Second)}
 	c.mu.Unlock()
@@ -189,7 +202,7 @@ func TestRecoveryGroupLockSemantics(t *testing.T) {
 
 func TestRecoveryTimerProbeUnlocks(t *testing.T) {
 	app, up, _ := recoverApp(t, http.StatusOK)
-	app.addLockModel(app.cands["u1"], "real-1", "breaker", 150*time.Millisecond)
+	app.addLockModel(app.cands["u1"], "real-1", "breaker", 150*time.Millisecond, "")
 	waitUp(t, up, 1)
 	body, ok := up.first()
 	if !ok || !strings.Contains(body, `"real-1"`) {
@@ -202,11 +215,81 @@ func TestRecoveryTimerProbeUnlocks(t *testing.T) {
 
 func TestRecoveryTimerProbeFailRelocks(t *testing.T) {
 	app, up, _ := recoverApp(t, http.StatusTooManyRequests)
-	app.addLockModel(app.cands["u1"], "real-1", "breaker", 150*time.Millisecond)
+	app.addLockModel(app.cands["u1"], "real-1", "breaker", 150*time.Millisecond, "")
 	waitUp(t, up, 1)
 	locked, left, reason := app.cands["u1"].locked("real-1", "")
 	if !locked || reason != "breaker" || left <= 0 {
 		t.Fatalf("探测失败后应重锁: locked=%v reason=%s left=%v", locked, reason, left)
+	}
+}
+
+// 探测路径与请求体跟随触发锁的请求: chat 锁走 /chat/completions + 对话体 (缺省),
+// responses 锁走 /responses + responses 体。
+func TestRecoveryProbeFollowsLockPath(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		path     string // 触发锁的路径 (空 = 未记录, 兜底 chat)
+		url      string
+		bodyWant string // 探测体应含的字段
+		bodyMiss string // 探测体不应含的字段
+	}{
+		{"chat-default", "", "/chat/completions", `"messages"`, `"input"`},
+		{"responses", upstreamPathResponses, "/responses", `"input"`, `"messages"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, up, _ := recoverApp(t, http.StatusOK)
+			app.addLockModel(app.cands["u1"], "real-1", "breaker", 150*time.Millisecond, tc.path)
+			waitUp(t, up, 1)
+			body, _ := up.first()
+			if !strings.Contains(body, tc.bodyWant) || strings.Contains(body, tc.bodyMiss) {
+				t.Fatalf("探测体应含 %s 且不含 %s: %s", tc.bodyWant, tc.bodyMiss, body)
+			}
+			got, _ := up.firstPath()
+			if got != tc.url {
+				t.Fatalf("探测应走 %s, 实际 %s", tc.url, got)
+			}
+			if locked, _, _ := app.cands["u1"].locked("real-1", ""); locked {
+				t.Fatal("探测通过后应解锁")
+			}
+		})
+	}
+}
+
+// 探测路径随锁落盘, 重启恢复后仍沿同一条路径探测。
+func TestRecoveryProbePathPersistsAcrossRestart(t *testing.T) {
+	up := &fakeProbeUp{status: http.StatusOK}
+	srv := httptest.NewServer(up)
+	t.Cleanup(srv.Close)
+	on := true
+	cfg := &Config{
+		ProbeEnabled: &on,
+		Upstreams: []UpstreamCfg{{
+			ID: "u1", BaseURL: srv.URL, AuthHeader: "Authorization", Key: "k", IncludeUsage: true,
+			Models: []ModelCfg{{ID: "real-1"}},
+		}},
+		Aliases: map[string][][2]string{"m1": {{"u1", "real-1"}}},
+	}
+	cfg.LogPath = filepath.Join(t.TempDir(), "requests.jsonl")
+	first, err := newApp(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// responses 路径上的失败触发锁 (带 path 落盘)。
+	first.addLockModel(first.cands["u1"], "real-1", "breaker", 150*time.Millisecond, upstreamPathResponses)
+
+	// 重启: 同一 gatePath, 新 App 恢复锁后按落盘的路径探测。
+	if _, err := newApp(cfg); err != nil {
+		t.Fatal(err)
+	}
+	// 两个 App 的探测都走 /responses (先到先记), 断言不受先后影响。
+	waitUp(t, up, 1)
+	body, _ := up.first()
+	if !strings.Contains(body, `"input"`) {
+		t.Fatalf("重启后探测应带 responses 体: %s", body)
+	}
+	got, _ := up.firstPath()
+	if got != "/responses" {
+		t.Fatalf("重启后探测应走 /responses, 实际 %s", got)
 	}
 }
 
@@ -224,7 +307,7 @@ func TestRecoveryDisabledNoProbe(t *testing.T) {
 		Aliases: map[string][][2]string{"m1": {{"u1", "real-1"}}},
 	}
 	app := appWithGate(t, cfg, GateCfg{})
-	app.addLockModel(app.cands["u1"], "real-1", "breaker", 150*time.Millisecond)
+	app.addLockModel(app.cands["u1"], "real-1", "breaker", 150*time.Millisecond, "")
 	time.Sleep(400 * time.Millisecond)
 	if up.count() != 0 {
 		t.Fatalf("关闭探测时不应发探测, 收到 %d", up.count())

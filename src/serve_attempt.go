@@ -97,7 +97,7 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 		if rerr != nil {
 			// 传输层失败: 没有状态码与 body 可判, 按通用兜底走。
 			at.cd.finish(kind, false)
-			a.recordGenericFailure(at.cd, at.mod, s.gate)
+			a.recordGenericFailure(at.cd, at.mod, s.gate, s.upPath)
 			s.noteFailure(rerr, at.up.ID, at.mod)
 			s.obs.mark(-1)
 			continue
@@ -108,7 +108,7 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 			resp.Body.Close()
 			at.cd.finish(kind, false)
 			s.obs.mark(resp.StatusCode)
-			moveOn := a.classifyFailure(at, kind, resp, b, s.gate)
+			moveOn := a.classifyFailure(at, kind, resp, b, s.gate, s.upPath)
 			s.lastErr = fmt.Errorf("upstream %s returned %d", at.up.ID, resp.StatusCode)
 			s.lastStatus, s.lastHdr, s.lastBody = resp.StatusCode, resp.Header.Clone(), b
 			s.lastUpID, s.lastMod = at.up.ID, at.mod
@@ -134,24 +134,25 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 }
 
 // classifyFailure 按上游自己的规则给失败归类并按类上锁, 返回是否该换下一个候选。
-func (a *App) classifyFailure(at attempt, kind slotKind, resp *http.Response, body []byte, gate GateCfg) bool {
+// path 是这笔请求用的上游路径, 锁会记下它, 供恢复探测沿用。
+func (a *App) classifyFailure(at attempt, kind slotKind, resp *http.Response, body []byte, gate GateCfg, path string) bool {
 	switch at.up.classify(resp.StatusCode, body) {
 	case classQuota:
 		// 额度限制: 只锁该模型所属的额度组 (额度按组共享), 组内排队的请求随之迁移,
 		// 同家别的组照常发送。
-		a.addLockGroup(at.cd, at.group, "quota", gate.quotaLock())
+		a.addLockGroup(at.cd, at.group, "quota", gate.quotaLock(), path)
 	case classConcurrency:
 		// 并发限制: 锁掉超发试探。试探撞上就锁完直接换下一个候选; 普通请求锁完后本笔
 		// 按普通错误走 —— 退避后重试同一候选。
 		at.cd.lockConcurrency("concurrency", gate.concurrencyLock())
 		if kind != slotProbe {
-			return a.recordGenericFailure(at.cd, at.mod, gate)
+			return a.recordGenericFailure(at.cd, at.mod, gate, path)
 		}
 	default:
 		// 规则表没覆盖的样本: 把上游 + 状态码 + body 片段记进服务日志, 便于按真实文案补规则。
 		log.Printf("unclassified upstream error: upstream=%s status=%d body=%s",
 			at.up.ID, resp.StatusCode, bodySnippet(body, 200))
-		return a.recordGenericFailure(at.cd, at.mod, gate)
+		return a.recordGenericFailure(at.cd, at.mod, gate, path)
 	}
 	return true
 }

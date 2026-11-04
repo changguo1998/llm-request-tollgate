@@ -10,13 +10,14 @@ import (
 )
 
 // gateLockRec 是落盘的一条定时锁。Model 非空 = 该模型的定时锁 (熔断 / 低性能);
-// 否则是额度组锁, Group 给出组名 (空 = 默认组)。
+// 否则是额度组锁, Group 给出组名 (空 = 默认组)。Path 是触发锁用的上游路径, 恢复探测沿用。
 type gateLockRec struct {
 	UntilMs  int64  `json:"until_unix_ms"`
 	Reason   string `json:"reason"`
 	Upstream string `json:"upstream,omitempty"`
 	Group    string `json:"group,omitempty"`
 	Model    string `json:"model,omitempty"`
+	Path     string `json:"path,omitempty"`
 }
 
 // gateState 是 gate-state.json 的内容: 只存未到期的定时锁 (组锁与模型锁)。
@@ -28,48 +29,50 @@ type gateState struct {
 // recordGenericFailure 记一次通用兜底失败: 该模型连续错误计数 +1 并按 retry_backoff_ms
 // 暂停它; 到阈值就熔断 (只锁该 upstream/model 5min) 并清零计数。返回 true 表示该模型进了
 // 熔断锁, 这一笔该换下一个候选; false 表示退避后重试同一候选。
-func (a *App) recordGenericFailure(c *cand, model string, g GateCfg) bool {
+func (a *App) recordGenericFailure(c *cand, model string, g GateCfg, path string) bool {
 	if !c.recordOther(model, g) {
 		a.evAdd("gate", "", c.id, model, "上游报错, 进入退避")
 		return false
 	}
-	a.addLockModel(c, model, "breaker", g.breakerLock())
+	a.addLockModel(c, model, "breaker", g.breakerLock(), path)
 	c.recordSuccess(model) // 熔断后重新计数, 锁到期从 0 开始
 	return true
 }
 
 // addLockGroup 给额度组加锁并把锁状态落盘 —— 重启后仍在锁内。
-func (a *App) addLockGroup(c *cand, group, reason string, dur time.Duration) {
+// path 是触发锁的请求用的上游路径, 供恢复探测沿用。
+func (a *App) addLockGroup(c *cand, group, reason string, dur time.Duration, path string) {
 	a.evAdd("lock", "", c.id, "", "额度限制, 触发 额度锁 (组 "+groupLabel(group)+"), "+durStr(dur))
-	c.lockGroup(group, reason, dur)
+	c.lockGroup(group, reason, dur, path)
 	if c.recoverProbe && recoverProbeable(reason) {
-		a.armLockRecovery(recoverRef{c: c, isModel: false, group: group, reason: reason}, time.Now().Add(dur))
+		a.armLockRecovery(recoverRef{c: c, isModel: false, group: group, reason: reason, path: path}, time.Now().Add(dur))
 	}
 	a.saveGateState()
 }
 
 // addLockModel 给 upstream/model 加熔断锁并落盘 (只锁该模型, 同家别的模型照常发送)。
-func (a *App) addLockModel(c *cand, model, reason string, dur time.Duration) {
+// path 是触发锁的请求用的上游路径, 供恢复探测沿用。
+func (a *App) addLockModel(c *cand, model, reason string, dur time.Duration, path string) {
 	a.evAdd("lock", "", c.id, model, "连错到阈值, 触发 熔断锁, "+durStr(dur))
-	c.lockModel(model, reason, dur)
+	c.lockModel(model, reason, dur, path)
 	if c.recoverProbe && recoverProbeable(reason) {
-		a.armLockRecovery(recoverRef{c: c, isModel: true, model: model, reason: reason}, time.Now().Add(dur))
+		a.armLockRecovery(recoverRef{c: c, isModel: true, model: model, reason: reason, path: path}, time.Now().Add(dur))
 	}
 	a.saveGateState()
 }
 
 // addLockLowPerf 给 upstream/model 加低性能锁并落盘 (作用域同熔断锁: 只锁该模型)。
 // peak/avg 是低吞吐分支的峰值与平均 (tokens/s), latAvg 是高延迟分支的平均首字节时延
-// (ms); 哪个分支命中哪个非 0。
-func (a *App) addLockLowPerf(c *cand, model string, peak, avg, latAvg float64, dur time.Duration) {
+// (ms); 哪个分支命中哪个非 0。path 是触发锁的请求用的上游路径, 供恢复探测沿用。
+func (a *App) addLockLowPerf(c *cand, model string, peak, avg, latAvg float64, dur time.Duration, path string) {
 	cause := "吞吐 峰 " + ftoa(peak, 1) + " / 均 " + ftoa(avg, 1) + " t/s"
 	if latAvg > 0 {
 		cause = "平均首字节 " + durStr(time.Duration(latAvg*float64(time.Millisecond)))
 	}
 	a.evAdd("lock", "", c.id, model, cause+", 触发 低性能锁, "+durStr(dur))
-	c.lockModel(model, lowPerfReason, dur)
+	c.lockModel(model, lowPerfReason, dur, path)
 	if c.recoverProbe && recoverProbeable(lowPerfReason) {
-		a.armLockRecovery(recoverRef{c: c, isModel: true, model: model, reason: lowPerfReason}, time.Now().Add(dur))
+		a.armLockRecovery(recoverRef{c: c, isModel: true, model: model, reason: lowPerfReason, path: path}, time.Now().Add(dur))
 	}
 	a.saveGateState()
 }
@@ -82,14 +85,16 @@ func (c *cand) locks() (out []gateLockRec) {
 	for group, l := range c.groupLocks {
 		if left := l.left(now); left > 0 {
 			out = append(out, gateLockRec{
-				UntilMs: now.Add(left).UnixMilli(), Reason: l.reason, Upstream: c.id, Group: group,
+				UntilMs: now.Add(left).UnixMilli(), Reason: l.reason, Upstream: c.id,
+				Group: group, Path: l.path,
 			})
 		}
 	}
 	for model, g := range c.modelGates {
 		if left := g.lock.left(now); left > 0 {
 			out = append(out, gateLockRec{
-				UntilMs: now.Add(left).UnixMilli(), Reason: g.lock.reason, Upstream: c.id, Model: model,
+				UntilMs: now.Add(left).UnixMilli(), Reason: g.lock.reason, Upstream: c.id,
+				Model: model, Path: g.lock.path,
 			})
 		}
 	}
@@ -166,15 +171,15 @@ func (a *App) loadGateState() {
 		if model != "" {
 			mg := c.gate(model)
 			if until.After(mg.lock.until) {
-				mg.lock = lockState{until: until, reason: rec.Reason}
+				mg.lock = lockState{until: until, reason: rec.Reason, path: rec.Path}
 			}
 		} else if until.After(c.groupLocks[group].until) {
-			c.groupLocks[group] = lockState{until: until, reason: rec.Reason}
+			c.groupLocks[group] = lockState{until: until, reason: rec.Reason, path: rec.Path}
 		}
 		c.mu.Unlock()
 		// 活跃且可探测的锁: 重挂恢复定时器, 让到期后继续走恢复探测。
 		if c.recoverProbe && recoverProbeable(rec.Reason) {
-			a.armLockRecovery(recoverRef{c: c, isModel: model != "", model: model, group: group, reason: rec.Reason}, until)
+			a.armLockRecovery(recoverRef{c: c, isModel: model != "", model: model, group: group, reason: rec.Reason, path: rec.Path}, until)
 		}
 		restored++
 	}

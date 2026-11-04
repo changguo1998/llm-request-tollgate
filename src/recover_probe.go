@@ -18,6 +18,19 @@ import (
 // 不写请求日志、不进 flow 视图、也不进吞吐/性能样本。
 const probeBody = `{"model":"{model}","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}`
 
+// probeBodyResponses 是走 /responses 时的最小探测体, 与 probeBody 同口径:
+// 一个 token 的输出请求, 只为探可达性。
+const probeBodyResponses = `{"model":"{model}","input":"ping","max_output_tokens":1}`
+
+// probeTarget 按触发锁的请求路径选定探测走的上游路径与请求体模板:
+// responses 锁用 responses 体, 其余 (含空串 = 旧锁 / 测试) 兜底 chat/completions。
+func probeTarget(path string) (upPath, bodyTmpl string) {
+	if path == upstreamPathResponses {
+		return upstreamPathResponses, probeBodyResponses
+	}
+	return upstreamPath, probeBody
+}
+
 // gateSnap 取当前门控参数快照 (探测失败重锁 / 判定开关用)。
 func (a *App) gateSnap() GateCfg {
 	a.mu.RLock()
@@ -90,9 +103,12 @@ func (a *App) runRecovery(c *cand, t recoverRef) {
 	}
 	a.evAdd("probe", "", c.id, modelID, "锁到期, 开始探测")
 
-	body := []byte(strings.ReplaceAll(probeBody, "{model}", modelID))
+	// 沿用触发锁的请求路径 (chat 或 responses): 只回聊天接口的上游, 探测也去聊天;
+	// 锁记录没带路径的 (旧锁 / 单元测试) 兜底 chat/completions。
+	upPath, bodyTmpl := probeTarget(t.path)
+	body := []byte(strings.ReplaceAll(bodyTmpl, "{model}", modelID))
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
-		up.BaseURL+upstreamPath, bytes.NewReader(body))
+		up.BaseURL+upPath, bytes.NewReader(body))
 	if err != nil {
 		// 构造失败极罕见: 按失败重锁重挂, 下次再探。
 		until := c.settleRecovery(t, false, g)

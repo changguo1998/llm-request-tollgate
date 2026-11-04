@@ -77,7 +77,7 @@ func TestCandViewSnapshot(t *testing.T) {
 	if c == nil {
 		t.Fatal("上游没有调度器")
 	}
-	c.lockGroup("g1", "quota", 10*time.Minute)
+	c.lockGroup("g1", "quota", 10*time.Minute, "")
 	c.mu.Lock()
 	c.inFlight, c.softCap = 2, 3
 	// 两层队列各放一笔: 观测面的 Queue 是两段之和。
@@ -108,7 +108,7 @@ func TestCandViewSnapshot(t *testing.T) {
 	g.fails = 2
 	g.pausedUntil = time.Now().Add(20 * time.Second)
 	c.mu.Unlock()
-	c.lockModel("real-m1", "breaker", 5*time.Minute)
+	c.lockModel("real-m1", "breaker", 5*time.Minute, "")
 
 	v = a.candViews()[0]
 	byModel := map[string]candModelLock{}

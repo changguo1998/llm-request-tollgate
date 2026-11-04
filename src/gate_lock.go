@@ -8,12 +8,15 @@ import (
 
 // lockState 是一个到期时间戳加一个原因标记, 外加恢复探测的两段瞬态。
 // recover = 锁已到期, 进入恢复探测 (仍视为锁定, 直到探测通过才解锁);
-// probing = 正有一笔探测在飞 (去责备用, 同一目标同时只允许一笔, 不落盘)。
+// probing = 正有一笔探测在飞 (去责备用, 同一目标同时只允许一笔, 不落盘);
+// path = 触发锁的那笔真实请求用的上游路径 (chat 或 responses), 恢复探测沿用同一条
+// 路径与请求格式; 空串 = 未记录 (旧锁 / 单元测试), 探测兜底 chat/completions。
 type lockState struct {
 	until   time.Time
 	reason  string
 	recover bool
 	probing bool
+	path    string
 }
 
 func (l lockState) active(now time.Time) bool { return now.Before(l.until) }
@@ -113,24 +116,25 @@ func (c *cand) locked(model, group string) (bool, time.Duration, string) {
 }
 
 // lockGroup 给一个额度组加锁并唤醒排队者, 让组内的请求退出队列换下一个候选;
-// 同组里取更晚的到期时间。
-func (c *cand) lockGroup(group, reason string, dur time.Duration) {
+// 同组里取更晚的到期时间。path 是触发锁的请求用的上游路径, 供恢复探测沿用。
+func (c *cand) lockGroup(group, reason string, dur time.Duration, path string) {
 	until := time.Now().Add(dur)
 	c.mu.Lock()
 	if until.After(c.groupLocks[group].until) {
-		c.groupLocks[group] = lockState{until: until, reason: reason}
+		c.groupLocks[group] = lockState{until: until, reason: reason, path: path}
 	}
 	c.mu.Unlock()
 	c.signal()
 }
 
 // lockModel 给一个真实模型加熔断锁 (只锁该 upstream/model), 同一模型取更晚的到期时间。
-func (c *cand) lockModel(model, reason string, dur time.Duration) {
+// path 是触发锁的请求用的上游路径, 供恢复探测沿用。
+func (c *cand) lockModel(model, reason string, dur time.Duration, path string) {
 	until := time.Now().Add(dur)
 	c.mu.Lock()
 	g := c.gate(model)
 	if until.After(g.lock.until) {
-		g.lock = lockState{until: until, reason: reason}
+		g.lock = lockState{until: until, reason: reason, path: path}
 	}
 	c.mu.Unlock()
 	c.signal()
@@ -183,6 +187,7 @@ type recoverRef struct {
 	group   string // isModel=false 时: 额度组 (默认组为空串)
 	model   string // isModel=true 时: 真实模型
 	reason  string
+	path    string // 触发锁的请求用的上游路径, 探测沿用 (空串 = chat 兜底)
 }
 
 func (r recoverRef) read() lockState {
@@ -231,23 +236,24 @@ func (c *cand) beginRecovery(model, group string) (recoverRef, bool) {
 }
 
 // findRecoverLocked 找该模型/组上处于「已到期待恢复」或「已过期且原因可探测」的锁槽
-// (需持 c.mu)。
+// (需持 c.mu)。返回的 recoverRef 带上锁里记的上游路径, 供探测沿用。
 func (c *cand) findRecoverLocked(model, group string) (recoverRef, bool) {
 	if mg := c.peekGate(model); mg != nil {
 		if l := mg.lock; l.recover || (recoverProbeable(l.reason) && !l.active(time.Now())) {
-			return recoverRef{c: c, isModel: true, model: model, reason: l.reason}, true
+			return recoverRef{c: c, isModel: true, model: model, reason: l.reason, path: l.path}, true
 		}
 	}
 	if l, ok := c.groupLocks[group]; ok {
 		if l.recover || (recoverProbeable(l.reason) && !l.active(time.Now())) {
-			return recoverRef{c: c, isModel: false, group: group, reason: l.reason}, true
+			return recoverRef{c: c, isModel: false, group: group, reason: l.reason, path: l.path}, true
 		}
 	}
 	return recoverRef{}, false
 }
 
 // settleRecovery 结束一笔恢复探测: 成功清锁解锁 (返回零 until); 失败按原原因对应时长
-// 重新活跃加锁 (返回新的 until, 供上层重挂定时器)。recover/probing 都重置。
+// 重新活跃加锁 (返回新的 until, 供上层重挂定时器)。recover/probing 都重置; 重锁保留
+// 触发路径 (path), 让探测失败后的下一轮仍沿同一路径再探。
 func (c *cand) settleRecovery(r recoverRef, ok bool, g GateCfg) time.Time {
 	now := time.Now()
 	c.mu.Lock()
@@ -258,7 +264,7 @@ func (c *cand) settleRecovery(r recoverRef, ok bool, g GateCfg) time.Time {
 		return time.Time{}
 	}
 	until := now.Add(recoverLockDur(r.reason, g))
-	r.write(lockState{until: until, reason: r.reason})
+	r.write(lockState{until: until, reason: r.reason, path: r.path})
 	c.mu.Unlock()
 	c.signal()
 	return until

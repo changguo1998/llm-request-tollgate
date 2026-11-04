@@ -283,16 +283,16 @@ func TestClassifyProviderRules(t *testing.T) {
 // 模型熔断锁落在不同作用域, 互不覆盖, 且组锁只覆盖同组模型。
 func TestLockKeepsLaterExpiry(t *testing.T) {
 	c := newCand("u1")
-	c.lockGroup("g1", "quota", 300*time.Millisecond)
-	c.lockModel("m2", "breaker", 50*time.Millisecond)
+	c.lockGroup("g1", "quota", 300*time.Millisecond, "")
+	c.lockModel("m2", "breaker", 50*time.Millisecond, "")
 	if locked, _, reason := c.locked("m1", "g1"); !locked || reason != "quota" {
 		t.Fatalf("组锁该管住同组的所有模型: locked=%v reason=%s", locked, reason)
 	}
 	if locked, _, _ := c.locked("m3", "g2"); locked {
 		t.Fatal("g1 的额度锁不该管住 g2")
 	}
-	c.lockGroup("g1", "quota", 400*time.Millisecond)   // 同组里更晚的额度锁
-	c.lockModel("m2", "breaker", 500*time.Millisecond) // 只锁 m2 的熔断锁
+	c.lockGroup("g1", "quota", 400*time.Millisecond, "")   // 同组里更晚的额度锁
+	c.lockModel("m2", "breaker", 500*time.Millisecond, "") // 只锁 m2 的熔断锁
 	locked, left, reason := c.locked("m1", "g1")
 	if !locked || reason != "quota" || left <= 300*time.Millisecond {
 		t.Fatalf("同组内更晚的额度锁该生效: locked=%v left=%s reason=%s", locked, left, reason)
@@ -301,7 +301,7 @@ func TestLockKeepsLaterExpiry(t *testing.T) {
 	if !locked || reason != "breaker" || left <= 400*time.Millisecond {
 		t.Fatalf("两把锁同时在时以模型锁为准: locked=%v left=%s reason=%s", locked, left, reason)
 	}
-	c.lockModel("m2", "breaker", time.Second)
+	c.lockModel("m2", "breaker", time.Second, "")
 	locked, left, reason = c.locked("m2", "g1")
 	if !locked || reason != "breaker" || left <= 900*time.Millisecond {
 		t.Fatalf("同作用域内更晚的锁应生效: locked=%v left=%s reason=%s", locked, left, reason)
@@ -328,7 +328,7 @@ func TestModelLocksAreIsolated(t *testing.T) {
 	if locked, _, _ := c.locked("m2", ""); locked {
 		t.Fatal("m1 的熔断不该锁住 m2")
 	}
-	c.lockModel("m1", "breaker", time.Minute)
+	c.lockModel("m1", "breaker", time.Minute, "")
 	if locked, _, reason := c.locked("m1", ""); !locked || reason != "breaker" {
 		t.Fatalf("m1 该在熔断锁内: locked=%v reason=%s", locked, reason)
 	}
@@ -355,7 +355,7 @@ func TestProviderLockReleasesQueued(t *testing.T) {
 	}()
 	time.Sleep(30 * time.Millisecond) // 让它进队列并卡在节拍上
 	start := time.Now()
-	c.lockGroup("g1", "quota", 200*time.Millisecond)
+	c.lockGroup("g1", "quota", 200*time.Millisecond, "")
 	select {
 	case why := <-done:
 		if why != "locked" {
@@ -398,7 +398,7 @@ func TestGroupLockReleasesOnlyItsGroup(t *testing.T) {
 		other <- why
 	}()
 	time.Sleep(30 * time.Millisecond)
-	c.lockGroup("g1", "quota", 2*time.Second)
+	c.lockGroup("g1", "quota", 2*time.Second, "")
 	select {
 	case why := <-grouped:
 		if why != "locked" {
@@ -454,9 +454,9 @@ func TestBackoffSequence(t *testing.T) {
 func TestGateStateRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "gate-state.json")
 	a := &App{cands: map[string]*cand{"u1": newCand("u1")}, gatePath: path}
-	a.cands["u1"].lockGroup("g1", "quota", 10*time.Minute)
-	a.cands["u1"].lockGroup("g2", "quota", time.Hour)
-	a.cands["u1"].lockModel("m2", "breaker", 5*time.Minute)
+	a.cands["u1"].lockGroup("g1", "quota", 10*time.Minute, "")
+	a.cands["u1"].lockGroup("g2", "quota", time.Hour, "")
+	a.cands["u1"].lockModel("m2", "breaker", 5*time.Minute, "")
 	a.saveGateState()
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("锁状态没有落盘: %v", err)

@@ -96,8 +96,8 @@ func avgLat(pts []latPoint) float64 {
 }
 
 // notePerfRequest 记一笔成功响应: 有解码吞吐则给吞吐样本, 有首字节时延则给延迟样本;
-// 任一低性能命中即加低性能锁。探测类请求不走这里 (已删除探测功能)。
-func (a *App) notePerfRequest(upID, model string, tok int, decodeMs, ttfbMs int64) {
+// 任一低性能命中即加低性能锁。path 是这笔请求用的上游路径, 供恢复探测沿用。
+func (a *App) notePerfRequest(upID, model string, tok int, decodeMs, ttfbMs int64, path string) {
 	a.mu.RLock()
 	c, g := a.cands[upID], a.gate
 	a.mu.RUnlock()
@@ -110,6 +110,6 @@ func (a *App) notePerfRequest(upID, model string, tok int, decodeMs, ttfbMs int6
 	}
 	peak, avg, latAvg, low := c.notePerf(model, tp, ttfbMs, g)
 	if low {
-		a.addLockLowPerf(c, model, peak, avg, latAvg, g.lowPerfLock())
+		a.addLockLowPerf(c, model, peak, avg, latAvg, g.lowPerfLock(), path)
 	}
 }

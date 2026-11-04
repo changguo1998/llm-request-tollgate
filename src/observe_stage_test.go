@@ -137,8 +137,8 @@ func TestFlowStageLockSkipNarrative(t *testing.T) {
 func TestLowPerfLockEventText(t *testing.T) {
 	a := newTestApp(t, "http://127.0.0.1:1", GateCfg{}, nil)
 	c := newCand("u1")
-	a.addLockLowPerf(c, "real-1", 2, 1, 0, time.Minute)
-	a.addLockLowPerf(c, "real-1", 0, 0, 45000, time.Minute)
+	a.addLockLowPerf(c, "real-1", 2, 1, 0, time.Minute, "")
+	a.addLockLowPerf(c, "real-1", 0, 0, 45000, time.Minute, "")
 	evs := stageMsgs(a)
 	if len(evs) != 2 {
 		t.Fatalf("应记 2 条低性能锁事件, 得到 %d: %+v", len(evs), evs)

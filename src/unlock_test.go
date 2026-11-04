@@ -15,8 +15,8 @@ func TestForceUnlock(t *testing.T) {
 		Aliases:   map[string][][2]string{"m1": {{"u1", "real-1"}}},
 	})
 	c := app.cands["u1"]
-	c.lockModel("real-1", "breaker", time.Minute)
-	c.lockGroup("g1", "quota", time.Minute)
+	c.lockModel("real-1", "breaker", time.Minute, "")
+	c.lockGroup("g1", "quota", time.Minute, "")
 	c.lockConcurrency("concurrency", time.Minute)
 	if locked, _, _ := c.locked("real-1", "g1"); !locked {
 		t.Fatal("先应处于锁中")
@@ -52,8 +52,8 @@ func TestForceUnlockFilter(t *testing.T) {
 		Aliases:   map[string][][2]string{"m1": {{"u1", "real-1"}}},
 	})
 	c := app.cands["u1"]
-	c.lockModel("real-1", "breaker", time.Minute)
-	c.lockModel("real-2", "breaker", time.Minute)
+	c.lockModel("real-1", "breaker", time.Minute, "")
+	c.lockModel("real-2", "breaker", time.Minute, "")
 	if n := app.forceUnlock("u1", "real-1", ""); n != 1 {
 		t.Fatalf("只清 real-1 应为 1, 得到 %d", n)
 	}

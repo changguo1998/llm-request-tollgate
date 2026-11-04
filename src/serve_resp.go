@@ -81,7 +81,7 @@ func (s *serveState) forward() {
 	}
 	if status < 400 {
 		// 低性能锁的样本: 吞吐只取能拆出解码段的流式成功请求, 首字节时延取任何成功响应。
-		a.notePerfRequest(s.servedUp.ID, realModel, completion, decodeMs, ttfbMs)
+		a.notePerfRequest(s.servedUp.ID, realModel, completion, decodeMs, ttfbMs, s.upPath)
 	}
 
 	s.finalStatus = status
