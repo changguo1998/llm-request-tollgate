@@ -554,6 +554,38 @@ func TestUnclassifiedErrorIsLogged(t *testing.T) {
 	}
 }
 
+// TestPassthroughErrBodyAndHeadersInLog 核对真实上游出错时, 原始响应体 (截断) 与全部
+// 响应头落进请求日志 (err_body / err_headers), 供排查额度重置时间; 锁内跳过的候选
+// 没有响应内容, 不产生这两个字段。
+func TestPassthroughErrBodyAndHeadersInLog(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "37")
+		w.Header().Set("X-RateLimit-Reset", "6m0s")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"Insufficient Balance","type":"insufficient"}}`)
+	}))
+	defer up.Close()
+	rules := &ErrRules{Quota: []ErrRule{{Status: []int{402}, Contains: []string{"insufficient"}}}}
+	app := newTestApp(t, up.URL, GateCfg{IntervalMs: 5, SemWaitMs: 50, QueueWaitMs: 200,
+		RetryBackoffMs: []int{5, 10, 15}}, rules)
+	proxy := httptest.NewServer(app)
+	defer proxy.Close()
+
+	status, _ := postJSON(t, proxy.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("应透传 429, 实为 %d", status)
+	}
+	rec := waitLogRec(t, app, 2*time.Second)
+	if want := `{"error":{"message":"Insufficient Balance","type":"insufficient"}}`; rec.ErrBody != want {
+		t.Errorf("err_body 应为上游响应体原文:\n得到 %q\n期望 %q", rec.ErrBody, want)
+	}
+	hdr := http.Header(rec.ErrHeaders)
+	if rec.ErrHeaders == nil || hdr.Get("Retry-After") != "37" ||
+		hdr.Get("X-RateLimit-Reset") != "6m0s" {
+		t.Errorf("err_headers 应含上游响应头: %v", rec.ErrHeaders)
+	}
+}
+
 // TestProxyBreakerIsPerModel 覆盖熔断的粒度: 同一个上游下 m1 的模型连错熔断后, 只跳过 m1,
 // m2 (另一个真实模型) 照常真发并成功。
 func TestProxyBreakerIsPerModel(t *testing.T) {

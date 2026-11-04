@@ -13,33 +13,37 @@ import (
 )
 
 type logRec struct {
-	Ts           string  `json:"ts"`
-	Req          uint64  `json:"req,omitempty"` // 本进程内的请求编号 (与观测面事件对齐; 重启后从头计)
-	Logical      string  `json:"logical"`
-	Upstream     string  `json:"upstream"`
-	Model        string  `json:"model"`
-	Path         string  `json:"path"`
-	Stream       bool    `json:"stream"`
-	Status       int     `json:"status"`
-	Usage        *Usage  `json:"usage,omitempty"`
-	Missing      bool    `json:"missing_usage"` // 上游没回 usage, 走了字符粗估
-	Queued       bool    `json:"queued"`
-	QueueMs      int64   `json:"queue_ms"`
-	SemMs        int64   `json:"sem_ms,omitempty"` // 等并发信号量的时长
-	Client       string  `json:"client"`
-	UA           string  `json:"ua,omitempty"`
-	Source       string  `json:"source,omitempty"`
-	Fallbacks    int     `json:"fallbacks,omitempty"`
-	Err          string  `json:"err,omitempty"`
-	Gate         string  `json:"gate,omitempty"` // 被闸门挡下没发出去时: locked | sem_timeout | queue_timeout | backoff_timeout | canceled
-	LockSkips    int     `json:"lock_skips,omitempty"`
-	BackoffSkips int     `json:"backoff_skips,omitempty"`
-	TtfbMs       int64   `json:"ttfb_ms,omitempty"`     // 首字节时延 (被动采样)
-	DecodeMs     int64   `json:"decode_ms,omitempty"`   // 解码段时长: 首字节到流末 (仅流式有值)
-	Tps          float64 `json:"tps,omitempty"`         // 解码吞吐 tokens/s (流式才有)
-	Bytes        int64   `json:"bytes,omitempty"`       // 转发给客户端的响应体字节数
-	Bps          float64 `json:"bps,omitempty"`         // 接收的字节吞吐 bytes/s (流式才有)
-	DurationMs   int64   `json:"duration_ms,omitempty"` // 请求耗时 (收到请求到写完响应), 供非空闲吞吐
+	Ts        string `json:"ts"`
+	Req       uint64 `json:"req,omitempty"` // 本进程内的请求编号 (与观测面事件对齐; 重启后从头计)
+	Logical   string `json:"logical"`
+	Upstream  string `json:"upstream"`
+	Model     string `json:"model"`
+	Path      string `json:"path"`
+	Stream    bool   `json:"stream"`
+	Status    int    `json:"status"`
+	Usage     *Usage `json:"usage,omitempty"`
+	Missing   bool   `json:"missing_usage"` // 上游没回 usage, 走了字符粗估
+	Queued    bool   `json:"queued"`
+	QueueMs   int64  `json:"queue_ms"`
+	SemMs     int64  `json:"sem_ms,omitempty"` // 等并发信号量的时长
+	Client    string `json:"client"`
+	UA        string `json:"ua,omitempty"`
+	Source    string `json:"source,omitempty"`
+	Fallbacks int    `json:"fallbacks,omitempty"`
+	Err       string `json:"err,omitempty"`
+	// 上游真实出错 (有响应内容) 时的原始响应: 体 (截断) 与全部响应头, 供排查额度
+	// 重置时间等; 锁内跳过的候选没有响应内容, 不记这两个字段。
+	ErrBody      string              `json:"err_body,omitempty"`
+	ErrHeaders   map[string][]string `json:"err_headers,omitempty"`
+	Gate         string              `json:"gate,omitempty"` // 被闸门挡下没发出去时: locked | sem_timeout | queue_timeout | backoff_timeout | canceled
+	LockSkips    int                 `json:"lock_skips,omitempty"`
+	BackoffSkips int                 `json:"backoff_skips,omitempty"`
+	TtfbMs       int64               `json:"ttfb_ms,omitempty"`     // 首字节时延 (被动采样)
+	DecodeMs     int64               `json:"decode_ms,omitempty"`   // 解码段时长: 首字节到流末 (仅流式有值)
+	Tps          float64             `json:"tps,omitempty"`         // 解码吞吐 tokens/s (流式才有)
+	Bytes        int64               `json:"bytes,omitempty"`       // 转发给客户端的响应体字节数
+	Bps          float64             `json:"bps,omitempty"`         // 接收的字节吞吐 bytes/s (流式才有)
+	DurationMs   int64               `json:"duration_ms,omitempty"` // 请求耗时 (收到请求到写完响应), 供非空闲吞吐
 }
 
 // logDayOf 返回时间所在本地日历天 (轮转边界按本地日期算)。

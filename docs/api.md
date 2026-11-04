@@ -231,6 +231,8 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 | `client` / `ua` / `source` | 来源 (remote addr / User-Agent / `X-Tollgate-Source`) |
 | `fallbacks` | 换候选次数 |
 | `err` | 错误说明 |
+| `err_body` | 上游真实出错时的响应体原文 (截断到 1KB); 锁内跳过的候选无此字段 |
+| `err_headers` | 上游真实出错时的全部响应头 (如 `Retry-After` / `x-ratelimit-reset-*`, 供查额度重置时间); 锁内跳过的候选无此字段 |
 | `gate` | 被闸门挡下未发出时的原因 (见 5.2) |
 | `lock_skips` / `backoff_skips` | 候选被锁 / 在退避而被跳过的次数 |
 | `ttfb_ms` / `decode_ms` / `tps` | 首字节时延 / 解码段时长(首字节到流末, 仅流式) / 解码吞吐 tokens/s (流式才有) |

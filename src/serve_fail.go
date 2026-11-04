@@ -40,6 +40,8 @@ func (s *serveState) writeRejected() {
 }
 
 // writePassthrough: 最近一次是 HTTP 错误, 状态码 / 头 / 体原样透传。
+// 只有这里真有上游的响应内容, 才把响应体与响应头落进日志 (err_body / err_headers);
+// 锁内跳过的候选没有响应内容, 不记。
 func (s *serveState) writePassthrough() {
 	dst := s.w.Header()
 	for k, vv := range s.lastHdr {
@@ -56,10 +58,24 @@ func (s *serveState) writePassthrough() {
 	rec := s.baseLog()
 	rec.Upstream, rec.Model = s.lastUpID, s.lastMod
 	rec.Status, rec.Missing = s.finalStatus, true
+	rec.ErrBody = errBodyText(s.lastBody)
+	rec.ErrHeaders = s.lastHdr
 	if s.lastErr != nil {
 		rec.Err = s.lastErr.Error()
 	}
 	s.app.logReq(rec)
+}
+
+// errBodyCap 是落日志的上游错误体最大字节数, 再大截断 (防撑爆日志行)。
+const errBodyCap = 1024
+
+// errBodyText 取上游错误响应体的日志版: 原始字节截断到 errBodyCap, 不丢换行/格式
+// (JSON 序列化会自动转义), 只在截断时追省略标记。
+func errBodyText(b []byte) string {
+	if len(b) <= errBodyCap {
+		return string(b)
+	}
+	return string(b[:errBodyCap]) + "...(truncated)"
 }
 
 // writeLocked: 候选全在锁里, 回 429 + Retry-After 让 agent 退避 —— 这是上游限制的传导,
