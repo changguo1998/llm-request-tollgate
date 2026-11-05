@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -834,13 +835,15 @@ func TestModelsStickyMark(t *testing.T) {
 }
 
 // 第 1 页: 全是 0 / - 的行不显示 (配置里有模型但没请求过), 有队列或锁状态的行照常显示。
+// 只有连错计数 (fails) 的行也不显示: 它可能残留几天前的一次失败, 表里没有它的列。
 func TestModelsSkipsBlankRows(t *testing.T) {
 	openTestPTY(t, 60, 140)
 	m := newTUIModel("cfg")
 	m.pulse.Cands = []candView{{
 		ID: "ustc", Models: []candModelLock{
-			{Model: "idle"},             // 全 0: 不显示
-			{Model: "queued", Queue: 1}, // 只有队列状态: 显示
+			{Model: "idle"},              // 全 0: 不显示
+			{Model: "queued", Queue: 1},  // 只有队列状态: 显示
+			{Model: "starred", Fails: 1}, // 只有残留连错: 不显示
 		},
 	}}
 	m.tab = tabActive
@@ -852,8 +855,56 @@ func TestModelsSkipsBlankRows(t *testing.T) {
 	if strings.Contains(out, "ustc/idle") {
 		t.Error("全 0 / - 的行不该出现在路由聚合里")
 	}
+	if strings.Contains(out, "ustc/starred") {
+		t.Error("只有连错计数 (fails) 的行不该出现在路由聚合里")
+	}
 	if !strings.Contains(out, "ustc/queued") {
 		t.Error("有队列状态的行应保留")
+	}
+}
+
+// 观测面有实时状态但窗口内没有日志的候选: 按配置 aliases 归回引用它的逻辑名组
+// (同组不分空行), 不在末尾多出空逻辑名组; 配置里也没有的才垫底。
+func TestModelsConfigOwnedRowGroups(t *testing.T) {
+	cands := []candView{
+		{ID: "ustc", Models: []candModelLock{
+			{Model: "m1", Queue: 2},     // 日志里 ds41f 用过: 走日志分组
+			{Model: "orphan", Queue: 1}, // 配置里没有任何逻辑名引用: 落空逻辑名组
+		}},
+		{ID: "arkcp", Models: []candModelLock{{Model: "econ", Queue: 3}}}, // 配置里属于 ds41f, 窗口内无日志
+	}
+	cfg := filepath.Join(t.TempDir(), "tollgate.json")
+	if err := os.WriteFile(cfg, []byte(`{"aliases":{"ds41f":[["ustc","m1"],["arkcp","econ"]]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newTUIModel(cfg)
+	m.pulse.Cands = cands
+	m.routes = map[string]*routeRow{
+		"ds41f\x00ustc\x00m1": {Logical: "ds41f", Upstream: "ustc", Model: "m1",
+			Reqs: 2, Total: 100, Last: time.Now()},
+	}
+	rows := m.modelRows()
+	if len(rows) != 3 {
+		t.Fatalf("应得到 3 行 (ds41f 组 2 行 + 空组 1 行), 得到 %+v", rows)
+	}
+	// econ 无日志但配置说它属于 ds41f: 归入 ds41f 组, 不落空组。
+	var econRow *modelRow
+	for _, r := range rows {
+		if r.model == "econ" {
+			econRow = r
+		}
+	}
+	if econRow == nil {
+		t.Fatal("econ 行应存在 (有队列状态)")
+	}
+	if econRow.logical != "ds41f" || econRow.Queue != 3 {
+		t.Fatalf("econ 应归入 ds41f 组并带上队列状态, 得到 %+v", econRow)
+	}
+	// orphan 配置里没有归属: 落在空逻辑名组。
+	for _, r := range rows {
+		if r.model == "orphan" && r.logical != "" {
+			t.Fatalf("orphan 应落空逻辑名组 (logical=\"\"), 得到 %+v", r)
+		}
 	}
 }
 

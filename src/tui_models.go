@@ -232,10 +232,11 @@ type modelRow struct {
 	Last                            time.Time
 }
 
-// blank 判断这一行是否全无数据: 队列 / 退避 / 熔断 / 连错 / 请求 / 错误 / 换候选 /
-// Token / 首字节 / 吞吐都是 0 或 -, 且没有最近请求时间。
+// blank 判断这一行是否全无数据: 队列 / 退避 / 熔断 / 请求 / 错误 / 换候选 /
+// Token / 首字节 / 吞吐都是 0 或 -, 且没有最近请求时间。连错计数 (fails) 不算显示理由:
+// 它只在成功服务时清零, 可能只是残留几天前的一次失败, 表里也没有它的列。
 func (r *modelRow) blank() bool {
-	return r.Queue == 0 && r.Fails == 0 && r.PausedMs == 0 && r.LockMs == 0 &&
+	return r.Queue == 0 && r.PausedMs == 0 && r.LockMs == 0 &&
 		r.Reqs == 0 && r.Errs == 0 && r.Fallbacks == 0 &&
 		r.Total == 0 && r.Cached == 0 && len(r.TtfbPts) == 0 &&
 		len(r.DecodeRate) == 0 && len(r.TotalRate) == 0 && len(r.ByteRate) == 0 &&
@@ -244,8 +245,9 @@ func (r *modelRow) blank() bool {
 
 // modelRows 合并观测面里的模型队列与日志聚合, 按 逻辑名 分组 (同一逻辑名的候选相邻):
 // 只保留真正有过请求的 上游/模型; 所有数据都是 0 / - 的行 (配置里有、但从没请求过)
-// 不进表。观测面的队列 / 锁状态没有逻辑名维度, 按 上游/模型 补到引用它的每组;
-// 只出现在观测面、没有任何日志归属的 上游/模型 落在空逻辑名组里 (排最末)。
+// 不进表。观测面的队列 / 锁状态没有逻辑名维度, 按 上游/模型 补到引用它的每组 —
+// 引用关系先查配置 aliases: 只要某逻辑名的候选链包含该 (上游/模型), 就归到那个组
+// (即使窗口内没日志); 配置里也找不到的才落空逻辑名组 (排最末)。
 func (m *tuiModel) modelRows() []*modelRow {
 	by := map[string]*modelRow{}
 	get := func(logical, up, model string) *modelRow {
@@ -275,10 +277,22 @@ func (m *tuiModel) modelRows() []*modelRow {
 			r.Last = rr.Last
 		}
 	}
+	// 配置归属: (上游, 真实模型) -> 引用它的逻辑名们 (候选链顺序不算顺序, 只数集合)。
+	// 配置读不到 (如 -tui 时 cfgPath 缺失) 为 nil, 退回纯日志分组的老行为。
+	aliasGroups := map[string][]string{}
+	if c, err := loadConfigOpt(m.cfgPath, true); err == nil {
+		for logical, list := range c.Aliases {
+			for _, tgt := range list {
+				k := tgt[0] + "\x00" + tgt[1]
+				aliasGroups[k] = append(aliasGroups[k], logical)
+			}
+		}
+	}
 	for _, cand := range m.pulse.Cands {
 		for _, md := range cand.Models {
-			// 队列状态补到所有引用该 (上游/模型) 的逻辑名组; 没有任何日志归属时
-			// 落空逻辑名组 (只有观测面状态、没路由去向的模型也要看得到)。
+			// 队列状态补到所有引用该 (上游/模型) 的逻辑名组; 窗口内没有任何日志归属时,
+			// 按配置候选链找引用它的逻辑名们 (同一个逻辑名不管有没有记录都归一组),
+			// 配置里也没有才落空逻辑名组 (只有观测面状态、没路由去向的模型也要看得到)。
 			found := false
 			for _, r := range by {
 				if r.up == cand.ID && r.model == md.Model {
@@ -287,8 +301,20 @@ func (m *tuiModel) modelRows() []*modelRow {
 					found = true
 				}
 			}
-			if !found {
+			if found {
+				continue
+			}
+			k := cand.ID + "\x00" + md.Model
+			owners := aliasGroups[k]
+			if len(owners) == 0 {
+				// 配置里也没有这个 (上游/模型): 只有观测面状态, 单独垫底一组。
 				r := get("", cand.ID, md.Model)
+				r.Queue, r.Fails, r.PausedMs, r.LockMs = md.Queue, md.Fails, md.PausedMs, md.LeftMs
+				r.LockWhy = md.Why
+				continue
+			}
+			for _, logical := range owners {
+				r := get(logical, cand.ID, md.Model)
 				r.Queue, r.Fails, r.PausedMs, r.LockMs = md.Queue, md.Fails, md.PausedMs, md.LeftMs
 				r.LockWhy = md.Why
 			}
