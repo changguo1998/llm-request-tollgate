@@ -94,7 +94,7 @@ def main() -> None:
     args = ap.parse_args()
 
     out = build(Path(args.list))
-    text = json.dumps(out, indent=2, ensure_ascii=False) + "\n"
+    text = json.dumps(out, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")
         print(f"已写入 {args.out}", file=sys.stderr)

@@ -173,7 +173,7 @@ func TestPrioOrderMatchesGenerator(t *testing.T) {
 	}
 }
 
-// 存盘: 数值原样 (不出现 .0)、没动过的字段还在、4 空格缩进、不留 .tmp。
+// 存盘: 数值原样 (不出现 .0)、没动过的字段还在、2 空格缩进、不留 .tmp。
 func TestPrioSaveRoundTrip(t *testing.T) {
 	store, cfg := prioFixture(t)
 	e := newTuiEditor(cfg)
@@ -186,8 +186,8 @@ func TestPrioSaveRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读回: %v", err)
 	}
-	if !bytes.Contains(b, []byte("\n    \"providers\"")) {
-		t.Errorf("缩进应为 4 空格:\n%s", b[:80])
+	if !bytes.Contains(b, []byte("\n  \"providers\"")) {
+		t.Errorf("缩进应为 2 空格:\n%s", b[:80])
 	}
 	if !bytes.HasSuffix(b, []byte("}\n")) {
 		t.Errorf("结尾应有一个换行")

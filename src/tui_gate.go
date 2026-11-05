@@ -357,51 +357,25 @@ func (e *tuiEditor) setSecField(i, ms int) {
 	}
 }
 
-// marshalConfig 按固定的顶层顺序写回配置文件: 手写 JSON 是因为 map 会把键排序,
-// 让整份配置产生无关的 diff。raw 里没认识的键按字典序补在最后, 不丢数据。
+// marshalConfig 按字典序重排顶层键 (与 store 保存同一格式口径): 2 空格缩进,
+// 值原样保留 (RawMessage, 密钥等不认识的字段不丢)。
 func marshalConfig(top map[string]json.RawMessage) ([]byte, error) {
-	known := []string{
-		"listen", "log_path",
-		"connect_sec", "response_header_sec", "stream_idle_sec",
-		"interval_sec", "sem_wait_sec", "queue_wait_sec",
-		"concurrency_lock_sec", "quota_lock_sec", "breaker_lock_sec",
-		"lowperf_window_sec", "lowperf_peak_max", "lowperf_avg_max",
-		"lowperf_ttfb_max_sec", "lowperf_lock_sec", "retry_backoff_sec",
-		"rate_window_sec", "block_window_sec", "probe_enabled",
-		"upstreams", "aliases",
-	}
-	rest := make([]string, 0)
+	keys := make([]string, 0, len(top))
 	for k := range top {
-		seen := false
-		for _, k2 := range known {
-			if k == k2 {
-				seen = true
-				break
-			}
-		}
-		if !seen {
-			rest = append(rest, k)
-		}
+		keys = append(keys, k)
 	}
-	sort.Strings(rest)
-	keys := append(append([]string{}, known...), rest...)
+	sort.Strings(keys)
 
 	var b bytes.Buffer
 	b.WriteString("{")
-	first := true
-	for _, k := range keys {
-		raw, ok := top[k]
-		if !ok {
-			continue
-		}
+	for i, k := range keys {
 		var body bytes.Buffer
-		if err := json.Indent(&body, raw, "  ", "  "); err != nil {
+		if err := json.Indent(&body, top[k], "  ", "  "); err != nil {
 			return nil, err
 		}
-		if !first {
+		if i > 0 {
 			b.WriteString(",")
 		}
-		first = false
 		b.WriteString("\n  ")
 		b.WriteString(strconv.Quote(k))
 		b.WriteString(": ")

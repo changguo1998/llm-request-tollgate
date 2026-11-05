@@ -147,9 +147,9 @@ func (e *tuiEditor) sortProviders() {
 	}
 }
 
-// save 原子写回 store (先写 .tmp 再 rename)。
+// save 原子写回 store (先写 .tmp 再 rename); 2 空格缩进, 键字典序 (map 编码的默认行为)。
 func (e *tuiEditor) save() error {
-	b, err := json.MarshalIndent(e.store, "", "    ")
+	b, err := json.MarshalIndent(e.store, "", "  ")
 	if err != nil {
 		return err
 	}
