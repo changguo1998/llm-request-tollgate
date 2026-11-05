@@ -440,6 +440,51 @@ func TestPrioDraw(t *testing.T) {
 	}
 }
 
+// 模型列表里 M 后的优先级数字右对齐 2 列 (不足左侧补空格), 负号也占 1 列,
+// 负数与正数在同一列上对齐; provider 列表与模型列表里的 provider 名用第 1 页同款专属色。
+func TestSettingsPrioWidthAndProviderColors(t *testing.T) {
+	openTestPTY(t, 100, 30)
+	_, cfg := prioFixture(t)
+	m := newTUIModel(cfg)
+	m.pulse.Cands = []candView{{ID: "ustc"}, {ID: "group"}} // 给 provider 分专属色
+	m.prio = newTuiEditor(cfg)
+	m.tab = tabSettings
+	frame := m.draw()
+	plain := stripANSI(frame)
+
+	// 优先级数字补到 2 列: 2 -> "M 2", 0 -> "M 0", 5 -> "M 5" (左补空格)。
+	for _, want := range []string{"M 2 P0 ustc/", "M 0 P3 group/", "M 5 P3 group/", "M 0 P0 ustc/"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("模型列表应有 %q, 得到:\n%s", want, plain)
+		}
+	}
+	// 负数 (-1) 与正数同宽: 也占 2 列, 不挤掉 M 后的空格。
+	m.prio.modelSel = 0 // 选中第一行模型, 减到 -1
+	for i := 0; i < 10 && m.prio.selected() != nil; i++ {
+		m.prio.adjust(-1)
+		row := m.prio.selected()
+		if prioOf(row.model) == -1 {
+			break
+		}
+	}
+	frame = m.draw()
+	plain = stripANSI(frame)
+	if !strings.Contains(plain, "M-1") {
+		t.Errorf("停用模型应显示 M-1:\n%s", plain)
+	}
+
+	// provider 列表与模型列表里的 provider 名沿用第 1 页专属色。
+	for _, id := range []string{"ustc", "group"} {
+		c, ok := m.upColors[id]
+		if !ok || c == "" {
+			t.Fatalf("provider %s 没分到第 1 页同款色", id)
+		}
+		if !strings.Contains(frame, c+id+tuiReset) {
+			t.Errorf("provider %s 名没带专属色 %q", id, c+id+tuiReset)
+		}
+	}
+}
+
 // 模型列应顶到内容区底部 (消息行上方), 不被第 1 列的高度公式压短:
 // 模型够多时, 可见行数由窗口高度决定, 最后一个模型行贴近内容区末尾。
 func TestSettingsModelColumnFillsHeight(t *testing.T) {

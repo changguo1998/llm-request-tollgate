@@ -10,6 +10,7 @@ import (
 // drawSettings 画设置页: 三列并排 —— 第 1 列 全局参数 + 供应商, 第 2 列 模型, 第 3 列 预览,
 // 底部消息行。各区标题中文, 焦点区用 [ 标题 ] 括起; 标题用 tuiTitle 色。列宽按内容算,
 // 第 3 列吃掉剩余宽度, 一直顶到终端右边界; 模型列顶到内容区底部 (消息行上方), 不留空白。
+// 供应商与模型列里的 provider 名沿用第 1 页上游表的专属色 (upNameAttr), 选中行反显保留。
 func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 	e := m.prio
 	if e == nil {
@@ -85,7 +86,7 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 			if e.focus == 1 && i == e.provSel {
 				attr = tuiRev
 			}
-			col1 = append(col1, attr+tuiIndent+name+"  priority="+strconv.Itoa(prioOf(e.provEntry(name)))+tuiReset)
+			col1 = append(col1, attr+tuiIndent+m.upNameAttr(name, attr)+"  priority="+strconv.Itoa(prioOf(e.provEntry(name)))+tuiReset)
 		}
 	} else {
 		col1 = append(col1, tuiYell+"store 读不到: "+e.err+tuiReset)
@@ -106,8 +107,9 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 		if e.focus == 0 && i == e.modelSel {
 			attr = tuiRev
 		}
-		text := tuiIndent + "M" + strconv.Itoa(prioOf(row.model)) + " P" + strconv.Itoa(prioOf(row.entry)) +
-			" " + row.provider + "/" + modelID(row.model)
+		// M 后的模型优先级按 2 列右对齐 (负号也算 1 列), 与负数并排时不顶格。
+		text := tuiIndent + "M" + tuiPadLeft(strconv.Itoa(prioOf(row.model)), 2) + " P" + strconv.Itoa(prioOf(row.entry)) +
+			" " + m.upNameAttr(row.provider, attr) + "/" + modelID(row.model)
 		col2 = append(col2, attr+text+tuiReset)
 	}
 

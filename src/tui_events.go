@@ -103,6 +103,18 @@ func (m *tuiModel) upName(up string) string {
 	return up
 }
 
+// upNameAttr 给上游名上第 1 页同款专属色, 并保留行尾反显: 名字串里的 reset 会把
+// 选中行的反显也清掉, 上完色再补回 attr, 后面的 priority= 还能继续反显。
+func (m *tuiModel) upNameAttr(up, attr string) string {
+	if up == "" {
+		return ""
+	}
+	if c := m.upColors[up]; c != "" {
+		return c + up + tuiReset + attr
+	}
+	return up + attr
+}
+
 // upModel 把上游与真实模型拼成一格 (`上游/模型`, 与活跃连接表和路由表同一写法);
 // 上游部分用专属色, 有一边为空时不留那个斜杠。
 func (m *tuiModel) upModel(up, model string) string {
