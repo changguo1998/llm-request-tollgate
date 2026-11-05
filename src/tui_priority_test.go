@@ -231,16 +231,35 @@ func TestPrioKeys(t *testing.T) {
 		return quit
 	}
 
-	// 选中 ustc/deepseek-flash (M2): 减到底夹在 0, 再加回去。
-	for i := 0; i < 5; i++ {
+	// 选中 ustc/deepseek-flash (M2, 优先级 2): 减 3 次到 -1 (负值 = 停用, 下限)。
+	// 停用后该行仍显示, 光标钉在原行; 再按 - 停在 -1 不再减, + 调回 0。
+	row := m.prio.selected()
+	if row == nil || row.provider+"/"+modelID(row.model) != "ustc/deepseek-flash" {
+		t.Fatalf("初始选中应为 ustc/deepseek-flash, 得到 %+v", row)
+	}
+	target := row.model
+	for i := 0; i < 3; i++ {
 		key('-')
 	}
-	if got := prioOf(m.prio.selected().model); got != 0 {
-		t.Fatalf("优先级应夹在 0, 得到 %d", got)
+	if got := prioOf(target); got != -1 {
+		t.Fatalf("优先级应能减到 -1 (停用), 得到 %d", got)
+	}
+	if got := prioOf(m.prio.selected().model); got != -1 {
+		t.Fatalf("停用后该行应保持选中, 得到 %d", got)
+	}
+	for i := 0; i < 2; i++ {
+		key('-')
+	}
+	if got := prioOf(target); got != -1 {
+		t.Fatalf("到 -1 后再按 - 应停在 -1, 得到 %d", got)
+	}
+	// 预览仍显示停用模型, 排最后 (优先级最低)。
+	if got := candIDs(m.prio.candsFor("deepseek-v4.1-flash")); strings.Join(got, " ") != "group/deepseek-v4.1-flash ustc/deepseek-flash-2 ustc/deepseek-flash" {
+		t.Fatalf("停用模型应在预览里排最后: %v", got)
 	}
 	key('+')
-	if got := prioOf(m.prio.selected().model); got != 1 {
-		t.Fatalf("加一后应为 1, 得到 %d", got)
+	if got := prioOf(m.prio.selected().model); got != 0 {
+		t.Fatalf("加一后应为 0, 得到 %d", got)
 	}
 
 	// "=" 输入 12; 退格再补一位, 回车提交。
@@ -286,6 +305,64 @@ func TestPrioKeys(t *testing.T) {
 	}
 	if quit := m.handleKey('q', &pending); !quit {
 		t.Fatalf("第二次 q 应放弃改动退出")
+	}
+}
+
+// 负优先级 (下限 -1) = 停用: adjust / setValue 都钳到 -1, 存盘写进 store;
+// 该行保持显示 (列表在, 预览排在最后), 重读后仍是停用; provider 优先级不受影响。
+func TestPrioNegativeDisableClampAndVisible(t *testing.T) {
+	store, cfg := prioFixture(t)
+	e := newTuiEditor(cfg)
+	row := e.selected()
+	if row == nil || row.provider+"/"+modelID(row.model) != "ustc/deepseek-flash" {
+		t.Fatalf("初始选中应为 ustc/deepseek-flash, 得到 %+v", row)
+	}
+	target := row.model
+	e.adjust(-10) // 2 -> 钳到 -1
+	if got := prioOf(target); got != -1 {
+		t.Fatalf("优先级下限应为 -1, 得到 %d", got)
+	}
+	if got := candIDs(e.candsFor("deepseek-v4.1-flash")); strings.Join(got, " ") != "group/deepseek-v4.1-flash ustc/deepseek-flash-2 ustc/deepseek-flash" {
+		t.Fatalf("停用模型应在预览里排最后: %v", got)
+	}
+	if rows := e.filtered(); len(rows) != 4 {
+		t.Fatalf("停用后该行仍应显示 (列表 4 行), 得到 %d", len(rows))
+	}
+	e.saveStore()
+	b, err := os.ReadFile(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte("\"tollgate_priority\": -1")) {
+		t.Errorf("存盘应为 -1:\n%s", b)
+	}
+	// 重读 store: -1 原样读回, 行仍可见, provider 优先级不受影响。
+	e2 := newTuiEditor(cfg)
+	if got := prioOf(e2.provEntry("ustc")); got != 0 {
+		t.Fatalf("provider 优先级不该被模型调整动到, 得到 %d", got)
+	}
+	gotRows := e2.filtered()
+	if len(gotRows) != 4 {
+		t.Fatalf("重读后停用行仍应显示, 得到 %d", len(gotRows))
+	}
+	for _, r := range gotRows {
+		if r.provider == "ustc" && modelID(r.model) == "deepseek-flash" && prioOf(r.model) != -1 {
+			t.Fatalf("重读后停用模型应为 -1, 得到 %d", prioOf(r.model))
+		}
+	}
+	// = 直接输入超大负数也钳到 -1, 再输入正数正常调回。
+	probe := e2.selected()
+	if probe == nil {
+		t.Fatal("该有选中行")
+	}
+	probeModel := probe.model
+	e2.setValue(-999)
+	if got := prioOf(probeModel); got != -1 {
+		t.Fatalf("直接输入超大负数应钳到 -1, 得到 %d", got)
+	}
+	e2.setValue(3)
+	if got := prioOf(probeModel); got != 3 {
+		t.Fatalf("3 应能正常写入 (从停用调回), 得到 %d", got)
 	}
 }
 

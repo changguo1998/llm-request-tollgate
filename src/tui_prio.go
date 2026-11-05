@@ -8,7 +8,8 @@ import (
 	"strings"
 )
 
-// buildAliases 复刻生成器的归并与排序, 右栏预览与落进配置的候选顺序完全一致。
+// buildAliases 复刻生成器的归并与排序, 右栏预览与落进配置的候选顺序一致; 停用模型
+// (负优先级, 下限 -1) 除外: 预览里排在最后, 但生成器会跳过, 不会落进 aliases/tollgate 目录。
 func (e *tuiEditor) buildAliases() []tuiAlias {
 	dropped := e.droplist()
 	type item struct {

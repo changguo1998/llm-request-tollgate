@@ -79,8 +79,8 @@ func modelsOf(entry map[string]any) []map[string]any {
 	return out
 }
 
-// prioOf 读优先级; 缺省 0 (最小), 负数按 0 算。
-// int64 是自己刚写进去的 (setPrio), json.Number 是从文件读进来的, 两种都要认。
+// prioOf 读优先级; 缺省 0 (最小); 负值 = 停用该模型 (生成配置时跳过, 不进 tollgate 模型目录;
+// settings 页该行仍显示, 可调回非负)。Provider 条目也用它读 (排序用), 只有模型级负值有停用语义。
 func prioOf(entry map[string]any) int {
 	switch v := entry[prioField].(type) {
 	case json.Number:
@@ -97,9 +97,10 @@ func prioOf(entry map[string]any) int {
 	return 0
 }
 
+// setPrio 写优先级; 下限 -1 (停用): 比 -1 更小的值一律钳到 -1, 不再往下减。
 func setPrio(entry map[string]any, v int) {
-	if v < 0 {
-		v = 0
+	if v < -1 {
+		v = -1
 	}
 	entry[prioField] = int64(v)
 }
