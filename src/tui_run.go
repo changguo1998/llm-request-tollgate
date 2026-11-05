@@ -166,7 +166,7 @@ func runTUI(cfgPath, stateURL string) {
 
 // handleKey 处理一个输入字节; 返回 true = 退出。
 //
-// settings 页把编辑键留给自己 (h = 热加载, r = 生成配置, m/p/g = 换面板), 状态页的
+// settings 页把编辑键留给自己 (s = 保存并重生成, h = 热加载, m/p/g = 换面板), 状态页的
 // h/l 仍是切页; 切页统一走 1-3 / 左右方向键 / l (settings 页的 h 被编辑键占了)。
 func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 	e := m.prio
@@ -223,8 +223,6 @@ func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 		switch b {
 		case 's':
 			m.saveSettings()
-		case 'r':
-			e.regenerate()
 		case 'h':
 			m.prioHup()
 		case 'l', '\t':

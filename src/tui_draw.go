@@ -91,8 +91,8 @@ func (c *tuiCanvas) last(s string) {
 
 func (m *tuiModel) hint() string {
 	if m.tab == tabSettings {
-		return "  m/p/g 换面板   j/k 移动   +/- 调值   = 输入   s 保存" +
-			"   r 生成   h 热加载   q 退出   (" + m.prioHint() + ")"
+		return "  m/p/g 换面板   j/k 移动   +/- 调值   = 输入   s 保存并生成" +
+			"   h 热加载   q 退出   (" + m.prioHint() + ")"
 	}
 	base := "  1-3 或 Tab 切页   up/down/PgUp/PgDn 滚动   r 重读日志   q 退出"
 	switch m.tab {

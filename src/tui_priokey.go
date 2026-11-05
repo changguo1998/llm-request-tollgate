@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -21,14 +22,15 @@ func (e *tuiEditor) saveStore() {
 	e.message = "已保存 " + e.path
 }
 
-// regenerate 先存盘再跑生成器 (生成器读 store, 不先存就白跑)。
-func (e *tuiEditor) regenerate() {
+// regenerate 先存盘再跑生成器 (生成器读 store, 不先存就白跑); 失败返回 error, 原因也写进 message。
+func (e *tuiEditor) regenerate() error {
 	if !e.usable() {
-		return
+		e.message = "store 读不到, 无法生成配置"
+		return fmt.Errorf("store unavailable")
 	}
 	e.saveStore()
 	if e.dirty {
-		return // 存盘失败, 别再往下跑
+		return fmt.Errorf("store 存盘失败, 配置未重新生成")
 	}
 	args := []string{
 		filepath.Join(e.root, "scripts", "gen_tollgate_config.py"),
@@ -41,9 +43,10 @@ func (e *tuiEditor) regenerate() {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		e.message = "生成失败: " + lastLine(string(out), err.Error())
-		return
+		return err
 	}
 	e.message = "已重新生成配置 " + e.config
+	return nil
 }
 
 // lastLine 取输出的最后一行 (报错时最有信息量的那行), 空则用兜底文案。

@@ -547,6 +547,65 @@ func TestSettingsGateSave(t *testing.T) {
 	}
 }
 
+// s 一条龙: store 有改动时按 s = 存 store + 重生成配置 + 热加载一次到位;
+// 落盘的 aliases 与 store 一致 (停用模型被剔除), 不再需要单独的 r 键。
+func TestSettingsSaveRegenerateAndReload(t *testing.T) {
+	store, cfg := prioFixture(t)
+	root := repoRootFor(cfg)
+	if _, err := os.Stat(filepath.Join(root, "scripts", "gen_tollgate_config.py")); err != nil {
+		t.Skipf("生成器不在: %v", err)
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("没有 python3")
+	}
+	m := newTUIModel(cfg)
+	m.prio = newTuiEditor(cfg)
+	m.tab = tabSettings
+	pending := []byte{}
+	send := func(b byte) {
+		if quit := m.handleKey(b, &pending); quit {
+			t.Fatal("不该退出")
+		}
+	}
+	// 停用 ustc/deepseek-flash: 2 -> -1 (减 3 次)。
+	for i := 0; i < 3; i++ {
+		send('-')
+	}
+	called := false
+	m.reloadFn = func() error { called = true; return nil }
+	send('s')
+	if !called {
+		t.Fatalf("s 保存 store 改动后应触发热加载")
+	}
+	if m.prio.dirty || m.prio.gateDirty {
+		t.Fatalf("保存后不该再有未保存标记")
+	}
+	// store 已落盘 -1。
+	b, err := os.ReadFile(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte("\"tollgate_priority\": -1")) {
+		t.Errorf("store 应已写 -1:\n%s", b)
+	}
+	// 配置已被重生成: aliases 里不含停用模型。
+	raw, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Aliases map[string][][2]string `json:"aliases"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("重生成的配置不是合法 JSON: %v", err)
+	}
+	for _, pairs := range got.Aliases["deepseek-v4.1-flash"] {
+		if pairs[0] == "ustc" && pairs[1] == "deepseek-flash" {
+			t.Fatalf("停用模型不应再出现在重生成的 aliases 里")
+		}
+	}
+}
+
 // 编辑 probe_enabled (settings 第 3 页的开关行) 应写回配置并可热重载。
 func TestSettingsProbeEditAndSave(t *testing.T) {
 	_, cfg := prioFixture(t)

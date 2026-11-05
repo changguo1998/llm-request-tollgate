@@ -2,10 +2,10 @@
 //
 // 左栏是 provider 面板 + 模型列表 (别名 -> 候选), 右栏是所选别名的候选顺序实时预览:
 // 候选顺序 = 模型优先级降序 -> provider 优先级降序 -> 上游顺序 -> 模型 id, 与配置生成器
-// (scripts/gen_tollgate_config.py 的 build_aliases) 同一口径, 所以调完直接 r 重生成
+// (scripts/gen_tollgate_config.py 的 build_aliases) 同一口径, 所以 s 保存时自动重生成
 // 配置, 预览里看到的就是落进配置的顺序。
 //
-// 改的是模型列表 store (llm-models.json): 4 空格缩进、键按字典序、写 .tmp 再 rename,
+// 改的是模型列表 store (llm-models.json): 2 空格缩进、键按字典序、写 .tmp 再 rename,
 // 数值走 json.Number 原样过一遍, 没动过的字段一个都不碰。
 
 package main

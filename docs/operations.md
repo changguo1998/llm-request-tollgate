@@ -183,7 +183,8 @@ python3 scripts/gen_tollgate_config.example.py
 状态台第 3 个页签 (settings) 上半是 `gate` 的 7 项调度参数 (写回 `config.local.json` 的
 `gate` 段, 其余字段与格式原样保留), 下半是 store (`~/fff/config/llm-models.json` 里的
 `tollgate_priority`), 右栏实时预览候选顺序. `m` / `p` / `g` 聚焦模型 / provider / 调度参数,
-`+/-` 调值, `=` 输数值, `/` 过滤, `s` 保存并热加载, `r` 重生成配置, `h` 热加载, `q` 退出.
+`+/-` 调值, `=` 输数值, `/` 过滤, `s` 保存并生成: store 有改动时自动重生成配置
+(aliases/upstreams 与 store 一致, 含停用模型剔除), 再热加载一次到位; `h` 热加载, `q` 退出.
 
 ```bash
 # 同进程起代理 + 状态台 (q 退出):

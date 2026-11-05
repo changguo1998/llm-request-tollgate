@@ -247,8 +247,12 @@ python3 scripts/gen_tollgate_config.example.py
 ```
 
 优先级用状态台的 `settings` 页调: provider 面板 + 模型列表 + 候选顺序实时预览;
-`m` / `p` / `g` 切模型 / provider / 调度参数, `+/-` 调值, `=` 输入数值, `/` 过滤,
-`s` 保存 (store 与 `gate`) 并热加载, `r` 重生成配置, `h` 热加载, `q` 退出。
+`m` / `p` / `g` 切模型 / provider / 调度参数, `+/-` 调值 (模型优先级减到 -1 即停用,
+再按 `-` 不再减小; 该行仍显示、预览里排最后、可调回, 但生成配置时被跳过,
+不会出现在 tollgate 模型目录), `=` 输入数值, `/` 过滤,
+`s` 保存并生成: 优先级写 store, 调度参数写配置, store 有改动时顺带重生成
+`tollgate.json` (aliases/upstreams 与 store 保持一致), 最后热加载一次到位;
+`h` 热加载, `q` 退出。
 
 ```bash
 ./llm-request-tollgate -tui-state   # 看常驻服务, 按 3 进 settings 页
