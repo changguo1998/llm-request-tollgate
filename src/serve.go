@@ -48,6 +48,7 @@ func (a *App) serveSide(w http.ResponseWriter, r *http.Request) bool {
 
 // attempt 是一个候选: 上游 + 真实模型 + 该候选自己的调度状态。
 type attempt struct {
+	idx   int // 候选在 alias 列表里的下标 (粘性偏好按它记)
 	up    *UpstreamCfg
 	mod   string
 	group string
@@ -93,6 +94,13 @@ type serveState struct {
 	lastHdr    http.Header
 	lastUpID   string
 	lastMod    string
+
+	// 粘性偏好 (本笔请求): prefIdx 是本笔开头排到首位的偏好候选 (alias 下标);
+	// 若该候选被换走, stickyBlock / stickyLong 记录换走原因 (成功服务后按它更新偏好)。
+	prefIdx     int
+	stickyBlock bool // 偏好候选被锁 / 退避预检 / 排队超时顶班 (临时不可用)
+	stickyLong  bool // 偏好候选被长期锁 (低性能 / 额度) 顶班
+	servedIdx   int  // 成功候选的 alias 下标 (仅成功时有意义)
 
 	finalStatus int
 }
@@ -162,6 +170,10 @@ func (s *serveState) run() {
 		s.writeFailure()
 		return
 	}
+	// 请求成功服务后更新粘性偏好; 失败请求不动偏好。
+	if s.app.sticky != nil {
+		s.app.sticky.served(s.logical, s.servedIdx, s.prefIdx, s.stickyBlock, s.stickyLong)
+	}
 	s.forward()
 }
 
@@ -171,12 +183,12 @@ func (s *serveState) pickAttempts() bool {
 	alias, aliasOK := s.app.aliases[s.logical]
 	s.gate = s.app.gate
 	s.attempts = make([]attempt, 0, len(alias))
-	for _, tgt := range alias {
+	for i, tgt := range alias {
 		u, ok := s.app.upstreams[tgt.Upstream]
 		if !ok {
 			continue
 		}
-		s.attempts = append(s.attempts, attempt{u, tgt.Model, tgt.Group, s.app.cands[u.ID]})
+		s.attempts = append(s.attempts, attempt{idx: i, up: u, mod: tgt.Model, group: tgt.Group, cd: s.app.cands[u.ID]})
 	}
 	s.app.mu.RUnlock()
 	if !aliasOK {
@@ -189,6 +201,27 @@ func (s *serveState) pickAttempts() bool {
 		writeError(s.w, http.StatusNotFound, "model_not_found",
 			"model "+s.logical+" has no configured upstream")
 		return false
+	}
+	// 粘性偏好: 把最近成功服务的候选提到候选链首位, 它可用就走它, 不可用才 fallback
+	// 其他候选; 这样同一逻辑名的正常流量粘在同一上游, 缓存不会因每笔都从配置首候选
+	// 开始而被打散。偏好候选不在候选链里 (其上游未配置) 时本笔按顶班处理, 不算真实失败。
+	s.prefIdx = 0
+	if s.app.sticky != nil {
+		s.prefIdx = s.app.sticky.prefIdx(s.logical, len(alias))
+	}
+	prefAt := -1
+	for i := range s.attempts {
+		if s.attempts[i].idx == s.prefIdx {
+			prefAt = i
+			break
+		}
+	}
+	if prefAt == -1 {
+		s.stickyBlock = true // 偏好候选不在链里 (上游未配置): 顶班, 不累计迁移
+	} else if prefAt > 0 {
+		at := s.attempts[prefAt]
+		copy(s.attempts[1:prefAt+1], s.attempts[:prefAt])
+		s.attempts[0] = at
 	}
 	return true
 }

@@ -317,6 +317,116 @@ func TestRecoveryDisabledNoProbe(t *testing.T) {
 	}
 }
 
+// slowCountUp 是带可选响应延迟与调用计数的假上游 (探测用): 慢到超过 TTFB 阈值时,
+// 低性能锁的恢复探测应判定为「性能未恢复」而重锁。
+type slowCountUp struct {
+	mu     sync.Mutex
+	n      int
+	delay  time.Duration
+	status int
+}
+
+func (f *slowCountUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.n++
+	d := f.delay
+	f.mu.Unlock()
+	if d > 0 {
+		time.Sleep(d)
+	}
+	w.WriteHeader(f.status)
+	_, _ = w.Write([]byte(`{"choices":[]}`))
+}
+
+func (f *slowCountUp) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.n
+}
+
+func (f *slowCountUp) setDelay(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.delay = d
+}
+
+func waitHits(t *testing.T, up *slowCountUp, n int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if up.count() >= n {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("等不到假上游收到 %d 笔请求 (实际 %d)", n, up.count())
+}
+
+func waitUnlocked(t *testing.T, c *cand, label string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if locked, _, _ := c.locked("real-1", ""); !locked {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: 应已解锁", label)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// 低性能锁的恢复探测带 TTFB 门槛: 探测 200 但首字节时延超过 lowperf_ttfb_max 时
+// 判定性能未恢复, 按失败重锁 —— 不给「放行一笔又锁上」的周期抖动留口子。
+func TestRecoveryLowperfProbeTTFBGate(t *testing.T) {
+	up := &slowCountUp{status: http.StatusOK, delay: 200 * time.Millisecond}
+	srv := httptest.NewServer(up)
+	t.Cleanup(srv.Close)
+	on := true
+	cfg := &Config{
+		ProbeEnabled: &on,
+		Upstreams: []UpstreamCfg{{
+			ID: "u1", BaseURL: srv.URL, AuthHeader: "Authorization", Key: "k", IncludeUsage: true,
+			Models: []ModelCfg{{ID: "real-1"}},
+		}},
+		Aliases: map[string][][2]string{"m1": {{"u1", "real-1"}}},
+	}
+	// 探测 TTFB 门槛 100ms, 探测慢 200ms; 重锁时长调小, 让第二次探测快点来。
+	app := appWithGate(t, cfg, GateCfg{LowPerfTtfbMaxMs: 100, LowPerfLockMs: 150})
+	app.addLockModel(app.cands["u1"], "real-1", lowPerfReason, 150*time.Millisecond, "")
+
+	// 第一轮探测: 200 但 TTFB 超限 -> 保持锁住。
+	waitHits(t, up, 1)
+	if locked, _, reason := app.cands["u1"].locked("real-1", ""); !locked || reason != lowPerfReason {
+		t.Fatalf("探测 TTFB 超限后应保持低性能锁: locked=%v reason=%s", locked, reason)
+	}
+
+	// 上游变快: 下一轮探测 TTFB 达标 -> 解锁。
+	up.setDelay(0)
+	waitHits(t, up, 2)
+	waitUnlocked(t, app.cands["u1"], "TTFB 达标后")
+}
+
+// 熔断锁不受 TTFB 门槛影响: 恢复探测只看可达性, 200 即解锁 (慢不算坏)。
+func TestRecoveryBreakerProbeIgnoresTTFBGate(t *testing.T) {
+	up := &slowCountUp{status: http.StatusOK, delay: 200 * time.Millisecond}
+	srv := httptest.NewServer(up)
+	t.Cleanup(srv.Close)
+	on := true
+	cfg := &Config{
+		ProbeEnabled: &on,
+		Upstreams: []UpstreamCfg{{
+			ID: "u1", BaseURL: srv.URL, AuthHeader: "Authorization", Key: "k", IncludeUsage: true,
+			Models: []ModelCfg{{ID: "real-1"}},
+		}},
+		Aliases: map[string][][2]string{"m1": {{"u1", "real-1"}}},
+	}
+	app := appWithGate(t, cfg, GateCfg{LowPerfTtfbMaxMs: 100, BreakerLockMs: 150})
+	app.addLockModel(app.cands["u1"], "real-1", "breaker", 150*time.Millisecond, "")
+	waitHits(t, up, 1)
+	waitUnlocked(t, app.cands["u1"], "熔断锁 200 即解锁 (不看 TTFB)")
+}
+
 // --- 集成: 请求命中恢复态只踢探测, 本身按锁定进下一候选 ---
 
 func TestRequestHitsRecoveryKicksProbeButSkips(t *testing.T) {

@@ -19,7 +19,12 @@ func (s *serveState) attemptLoop() {
 		s.obs.attempt++
 		s.obs.up, s.obs.model, s.obs.group = at.up.ID, at.mod, at.group
 		s.obs.mark(0)
+		// pref: 正在处理的是不是本笔的偏好候选 (排位首位那个)。
+		pref := at.idx == s.prefIdx
 		if at.cd == nil {
+			if pref {
+				s.stickyBlock = true
+			}
 			s.obs.failNote("候选未启用")
 			s.noteFailure(fmt.Errorf("upstream %s has no scheduler", at.up.ID), at.up.ID, at.mod)
 			continue
@@ -29,6 +34,12 @@ func (s *serveState) attemptLoop() {
 			// 若这是恢复态 (锁已到期待探测通过): 后台顺手发起一笔恢复探测, 请求本身
 			// 仍照锁定规则进下一个候选, 不等待结果。
 			s.app.kickRecovery(at.cd, at.mod, at.group)
+			if pref {
+				s.stickyBlock = true
+				if stickyLongLock(reason) {
+					s.stickyLong = true
+				}
+			}
 			s.obs.failNote(lockNoteText(reason, left))
 			s.noteFailure(fmt.Errorf("upstream %s locked for %s (%s)",
 				at.up.ID, left.Round(time.Second), reason), at.up.ID, at.mod)
@@ -38,6 +49,9 @@ func (s *serveState) attemptLoop() {
 		}
 		if paused, left := at.cd.paused(at.mod); paused {
 			// 该模型正在退避: 不进它的队列白等 (退避比排队预算长), 直接换候选。
+			if pref {
+				s.stickyBlock = true
+			}
 			s.obs.failNote("退避 " + durStr(left))
 			s.noteFailure(fmt.Errorf("upstream %s/%s backing off for %s",
 				at.up.ID, at.mod, left.Round(time.Second)), at.up.ID, at.mod)
@@ -78,6 +92,16 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 		s.semMs += sem
 		s.queueMs += qms
 		if !ok {
+			// 偏好候选取资格失败 (锁 / 信号量超时 / 排队超时): 是临时不可用, 顶班
+			// 不算迁移; 锁且是长期锁 (低性能 / 额度) 则按候选失效直接迁移。
+			if at.idx == s.prefIdx {
+				s.stickyBlock = true
+				if why == "locked" {
+					if _, _, reason := at.cd.locked(at.mod, at.group); stickyLongLock(reason) {
+						s.stickyLong = true
+					}
+				}
+			}
 			s.gateReject = why
 			s.obs.failNote(acquireFailNote(at, why))
 			s.lastUpID, s.lastMod = at.up.ID, at.mod
@@ -108,7 +132,12 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 			resp.Body.Close()
 			at.cd.finish(kind, false)
 			s.obs.mark(resp.StatusCode)
-			moveOn := a.classifyFailure(at, kind, resp, b, s.gate, s.upPath)
+			moveOn, longLock := a.classifyFailure(at, kind, resp, b, s.gate, s.upPath)
+			// 偏好候选真实报错后换走是「真实失败顶班」, 累计迁移计数; 额度类 (longLock)
+			// 是长期锁, 直接按候选失效处理。
+			if at.idx == s.prefIdx && longLock {
+				s.stickyBlock, s.stickyLong = true, true
+			}
 			s.lastErr = fmt.Errorf("upstream %s returned %d", at.up.ID, resp.StatusCode)
 			s.lastStatus, s.lastHdr, s.lastBody = resp.StatusCode, resp.Header.Clone(), b
 			s.lastUpID, s.lastMod = at.up.ID, at.mod
@@ -128,33 +157,36 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 			s.heldCand, s.heldKind = at.cd, kind // 响应发完才归还槽位
 		}
 		s.servedUp, s.servedMod, s.resp = at.up, at.mod, resp
+		s.servedIdx = at.idx
 		s.obs.stage(stageRecv) // 响应头已到, 之后的整段转发都算「接收中」, 别再退回并发池
 		return
 	}
 }
 
-// classifyFailure 按上游自己的规则给失败归类并按类上锁, 返回是否该换下一个候选。
-// path 是这笔请求用的上游路径, 锁会记下它, 供恢复探测沿用。
-func (a *App) classifyFailure(at attempt, kind slotKind, resp *http.Response, body []byte, gate GateCfg, path string) bool {
+// classifyFailure 按上游自己的规则给失败归类并按类上锁, 返回 (moveOn, longLock):
+// moveOn 表示是否该换下一个候选; longLock 表示命中的是长期锁 (额度), 偏好候选被这种
+// 锁顶班时应视为候选失效直接迁移。path 是这笔请求用的上游路径, 锁会记下它, 供恢复探测沿用。
+func (a *App) classifyFailure(at attempt, kind slotKind, resp *http.Response, body []byte, gate GateCfg, path string) (bool, bool) {
 	switch at.up.classify(resp.StatusCode, body) {
 	case classQuota:
 		// 额度限制: 只锁该模型所属的额度组 (额度按组共享), 组内排队的请求随之迁移,
 		// 同家别的组照常发送。
 		a.addLockGroup(at.cd, at.group, "quota", gate.quotaLock(), path)
+		return true, true
 	case classConcurrency:
 		// 并发限制: 锁掉超发试探。试探撞上就锁完直接换下一个候选; 普通请求锁完后本笔
 		// 按普通错误走 —— 退避后重试同一候选。
 		at.cd.lockConcurrency("concurrency", gate.concurrencyLock())
 		if kind != slotProbe {
-			return a.recordGenericFailure(at.cd, at.mod, gate, path)
+			return a.recordGenericFailure(at.cd, at.mod, gate, path), false
 		}
 	default:
 		// 规则表没覆盖的样本: 把上游 + 状态码 + body 片段记进服务日志, 便于按真实文案补规则。
 		log.Printf("unclassified upstream error: upstream=%s status=%d body=%s",
 			at.up.ID, resp.StatusCode, bodySnippet(body, 200))
-		return a.recordGenericFailure(at.cd, at.mod, gate, path)
+		return a.recordGenericFailure(at.cd, at.mod, gate, path), false
 	}
-	return true
+	return true, false
 }
 
 // noteFailure 记下最近一次失败: 换候选的统计与最终应答都用它。

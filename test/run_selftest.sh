@@ -424,12 +424,17 @@ EOF
     jq -e '.locks.quota.reason == "quota"' "$D/gate-state.json" > /dev/null 2>&1 &&
         pass "锁状态落盘 (gate-state.json reason=quota)" || fail "锁未落盘"
 
-    # 第二笔: quota 在锁内 -> 直接跳过, 不再真发。
+    # 第二笔: quota 在锁内 -> 粘性偏好已迁到 fu (D25), 直接走 fu:
+    # 既不再真发 quota (计数仍 1), 也不再撞它的锁 (lock_skips=0, fallbacks=0)。
     code=$(post 18814 '{"model":"q-model","messages":[{"role":"user","content":"hi"}]}')
     [ "$code" = "200" ] && pass "锁内仍由 fu 服务 200" || fail "第二笔 -> $code"
     [ "$(cat "$TMP/q-count.txt")" = "1" ] && pass "锁内未再调用 quota 上游" || fail "锁内又发了"
-    jq -r 'select(.status==200) | .lock_skips' "$LOG" | tail -1 | grep -q '^[1-9]' &&
-        pass "日志记 lock_skips" || fail "lock_skips 未记"
+    lk=$(jq -r 'select(.status==200) | .lock_skips' "$LOG" | tail -1)
+    # lock_skips=0 时字段被 omitempty 省掉 (jq 得 null), 两种都算没撞锁。
+    [ "${lk:-0}" = "0" ] || [ "$lk" = "null" ] &&
+        pass "粘性: 已迁到 fu, 不再撞 quota 的锁 (lock_skips=0)" || fail "lock_skips=$lk"
+    up=$(jq -r 'select(.status==200) | .upstream' "$LOG" | tail -1)
+    [ "$up" = "fu" ] && pass "第二笔直连 fu" || fail "第二笔落到了 $up"
 }
 
 case_rotate() {

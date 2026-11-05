@@ -259,6 +259,10 @@ func (c *cand) settleRecovery(r recoverRef, ok bool, g GateCfg) time.Time {
 	c.mu.Lock()
 	if ok {
 		r.write(lockState{})
+		// 低性能锁解锁即观察期起点: 之后窗口内再锁就算一次「解锁 -> 重锁」轮。
+		if r.reason == lowPerfReason && r.isModel {
+			r.c.gate(r.model).unlockAt = now
+		}
 		c.mu.Unlock()
 		c.signal()
 		return time.Time{}

@@ -171,3 +171,58 @@ func TestLowPerfLockPersists(t *testing.T) {
 		t.Fatalf("重启后应恢复低性能锁: locked=%v left=%s reason=%s", locked, left, reason)
 	}
 }
+
+// 低性能锁恢复解锁后, 观察窗口 (lowperf_window) 内又锁: 重锁时长翻倍递增, 封顶 8 倍
+// 基础时长 —— 没真恢复的候选慢慢退成长期死锁, 抖动自衰减。
+func TestLowPerfLockRelockEscalatesInWindow(t *testing.T) {
+	a, c := newPerfApp(normGate(GateCfg{}))
+	base := 5 * time.Minute
+	check := func(label string, want time.Duration) {
+		t.Helper()
+		locked, left, reason := c.locked("m1", "")
+		if !locked || reason != lowPerfReason {
+			t.Fatalf("%s: 应有低性能锁, locked=%v reason=%s", label, locked, reason)
+		}
+		if left < want-10*time.Second || left > want+10*time.Second {
+			t.Fatalf("%s: 锁时长应约为 %s, 实为 %s", label, want, left)
+		}
+	}
+	reUnlock := func() {
+		t.Helper()
+		c.mu.Lock()
+		c.gate("m1").lock = lockState{} // 模拟探测通过解锁
+		c.gate("m1").unlockAt = time.Now()
+		c.mu.Unlock()
+	}
+
+	a.addLockLowPerf(c, "m1", 0.4, 0.4, 0, base, "") // 首锁 (从未解锁): 基础时长
+	check("首锁", base)
+	reUnlock()
+	a.addLockLowPerf(c, "m1", 0.4, 0.4, 0, base, "") // 窗口内第 1 次重锁: 2x
+	check("第 1 次重锁", base*2)
+	reUnlock()
+	a.addLockLowPerf(c, "m1", 0.4, 0.4, 0, base, "") // 第 2 次: 4x
+	check("第 2 次重锁", base*4)
+	reUnlock()
+	a.addLockLowPerf(c, "m1", 0.4, 0.4, 0, base, "") // 第 3 次: 8x 封顶
+	check("第 3 次重锁", base*8)
+	reUnlock()
+	a.addLockLowPerf(c, "m1", 0.4, 0.4, 0, base, "") // 第 4 次: 仍 8x
+	check("第 4 次重锁 (封顶)", base*8)
+}
+
+// 超过一个观察窗口才重锁: 轮次归零, 回到基础时长 (候选可能真恢复了)。
+func TestLowPerfLockRelockResetsAfterWindow(t *testing.T) {
+	a, c := newPerfApp(normGate(GateCfg{}))
+	base := 5 * time.Minute
+	a.addLockLowPerf(c, "m1", 0.4, 0.4, 0, base, "")
+	c.mu.Lock()
+	c.gate("m1").lock = lockState{}
+	c.gate("m1").unlockAt = time.Now().Add(-700 * time.Second) // 上次解锁超过窗口 (600s)
+	c.mu.Unlock()
+	a.addLockLowPerf(c, "m1", 0.4, 0.4, 0, base, "")
+	locked, left, reason := c.locked("m1", "")
+	if !locked || reason != lowPerfReason || left < 4*time.Minute || left > 6*time.Minute {
+		t.Fatalf("超过观察窗口应回到基础时长: locked=%v left=%s reason=%s", locked, left, reason)
+	}
+}

@@ -65,6 +65,9 @@ func (a *App) addLockModel(c *cand, model, reason string, dur time.Duration, pat
 // peak/avg 是低吞吐分支的峰值与平均 (tokens/s), latAvg 是高延迟分支的平均首字节时延
 // (ms); 哪个分支命中哪个非 0。path 是触发锁的请求用的上游路径, 供恢复探测沿用。
 func (a *App) addLockLowPerf(c *cand, model string, peak, avg, latAvg float64, dur time.Duration, path string) {
+	// 重锁时长按观察期递增 (解锁后窗口内又锁 => 翻倍, 封顶 8 倍): 持续低性能的候选
+	// 慢慢退成长期死锁, 抖动自衰减; 超过一个窗口没再锁则归零回基础时长。
+	dur = c.relockDur(model, dur, a.gate.lowPerfWindow())
 	cause := "吞吐 峰 " + ftoa(peak, 1) + " / 均 " + ftoa(avg, 1) + " t/s"
 	if latAvg > 0 {
 		cause = "平均首字节 " + durStr(time.Duration(latAvg*float64(time.Millisecond)))

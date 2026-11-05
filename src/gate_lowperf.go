@@ -57,6 +57,26 @@ func (c *cand) notePerf(model string, tp *tokPoint, ttfbMs int64, g GateCfg) (pe
 	return peak, avg, latAvg, false
 }
 
+// relockDur 是低性能锁的重锁时长: 距上次恢复解锁不足一个观察窗口就又锁上, 说明性能
+// 没真恢复, 锁定时长翻倍 (最多 base 的 8 倍); 超过窗口才归零回 base。轮数记在
+// modelGate 上 (纯内存), 重启后从头计。window <= 0 = 全当首锁 (测试直发时长时用)。
+func (c *cand) relockDur(model string, base, window time.Duration) time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	mg := c.gate(model)
+	now := time.Now()
+	if mg.unlockAt.IsZero() || window <= 0 || now.Sub(mg.unlockAt) >= window {
+		mg.recycle = 0
+	} else {
+		mg.recycle++
+	}
+	mult := 1
+	for i := 0; i < mg.recycle && i < 3; i++ {
+		mult *= 2
+	}
+	return base * time.Duration(mult)
+}
+
 // trimSamples 把解码吞吐样本裁剪到窗口内 (至多留 maxPerfSamples 笔)。
 func trimSamples(pts []tokPoint, now time.Time, window time.Duration) []tokPoint {
 	start := 0

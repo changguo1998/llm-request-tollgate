@@ -28,6 +28,9 @@ type App struct {
 	// 调度: 每个上游一份队列与自适应并发上限, 门控参数对所有上游共用。
 	cands map[string]*cand
 	gate  GateCfg
+	// 粘性偏好: 逻辑名 -> 最近成功候选, 让同逻辑名的流量粘在同一上游 (缓存热度)。
+	// 纯内存, 不落盘; 重启从配置顺序重新积累。
+	sticky *sticky
 	// transport 启动时建一次 (连接池复用); 三项超时单独原子存, applyConfig 热加载时
 	// 更新, 新连接 / 每次读写取当前值, 不必重启进程。
 	transport   *http.Transport
@@ -63,6 +66,7 @@ func newApp(c *Config) (*App, error) {
 		aliases:   map[string][]aliasTarget{},
 		cands:     map[string]*cand{},
 		flows:     map[uint64]*flow{},
+		sticky:    newSticky(),
 	}
 	a.applyConfig(c)
 	if err := a.openLog(); err != nil {
@@ -139,6 +143,10 @@ func (a *App) applyConfig(c *Config) {
 		}
 	}
 	a.aliases = aliases
+	// 粘性偏好跨热加载保留, 但候选集变化后越界的作废 (配置顺序重新积累)。
+	if a.sticky != nil {
+		a.sticky.prune(aliases)
+	}
 	// transport 启动时建一次 (不重建连接池); 热加载只更新 response_header 超时。
 	if a.transport == nil {
 		a.transport = &http.Transport{

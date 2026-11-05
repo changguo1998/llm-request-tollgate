@@ -120,6 +120,7 @@ func (a *App) runRecovery(c *cand, t recoverRef) {
 	prepareOutboundHeaders(req.Header, http.Header{}, up)
 	req.Header.Set("Content-Type", "application/json")
 
+	sentAt := time.Now()
 	resp, err := a.transport.RoundTrip(req)
 	if err != nil {
 		until := c.settleRecovery(t, false, g)
@@ -127,16 +128,27 @@ func (a *App) runRecovery(c *cand, t recoverRef) {
 		a.evAdd("probe", "", c.id, modelID, "探测失败 (传输错误), 重新加锁, "+durStr(recoverLockDur(t.reason, g)))
 		return
 	}
+	ttfb := time.Since(sentAt)
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
-	ok := resp.StatusCode == http.StatusOK
-	if ok {
-		c.settleRecovery(t, true, g)
-		a.evAdd("probe", "", c.id, modelID, "探测通过, 解锁")
+	if resp.StatusCode != http.StatusOK {
+		until := c.settleRecovery(t, false, g)
+		a.armLockRecovery(t, until)
+		a.evAdd("probe", "", c.id, modelID,
+			"探测失败 (HTTP "+strconv.Itoa(resp.StatusCode)+"), 重新加锁, "+durStr(recoverLockDur(t.reason, g)))
 		return
 	}
-	until := c.settleRecovery(t, false, g)
-	a.armLockRecovery(t, until)
-	a.evAdd("probe", "", c.id, modelID,
-		"探测失败 (HTTP "+strconv.Itoa(resp.StatusCode)+"), 重新加锁, "+durStr(recoverLockDur(t.reason, g)))
+	// 低性能锁的恢复不仅看可达性: 配置了首字节时延阈值时, 探测 TTFB 超限说明性能
+	// 还没恢复, 按失败重锁 (否则会「放行一笔又锁上」的周期抖动)。其他锁只看可达性。
+	if t.reason == lowPerfReason {
+		if thr := g.lowPerfTtfbMax(); thr > 0 && ttfb > thr {
+			until := c.settleRecovery(t, false, g)
+			a.armLockRecovery(t, until)
+			a.evAdd("probe", "", c.id, modelID,
+				"探测通过但 TTFB 超限 ("+durStr(ttfb)+"), 重新加锁, "+durStr(recoverLockDur(t.reason, g)))
+			return
+		}
+	}
+	c.settleRecovery(t, true, g)
+	a.evAdd("probe", "", c.id, modelID, "探测通过, 解锁")
 }
