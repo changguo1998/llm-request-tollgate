@@ -66,7 +66,8 @@ const (
 	tabActive   = 0 // 活动连接, 按流程阶段分块; 下方接上游状态与模型/路由聚合
 	tabEvents   = 1
 	tabSettings = 2 // 设置: gate 参数 + 优先级
+	tabSticky   = 3 // 粘性偏好: 按逻辑名选候选, Enter 置一次, c 清除
 )
 
 // 时长一律走 durStr (12s / 02:03 / 01:02:03), 屏幕上不再出现"分 / 秒 / 小时"这类汉字写法。
-var tuiTabs = []string{"active", "events", "settings"}
+var tuiTabs = []string{"active", "events", "settings", "sticky"}

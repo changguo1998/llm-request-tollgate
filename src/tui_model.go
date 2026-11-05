@@ -34,7 +34,7 @@ type tuiModel struct {
 	scanned      int
 
 	tab        int
-	scroll     [3]int // 每页各自的滚动位置: m.scroll[m.tab]
+	scroll     [4]int // 每页各自的滚动位置: m.scroll[m.tab]
 	cols       int
 	rows       int
 	statusRows int       // 状态行折行后的物理行数 (窄终端会多行), 内容区高度按它扣
@@ -45,6 +45,12 @@ type tuiModel struct {
 
 	prio     *tuiEditor   // settings 页 (调度参数 + 权重编辑), runTUI 里装载
 	reloadFn func() error // 同进程模式的热加载回调; 空 = 走 deploy/tollgate.sh hup
+
+	// sticky 页: 光标在候选行里的位置、窗口第一行, 以及最近一次操作结果。
+	stickySel int
+	stickyTop int
+	stickyMsg string
+	stickyErr bool
 
 	// 第 1 页上游表的排序键 (provider 优先级), 按 store / 配置的 mtime 失效。
 	provRank    map[string][2]int

@@ -51,7 +51,7 @@ func TestDrawFillsTerminalHeight(t *testing.T) {
 		ioctlCall(m.Fd(), syscall.TIOCSWINSZ, unsafe.Pointer(&tuiWinsize{Row: uint16(rows), Col: 120}))
 		mo := newTUIModel("cfg")
 		mo.pulse.Cands = []candView{{ID: "ustc", SoftCap: 1}}
-		for _, tab := range []int{0, 1, 2} {
+		for _, tab := range []int{0, 1, 2, 3} {
 			mo.tab = tab
 			out := mo.draw()
 			got := strings.Count(out, "\r\n")

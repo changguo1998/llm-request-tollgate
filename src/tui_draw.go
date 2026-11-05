@@ -31,6 +31,8 @@ func (m *tuiModel) draw() string {
 		m.drawFlow(c, body)
 	case tabEvents:
 		m.drawEvents(c, body)
+	case tabSticky:
+		m.drawSticky(c, body)
 	default:
 		m.drawSettings(c, body)
 	}
@@ -94,7 +96,11 @@ func (m *tuiModel) hint() string {
 		return "  m/p/g 换面板   j/k 移动   +/- 调值   = 输入   s 保存并生成" +
 			"   h 热加载   q 退出   (" + m.prioHint() + ")"
 	}
-	base := "  1-3 或 Tab 切页   up/down/PgUp/PgDn 滚动   r 重读日志   q 退出"
+	base := "  1-4 或 Tab 切页   up/down/PgUp/PgDn 滚动   r 重读日志   q 退出"
+	if m.tab == tabSticky {
+		return "  up/down 选候选   Enter 置偏好   c 清除   h/l 切页   q 退出" +
+			"   (置一次, 自动迁移照旧)"
+	}
 	switch m.tab {
 	case tabActive:
 		// 窗口信息放最前: 键位行本来就长, 放尾巴会被窄终端截掉。

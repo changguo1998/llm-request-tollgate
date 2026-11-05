@@ -393,8 +393,8 @@ func TestPrioTabScopedKeys(t *testing.T) {
 		t.Errorf("状态页的 r 应重读日志")
 	}
 	m.handleKey('h', &pending)
-	if m.tab != tabSettings {
-		t.Errorf("active 页按 h 应回绕到 priority, 得到 %d", m.tab)
+	if m.tab != tabSticky {
+		t.Errorf("active 页按 h 应回绕到最后一个页签 (sticky), 得到 %d", m.tab)
 	}
 }
 

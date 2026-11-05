@@ -198,6 +198,13 @@ python3 scripts/gen_tollgate_config.example.py
 ./llm-request-tollgate -tui-state http://127.0.0.1:8787
 ```
 
+### 6.3 用 TUI sticky 页改粘性偏好
+
+状态台第 4 个页签 (sticky) 按逻辑名列出配置里的候选链, 当前偏好标 `*`. `up/down` 选候选,
+`Enter` 置一次 (立即生效, 自动迁移规则照旧), `c` 清除该逻辑名的偏好 (回落配置首候选).
+两种模式都通过 `POST /sticky` 写入 (同进程发给自己, `-tui-state` 发给被观测服务), 不写文件,
+重启即回配置首候选; 失败原因写在页面的红色消息行.
+
 ## 7. 日志 / 状态文件 / 离线分析
 
 ### 7.1 请求日志

@@ -1,6 +1,7 @@
 // tui_run.go: 状态台主循环与按键处理。
 //
-// 状态台是只读观测面, 不参与转发、调度与记账。它看三件事:
+// 状态台以观测为主, 不参与转发、调度与记账; settings / sticky 两页可写 (前者改配置源头,
+// 后者经 POST /sticky 改运行时偏好)。观测数据看三件事:
 //  1. active  正在活跃的请求 + 它此刻走的是哪个后端 (上游 + 真实模型), 以及每个上游的
 //     队列 / 并发上限 / 锁 / 退避。数据来自服务的内存观测面: 同进程看内存 (-tui),
 //     另进程看 GET /state (-tui-state [base])。
@@ -167,7 +168,7 @@ func runTUI(cfgPath, stateURL string) {
 // handleKey 处理一个输入字节; 返回 true = 退出。
 //
 // settings 页把编辑键留给自己 (s = 保存并重生成, h = 热加载, m/p/g = 换面板), 状态页的
-// h/l 仍是切页; 切页统一走 1-3 / 左右方向键 / l (settings 页的 h 被编辑键占了)。
+// h/l 仍是切页; 切页统一走 1-4 / 左右方向键 / l (settings 页的 h 被编辑键占了)。
 func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 	e := m.prio
 	if m.tab == tabSettings && e != nil && e.prompt != nil {
@@ -210,6 +211,8 @@ func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 		}
 		if m.tab == tabSettings && e != nil {
 			e.moveFocus(d)
+		} else if m.tab == tabSticky {
+			m.stickyMove(d)
 		} else {
 			m.move(d)
 		}
@@ -227,15 +230,38 @@ func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 			m.prioHup()
 		case 'l', '\t':
 			m.switchTab(1)
-		case '1', '2', '3':
+		case '1', '2', '3', '4':
 			m.switchTabTo(int(b - '1'))
 		}
 		return false
 	}
+	if m.tab == tabSticky {
+		// sticky 页把选择键留给自己: Enter 置偏好, c 清除, j/k/g/G 移动光标。
+		switch b {
+		case 'j':
+			m.stickyMove(1)
+			return false
+		case 'k':
+			m.stickyMove(-1)
+			return false
+		case 'g':
+			m.stickyJump(false)
+			return false
+		case 'G':
+			m.stickyJump(true)
+			return false
+		case '\r', '\n':
+			m.stickyApply()
+			return false
+		case 'c':
+			m.stickyClear()
+			return false
+		}
+	}
 	switch b {
 	case 'q', 0x03, 0x04: // q / Ctrl-C / Ctrl-D
 		return true
-	case '1', '2', '3':
+	case '1', '2', '3', '4':
 		m.switchTabTo(int(b - '1'))
 	case 'h', 0x1b:
 		m.switchTab(-1)
