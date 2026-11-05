@@ -199,6 +199,8 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
   (每上游一条: 队列长 / 在飞 / 并发上限 / 是否在试探 / 连续错误数 / 退避剩余 / 锁剩余
   / 锁原因 / 各记账组的额度锁 (`groups`: 组名 + 锁剩余, 按配置顺序) / 模型级定时锁
   (`models[].why`: `breaker` 熔断 / `lowperf` 低性能) / 距下次节拍), `events` (事件数组),
+  `sticky` (各逻辑名当前的粘性偏好候选: `{逻辑名: {upstream, model}}`, 无偏好或缺省
+  不出现; TUI 用它给第 1 页模型/路由聚合表的偏好候选行标 `*`),
   `max_seq`.
 - `active` 每笔: `id` / `logical` / `source` / `path` / `stream` / `start` / `upstream` /
   `backend` / `stage` / `attempt` / `gate`; 接收中的流式请求另带 `recv_tok` (已收到的

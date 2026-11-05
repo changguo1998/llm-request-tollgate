@@ -103,6 +103,42 @@ func TestStickyPruneInvalidatesOnConfigChange(t *testing.T) {
 	}
 }
 
+// 观测面快照: 偏好下标解析成 上游/真实模型, 无偏好与越界的逻辑名不出现在快照里。
+func TestStickyPairsSnapshot(t *testing.T) {
+	a := &App{
+		aliases: map[string][]aliasTarget{
+			"m1": {{Upstream: "u1", Model: "r1"}, {Upstream: "u2", Model: "r2"}, {Upstream: "u3", Model: "r3"}},
+			"m2": {{Upstream: "u1", Model: "r1"}},
+		},
+		sticky: newSticky(),
+	}
+	// m1 连续两次真实顶班 -> 偏好迁到 u2/r2; m2 从不使用。
+	a.sticky.served("m1", 1, 0, false, false)
+	a.sticky.served("m1", 1, 0, false, false)
+	snap := a.stickySnapshot()
+	if len(snap) != 1 {
+		t.Fatalf("应只有 m1 有偏好, 得到 %v", snap)
+	}
+	if got := snap["m1"]; got != (stickyView{Upstream: "u2", Model: "r2"}) {
+		t.Fatalf("m1 偏好应为 u2/r2, 得到 %+v", got)
+	}
+	if _, ok := snap["m2"]; ok {
+		t.Fatal("无偏好的逻辑名不该出现在快照里")
+	}
+	// 热加载后越界的偏好不进入快照。
+	a.sticky.mu.Lock()
+	a.sticky.prefs["m2"] = &stickyPref{pref: 5}
+	a.sticky.mu.Unlock()
+	snap = a.stickySnapshot()
+	if _, ok := snap["m2"]; ok {
+		t.Fatal("越界偏好不应出现在快照里")
+	}
+	// 没有 sticky 的 App (老装配) 快照为空。
+	if got := (&App{}).stickySnapshot(); got != nil {
+		t.Fatalf("无 sticky 时快照应为空, 得到 %v", got)
+	}
+}
+
 // --- 集成: 代理链路下的偏好排序与迁移 ---
 
 // twoUpApp 起一个两候选 App: 都指向两个假上游, 别名 m1 -> [u1, u2]。

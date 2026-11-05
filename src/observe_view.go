@@ -129,6 +129,18 @@ func (a *App) listenAddr() string {
 	return a.cfg.Listen
 }
 
+// stickySnapshot 返回各逻辑名当前的粘性偏好候选 (观测面展示用, TUI 第 1 页标记
+// 每组的 *)。aliases 取引用后在锁外读 (applyConfig 整体换新 map), 与 candViews 同口径。
+func (a *App) stickySnapshot() map[string]stickyView {
+	a.mu.RLock()
+	aliases := a.aliases
+	a.mu.RUnlock()
+	if a.sticky == nil {
+		return nil
+	}
+	return a.sticky.pairs(aliases)
+}
+
 // snapshot 组装一份观测载荷 (since = TUI 上次拿到的 MaxSeq)。
 func (a *App) snapshot(since uint64) pulse {
 	evs, max := a.eventsSince(since)
@@ -137,6 +149,7 @@ func (a *App) snapshot(since uint64) pulse {
 		Ver:    viewVer,
 		Listen: a.listenAddr(), Now: now.Format(time.RFC3339Nano),
 		Active: a.flowActives(), Cands: a.candViews(), Events: evs, MaxSeq: max,
+		Sticky: a.stickySnapshot(),
 	}
 }
 

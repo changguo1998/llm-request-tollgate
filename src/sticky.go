@@ -98,3 +98,21 @@ func (s *sticky) prune(aliases map[string][]aliasTarget) {
 		}
 	}
 }
+
+// pairs 返回全部逻辑名的当前偏好候选 (逻辑名 -> 上游/真实模型), 供观测面展示。
+// aliases 由调用方按 a.mu -> s.mu 的锁序传入 (与 applyConfig 一致, 防死锁);
+// 热加载后仍在下标内的保留, 越界的跳过。
+func (s *sticky) pairs(aliases map[string][]aliasTarget) map[string]stickyView {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]stickyView{}
+	for logical, p := range s.prefs {
+		list, ok := aliases[logical]
+		if !ok || p.pref < 0 || p.pref >= len(list) {
+			continue
+		}
+		at := list[p.pref]
+		out[logical] = stickyView{Upstream: at.Upstream, Model: at.Model}
+	}
+	return out
+}

@@ -105,6 +105,12 @@ type candView struct {
 	LastTps  float64         `json:"-"`                // 保留: TPS 从日志读, 不在这里
 }
 
+// stickyView 是某个逻辑名当前的粘性偏好候选 (观测面只读, 参与 TUI 的 * 标记)。
+type stickyView struct {
+	Upstream string `json:"upstream"`
+	Model    string `json:"model"`
+}
+
 // pulse 是 GET /v1/state (以及 -tui 时的 var/tui-pulse.json) 的载荷。
 type pulse struct {
 	Ver       string      `json:"ver"` // 观测面版本: 用来认出"对端不是这个接口"
@@ -115,6 +121,8 @@ type pulse struct {
 	Events    []viewEvent `json:"events"`  // 序号 > 请求里的 since 的那些
 	MaxSeq    uint64      `json:"max_seq"` // 下次轮询带它作 since
 	MissingAt string      `json:"missing_at,omitempty"`
+	// Sticky 是各逻辑名当前的粘性偏好候选 (纯内存, 无偏好时缺省不出现)。
+	Sticky map[string]stickyView `json:"sticky,omitempty"`
 }
 
 // stageName 是屏幕上「状态」那一列: 只写变化的部分 (在等什么 / 卡在哪一步)。

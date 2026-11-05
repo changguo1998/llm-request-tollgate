@@ -75,8 +75,8 @@ func groupCell(g candGroup, isDefault bool) string {
 
 // drawModelsBody 把模型视角的两张表接在第 1 页活动表下方, 与分块一起滚动:
 // 先上游状态 (并发 / 排队 / 错误 / 记账组锁), 再列有过请求的 上游/模型 队列与路由聚合。
-// 两张表不画标题 (列名行保留), 表与表之间空一行; 只出现实际上游/模型, 不按逻辑名或
-// 配置候选铺开。
+// 两张表不画标题 (列名行保留), 表与表之间空一行; 只出现实际上游/模型, 不按配置候选铺开;
+// 第二张表的行按逻辑名分组, 组与组之间空一行。
 func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 	cands := m.sortedCands()
 	// 记账列: 第一列固定是「记账」(默认组), 后面按各行自己声明的组铺开, 列标题留空;
@@ -133,8 +133,11 @@ func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 	drawTable(full, "", cols, urows, 0, len(urows))
 	full.line("") // 两张表之间空一行
 
-	// 合并表: 队列状态 (观测面) + 聚合统计 (日志), 行 = 有过请求的 上游/真实模型。
+	// 合并表: 队列状态 (观测面) + 聚合统计 (日志), 行 = 逻辑名的 上游/真实模型,
+	// 按逻辑名分组: 同一逻辑名的候选排在一起, 组与组之间空一行。不加逻辑名列。
 	var mrows [][]string
+	prevLogical := ""
+	first := true
 	for _, r := range m.modelRows() {
 		// 队列的锁都画在队列表里: 退避 = 黄 (等待), 熔断锁 = 红 (锁)。
 		paused := colorDur(r.PausedMs, tuiYell)
@@ -162,9 +165,21 @@ func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 			}
 			return "-"
 		}
+		// 粘性偏好标记: 该逻辑名当前粘性选中的候选在 上游/模型 前标 *。所有行统一
+		// 占一个标记位 (非偏好行补空格), 模型名从同一列开始, 不让 * 把对齐顶歪。
+		marker := " "
+		if p, ok := m.pulse.Sticky[r.logical]; ok && p.Upstream == r.up && p.Model == r.model {
+			marker = "*"
+		}
+		cell := marker + m.upModel(r.up, r.model)
 		// 与 modelCols 的顺序一一对应 (dropEmptyCols 按下标裁列)。
+		if !first && r.logical != prevLogical {
+			mrows = append(mrows, nil) // 组间隔一空行 (视觉分组, 不占列)
+		}
+		first = false
+		prevLogical = r.logical
 		mrows = append(mrows, []string{
-			m.upModel(r.up, r.model),
+			cell,
 			strconv.Itoa(r.Queue), paused, lock,
 			// 缓存命中与总 token 合成一格 (cached/total)。
 			humanTokens(r.Cached) + "/" + humanTokens(r.Total), ttfb,
@@ -196,10 +211,10 @@ func modelCols() []tuiCol {
 	}
 }
 
-// modelRow 是第 1 页模型/路由聚合表的一行: 队列状态 (观测面) + 聚合统计 (日志, 按上游/模型求和,
-// 不区分逻辑名)。
+// modelRow 是第 1 页模型/路由聚合表的一行: 队列状态 (观测面) + 聚合统计 (日志,
+// 按 逻辑名/上游/模型 拆分, 同一上游/模型被多个逻辑名引用时各归各的组)。
 type modelRow struct {
-	up, model                       string
+	logical, up, model              string
 	Queue, Fails                    int
 	PausedMs, LockMs                int64
 	Reqs                            int
@@ -221,30 +236,26 @@ func (r *modelRow) blank() bool {
 		r.Last.IsZero()
 }
 
-// modelRows 合并观测面里的模型队列与日志聚合: 只保留真正有过请求的 上游/模型;
-// 所有数据都是 0 / - 的行 (配置里有、但从没请求过) 不进表。
+// modelRows 合并观测面里的模型队列与日志聚合, 按 逻辑名 分组 (同一逻辑名的候选相邻):
+// 只保留真正有过请求的 上游/模型; 所有数据都是 0 / - 的行 (配置里有、但从没请求过)
+// 不进表。观测面的队列 / 锁状态没有逻辑名维度, 按 上游/模型 补到引用它的每组;
+// 只出现在观测面、没有任何日志归属的 上游/模型 落在空逻辑名组里 (排最末)。
 func (m *tuiModel) modelRows() []*modelRow {
 	by := map[string]*modelRow{}
-	get := func(up, model string) *modelRow {
-		k := up + "\x00" + model
+	get := func(logical, up, model string) *modelRow {
+		k := logical + "\x00" + up + "\x00" + model
 		r := by[k]
 		if r == nil {
-			r = &modelRow{up: up, model: model}
+			r = &modelRow{logical: logical, up: up, model: model}
 			by[k] = r
 		}
 		return r
-	}
-	for _, cand := range m.pulse.Cands {
-		for _, md := range cand.Models {
-			r := get(cand.ID, md.Model)
-			r.Queue, r.Fails, r.PausedMs, r.LockMs = md.Queue, md.Fails, md.PausedMs, md.LeftMs
-		}
 	}
 	for _, rr := range m.routes {
 		if rr.Upstream == "" && rr.Model == "" {
 			continue // 没路由到任何上游的记录 (如 unknown model) 不属于模型视角
 		}
-		r := get(rr.Upstream, rr.Model)
+		r := get(rr.Logical, rr.Upstream, rr.Model)
 		r.Reqs += rr.Reqs
 		r.Errs += rr.Errs
 		r.Fallbacks += rr.Fallbacks
@@ -258,6 +269,23 @@ func (m *tuiModel) modelRows() []*modelRow {
 			r.Last = rr.Last
 		}
 	}
+	for _, cand := range m.pulse.Cands {
+		for _, md := range cand.Models {
+			// 队列状态补到所有引用该 (上游/模型) 的逻辑名组; 没有任何日志归属时
+			// 落空逻辑名组 (只有观测面状态、没路由去向的模型也要看得到)。
+			found := false
+			for _, r := range by {
+				if r.up == cand.ID && r.model == md.Model {
+					r.Queue, r.Fails, r.PausedMs, r.LockMs = md.Queue, md.Fails, md.PausedMs, md.LeftMs
+					found = true
+				}
+			}
+			if !found {
+				r := get("", cand.ID, md.Model)
+				r.Queue, r.Fails, r.PausedMs, r.LockMs = md.Queue, md.Fails, md.PausedMs, md.LeftMs
+			}
+		}
+	}
 	out := make([]*modelRow, 0, len(by))
 	for _, r := range by {
 		if r.blank() {
@@ -265,17 +293,36 @@ func (m *tuiModel) modelRows() []*modelRow {
 		}
 		out = append(out, r)
 	}
+	// 组间: 有逻辑名的按组内最近请求时间降序 (常用的在前), 空逻辑名 (只观测面) 垫底;
+	// 组内: 最近时间降序, 同刻按请求数 / 上游 / 模型兜底 (与旧的混排口径一致)。
+	groupLast := map[string]time.Time{}
+	for _, r := range out {
+		if r.logical != "" && r.Last.After(groupLast[r.logical]) {
+			groupLast[r.logical] = r.Last
+		}
+	}
 	sort.Slice(out, func(i, j int) bool {
-		if !out[i].Last.Equal(out[j].Last) {
+		switch {
+		case out[i].logical != out[j].logical:
+			if out[i].logical == "" {
+				return false
+			}
+			if out[j].logical == "" {
+				return true
+			}
+			if !groupLast[out[i].logical].Equal(groupLast[out[j].logical]) {
+				return groupLast[out[i].logical].After(groupLast[out[j].logical])
+			}
+			return out[i].logical < out[j].logical
+		case !out[i].Last.Equal(out[j].Last):
 			return out[i].Last.After(out[j].Last)
-		}
-		if out[i].Reqs != out[j].Reqs {
+		case out[i].Reqs != out[j].Reqs:
 			return out[i].Reqs > out[j].Reqs
-		}
-		if out[i].up != out[j].up {
+		case out[i].up != out[j].up:
 			return out[i].up < out[j].up
+		default:
+			return out[i].model < out[j].model
 		}
-		return out[i].model < out[j].model
 	})
 	return out
 }

@@ -725,9 +725,9 @@ func TestModelsColumnGroups(t *testing.T) {
 	}
 }
 
-// 第 1 页: 队列与路由聚合成一张表, 行按 上游/真实模型 合并 (同模型多逻辑名求和),
-// 表里不出现逻辑名。
-func TestModelsMergedRow(t *testing.T) {
+// 第 1 页: 队列与路由聚合成一张表, 行按逻辑名分组 (同一逻辑名的候选相邻),
+// 组与组之间空一行; 不加逻辑名列, 分组只靠顺序与空行表达。
+func TestModelsGroupedByLogical(t *testing.T) {
 	openTestPTY(t, 60, 140)
 	m := newTUIModel("cfg")
 	now := time.Now()
@@ -747,22 +747,89 @@ func TestModelsMergedRow(t *testing.T) {
 		},
 	}
 	rows := m.modelRows()
-	if len(rows) != 1 {
-		t.Fatalf("同上游/模型应合成一行, 得到 %d 行", len(rows))
+	if len(rows) != 2 {
+		t.Fatalf("不同逻辑名的同一 上游/模型 应分行, 得到 %d 行", len(rows))
 	}
-	r := rows[0]
-	// 首字节样本按行拼接: 平均 = rateWin 内 (200+500+100)/3, 谷值 = 100ms。
-	if r.Reqs != 5 || r.Total != 150 || r.Queue != 4 || r.Fails != 1 || len(r.TtfbPts) != 3 {
-		t.Errorf("合并结果不对: %+v", r)
+	// 组间按组内最近请求时间降序: alias-b (Last=now) 组在前。
+	if rows[0].logical != "alias-b" || rows[1].logical != "alias-a" {
+		t.Fatalf("组间排序应按最近时间: %s / %s", rows[0].logical, rows[1].logical)
+	}
+	if rows[0].Reqs != 3 || rows[1].Reqs != 2 {
+		t.Fatalf("统计应各逻辑名各算: %d / %d", rows[0].Reqs, rows[1].Reqs)
+	}
+	if rows[0].Queue != 4 || rows[0].Fails != 1 || len(rows[0].TtfbPts) != 1 {
+		t.Errorf("观测面状态应补到对应逻辑名行: %+v", rows[0])
 	}
 	out := stripANSI(m.draw())
-	if !strings.Contains(out, "ustc/m1") {
-		t.Errorf("合并表里应有 ustc/m1")
-	}
-	for _, s := range []string{"alias-a", "alias-b"} {
-		if strings.Contains(out, s) {
-			t.Errorf("第 1 页不该出现逻辑名 %q", s)
+	// 同一 上游/模型 因两个逻辑名分成两组: 输出出现两次, 组与组之间隔空行。
+	lines := strings.Split(out, "\r\n")
+	seen, lastWasBlank := 0, false
+	for _, ln := range lines {
+		if strings.TrimSpace(ln) == "" {
+			lastWasBlank = true
+			continue
 		}
+		if !strings.Contains(ln, "ustc/m1") {
+			continue
+		}
+		seen++
+		if seen == 2 && !lastWasBlank {
+			t.Errorf("两组之间应有空行分隔: %q", ln)
+		}
+		lastWasBlank = false
+	}
+	if seen != 2 {
+		t.Errorf("应有 2 行 ustc/m1 (两组各一行), 得到 %d", seen)
+	}
+}
+
+// 第 1 页: 逻辑名当前粘性偏好的候选在 上游/模型 前标 *; 别的行不标。
+func TestModelsStickyMark(t *testing.T) {
+	openTestPTY(t, 60, 140)
+	m := newTUIModel("cfg")
+	m.tab = tabActive
+	now := time.Now()
+	m.pulse.Cands = []candView{{
+		ID: "ustc", Models: []candModelLock{{Model: "m1"}, {Model: "m2"}},
+	}}
+	m.routes = map[string]*routeRow{
+		"alias-x\x00ustc\x00m1": {Logical: "alias-x", Upstream: "ustc", Model: "m1",
+			Reqs: 1, Total: 10, Last: now},
+		"alias-y\x00ustc\x00m2": {Logical: "alias-y", Upstream: "ustc", Model: "m2",
+			Reqs: 1, Total: 10, Last: now},
+	}
+	// alias-x 的粘性偏好是 ustc/m1: 只有这一行该标 *。
+	m.pulse.Sticky = map[string]stickyView{
+		"alias-x": {Upstream: "ustc", Model: "m1"},
+	}
+	out := stripANSI(m.draw())
+	if !strings.Contains(out, "*ustc/m1") {
+		t.Errorf("粘性偏好的候选应标 *: %q", "ustc/m1")
+	}
+	if !strings.Contains(out, "ustc/m2") {
+		t.Errorf("非偏好候选应照常显示: %q", "ustc/m2")
+	}
+	if strings.Contains(out, "*ustc/m2") {
+		t.Errorf("非偏好候选不该标 *")
+	}
+	// * 不应把模型名顶歪: 带标记行与普通行的模型名从同一列开始 (占位统一一格)。
+	var x1, x2 = -1, -1
+	for _, ln := range strings.Split(out, "\r\n") {
+		if i := strings.Index(ln, "ustc/m1"); i >= 0 {
+			x1 = i
+		}
+		if i := strings.Index(ln, "ustc/m2"); i >= 0 {
+			x2 = i
+		}
+	}
+	if x1 != x2 || x1 < 0 {
+		t.Errorf("模型名应同列对齐 (标记位占位): 带 * 行 %d, 普通行 %d", x1, x2)
+	}
+	// 没有粘性字段 (老对端) 时原样显示。
+	m.pulse.Sticky = nil
+	out = stripANSI(m.draw())
+	if strings.Contains(out, "*ustc/m1") {
+		t.Errorf("无粘性字段时不该标 *")
 	}
 }
 
