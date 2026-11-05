@@ -895,7 +895,11 @@ func TestColorStandard(t *testing.T) {
 	m.pulse.Cands = []candView{{
 		ID: "ustc", LockMs: 600000, Probing: true,
 		Groups: []candGroup{{Name: "g1", LockMs: 600000}, {Name: "g2"}},
-		Models: []candModelLock{{Model: "m1", PausedMs: 8000, LeftMs: 300000, Fails: 2}},
+		Models: []candModelLock{
+			{Model: "m1", PausedMs: 8000, LeftMs: 300000, Fails: 2}, // 熔断锁 (没写 why = 红)
+			{Model: "m2", LeftMs: 300000, Why: lowPerfReason},       // 低性能锁 (黄)
+			{Model: "m3", LeftMs: 300000, Why: "breaker"},           // 熔断锁 (红)
+		},
 	}}
 	m.routes = map[string]*routeRow{
 		"k": {Upstream: "ustc", Model: "m1", Reqs: 1, Errs: 1,
@@ -903,11 +907,12 @@ func TestColorStandard(t *testing.T) {
 	}
 	raw := m.draw()
 	for _, want := range []string{
-		tuiRed + "10:00" + tuiReset, // 记账组的额度锁
-		tuiGreen + "g2" + tuiReset,  // 没锁的记账组: 绿色组名
-		tuiYell + "8s" + tuiReset,   // 退避
-		tuiRed + "05:00" + tuiReset, // 熔断锁
-		tuiYell + "(+1)" + tuiReset, // 超发试探
+		tuiRedBright + "10:00" + tuiReset, // 记账组的额度锁 (浅红)
+		tuiGreen + "g2" + tuiReset,        // 没锁的记账组: 绿色组名
+		tuiYell + "8s" + tuiReset,         // 退避
+		tuiRed + "05:00" + tuiReset,       // 熔断锁 (红)
+		tuiYell + "05:00" + tuiReset,      // 低性能锁 (黄)
+		tuiYell + "(+1)" + tuiReset,       // 超发试探
 	} {
 		if !strings.Contains(raw, want) {
 			t.Errorf("缺少按标准上色的单元格 %q", want)

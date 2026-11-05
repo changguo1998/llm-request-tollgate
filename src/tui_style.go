@@ -16,6 +16,9 @@ const (
 	tuiRed   = "\x1b[31m"
 	tuiGreen = "\x1b[32m"
 	tuiYell  = "\x1b[33m"
+	// tuiRedBright 是额度锁的浅红 (亮红): 与熔断锁的正红同属错误类, 用明度区分「钱」
+	// (额度) 与「坏」(熔断), 与 91 系亮色变体保持同一套风格。
+	tuiRedBright = "\x1b[91m"
 	// tuiTitle 是 settings 页各区标题的颜色 (亮青, 区别于红/黄/绿的语义色)。
 	tuiTitle = "\x1b[36m"
 	// tuiEditBg 是 settings 页进入输入编辑 (=) 时的强调背景色 (蓝底), 区别于普通反显。

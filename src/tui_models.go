@@ -62,10 +62,10 @@ func namedGroupCount(groups []candGroup) int {
 	return n
 }
 
-// groupCell 画一个记账组: 未锁 = 绿色组名 (默认组写 -), 锁内 = 红色倒计时。
+// groupCell 画一个记账组: 未锁 = 绿色组名 (默认组写 -), 额度锁内 = 浅红倒计时。
 func groupCell(g candGroup, isDefault bool) string {
 	if g.LockMs > 0 {
-		return colorDur(g.LockMs, tuiRed)
+		return colorDur(g.LockMs, tuiRedBright)
 	}
 	if isDefault {
 		return "-"
@@ -139,9 +139,14 @@ func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 	prevLogical := ""
 	first := true
 	for _, r := range m.modelRows() {
-		// 队列的锁都画在队列表里: 退避 = 黄 (等待), 熔断锁 = 红 (锁)。
+		// 队列的锁都画在队列表里: 退避 = 黄 (等待), 锁按原因分色 —— 熔断锁 = 红 (错误),
+		// 低性能锁 = 黄 (慢到降级, 与退避同为等待/降级一类, 但分属不同列)。
 		paused := colorDur(r.PausedMs, tuiYell)
-		lock := colorDur(r.LockMs, tuiRed)
+		lockColor := tuiRed
+		if r.LockWhy == lowPerfReason {
+			lockColor = tuiYell
+		}
+		lock := colorDur(r.LockMs, lockColor)
 		// 首字节列写 平均/谷值 (与速率列的 平均/峰值 同一口径): 平均 = rateWin 内
 		// 算术平均, 谷值 = 回看窗口内最低的一次时延。
 		ttfb := "-"
@@ -217,6 +222,7 @@ type modelRow struct {
 	logical, up, model              string
 	Queue, Fails                    int
 	PausedMs, LockMs                int64
+	LockWhy                         string // 模型锁原因 (breaker / lowperf): 倒计时按它分色
 	Reqs                            int
 	Errs                            int
 	Fallbacks                       int
@@ -277,12 +283,14 @@ func (m *tuiModel) modelRows() []*modelRow {
 			for _, r := range by {
 				if r.up == cand.ID && r.model == md.Model {
 					r.Queue, r.Fails, r.PausedMs, r.LockMs = md.Queue, md.Fails, md.PausedMs, md.LeftMs
+					r.LockWhy = md.Why
 					found = true
 				}
 			}
 			if !found {
 				r := get("", cand.ID, md.Model)
 				r.Queue, r.Fails, r.PausedMs, r.LockMs = md.Queue, md.Fails, md.PausedMs, md.LeftMs
+				r.LockWhy = md.Why
 			}
 		}
 	}
