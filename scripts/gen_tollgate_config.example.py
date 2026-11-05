@@ -14,6 +14,7 @@ scripts/gen_tollgate_config.py 与它同源, 但直接读 ~/fff/config/llm-model
     - 逻辑名 = 条目的 tollgate_group, 没有就是模型 id; 跨上游同名归并成一个别名.
     - 候选顺序 = 模型 tollgate_priority 降序, 同值看 provider 的 tollgate_priority
       降序, 再同值按列表出现顺序. 0 最小, 缺省即 0.
+    - 模型 tollgate_priority 为负: 该模型停用, 不进候选也不进上游 models 声明.
     - key_env = store 里 apiKey 占位符去掉 "$" 后的名字 ($USTC_API_KEY -> USTC_API_KEY).
     - 额度组 = 条目的 tollgate_billing, 同家同名一组, 缺省归默认组; 输出为上游
       models 里的 billing_group. 整家都没声明时不写 models (与加组之前的形状一致).
@@ -47,6 +48,8 @@ def build(list_path: Path) -> dict:
     rows = []
     for up_id, prov in providers.items():
         for order, model in enumerate(prov.get("models", [])):
+            if model_priority(model) < 0:
+                continue  # 负优先级: 模型停用
             logical = model.get("tollgate_group") or model["id"]
             rows.append((logical, up_id, model["id"], model_priority(model),
                          provider_priority(prov), order))
@@ -60,6 +63,8 @@ def build(list_path: Path) -> dict:
     for up_id, prov in providers.items():
         models = []
         for model in prov.get("models", []):
+            if model_priority(model) < 0:
+                continue  # 负优先级: 模型停用
             item = {"id": model["id"]}
             group = model.get("tollgate_billing")
             if isinstance(group, str) and group.strip():

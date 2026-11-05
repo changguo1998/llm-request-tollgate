@@ -219,6 +219,9 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
   `tollgate_group`) 的归并成一个别名。
 - 候选顺序 = fallback 优先级 = 模型的 `tollgate_priority` 降序, 同值看 provider 的
   `tollgate_priority` 降序, 再同值按 `--providers` 顺序; 0 最小, 缺省即 0。
+- 模型的 `tollgate_priority` 为负时该模型停用: 生成配置时跳过, 不进候选
+  (aliases), 也不进上游的 `models` 声明/额度组; 想临时下掉某个上游模型就把它
+  的优先级改成负数, 恢复时改回非负即可。
 - `tollgate_group` / `tollgate_priority` 手工维护, 但不会被 store 更新脚本冲掉
   (`merge_models_by_id` 继承 provider API 不提供的字段)。跨上游同族不同名的模型 (如 ustc 的
   `deepseek-flash` 与 ark 的 `deepseek-v4-1-flash*`) 就靠 `tollgate_group` 并成一个别名。
