@@ -9,7 +9,7 @@ import (
 
 // drawSettings 画设置页: 三列并排 —— 第 1 列 全局参数 + 供应商, 第 2 列 模型, 第 3 列 预览,
 // 底部消息行。各区标题中文, 焦点区用 [ 标题 ] 括起; 标题用 tuiTitle 色。列宽按内容算,
-// 第 3 列吃掉剩余宽度, 一直顶到终端右边界。
+// 第 3 列吃掉剩余宽度, 一直顶到终端右边界; 模型列顶到内容区底部 (消息行上方), 不留空白。
 func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 	e := m.prio
 	if e == nil {
@@ -21,7 +21,9 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 	if e.usable() {
 		provH = min(len(e.providers), max(1, body-gateLines-7))
 	}
-	visible := max(1, body-gateLines-provH-5)
+	// 模型列独立铺满内容区: 标题 1 行 + 底部消息行 1 行, 其余行全部给模型 (可滚动),
+	// 不再被第 1 列的高度公式压短。
+	visible := max(1, body-2)
 	rows := e.filtered()
 	if len(rows) == 0 {
 		visible = 0

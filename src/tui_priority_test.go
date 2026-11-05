@@ -440,6 +440,57 @@ func TestPrioDraw(t *testing.T) {
 	}
 }
 
+// 模型列应顶到内容区底部 (消息行上方), 不被第 1 列的高度公式压短:
+// 模型够多时, 可见行数由窗口高度决定, 最后一个模型行贴近内容区末尾。
+func TestSettingsModelColumnFillsHeight(t *testing.T) {
+	dir := t.TempDir()
+	fakeModels := make([]map[string]any, 0, 30)
+	for i := 0; i < 30; i++ {
+		fakeModels = append(fakeModels, map[string]any{"id": "m-" + strconv.Itoa(i)})
+	}
+	store := map[string]any{
+		"providers": map[string]any{
+			"ustc": map[string]any{
+				"baseUrl": "https://u.invalid/v1",
+				"models":  fakeModels,
+			},
+		},
+	}
+	b, err := json.Marshal(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "llm-models.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, "tollgate.json")
+	if err := os.WriteFile(cfg, []byte(`{"listen":"127.0.0.1:8787","upstreams":[{"id":"ustc"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newTUIModel(cfg)
+	m.prio = newTuiEditor(cfg)
+	m.tab = tabSettings
+	frame := m.draw()
+	body := m.bodyRows()
+	if got := m.prio.vis; got < body-3 {
+		t.Fatalf("模型列应顶到消息行上方: vis=%d, body=%d (期望 ≈%d)", got, body, body-2)
+	}
+	lines := strings.Split(strings.TrimRight(frame, "\n"), "\n")
+	modelRows, lastModelIdx := 0, -1
+	for i, line := range lines {
+		if strings.Contains(stripANSI(line), "/m-") {
+			modelRows++
+			lastModelIdx = i
+		}
+	}
+	if modelRows < body-4 {
+		t.Errorf("模型行应铺满 ≈%d 行, 实际 %d", body-2, modelRows)
+	}
+	if lastModelIdx < len(lines)-4 {
+		t.Errorf("最后一个模型行应贴近内容区底部, 得到行号 %d (共 %d 行)", lastModelIdx, len(lines))
+	}
+}
+
 // 焦点切换: m 切到模型面板, p 切到 provider 面板; Tab 不再参与换面板。
 func TestPrioFocusKeys(t *testing.T) {
 	_, cfg := prioFixture(t)
