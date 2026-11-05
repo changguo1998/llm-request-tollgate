@@ -1,4 +1,4 @@
-// observe_view.go: 观测面快照 (GET /v1/state) 与推送循环。
+// observe_view.go: 观测面快照 (GET /state) 与推送循环。
 
 package main
 
@@ -153,11 +153,11 @@ func (a *App) snapshot(since uint64) pulse {
 	}
 }
 
-// serveState 是只读观测面 (GET /v1/state): 进行中的请求 + 候选调度状态 + 新增事件。
+// serveState 是只读观测面 (GET /state): 进行中的请求 + 候选调度状态 + 新增事件。
 // 不给客户端用, 给运维面 (TUI) 看。
 func (a *App) serveState(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "only GET /v1/state")
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "only GET /state")
 		return
 	}
 	since, _ := strconv.ParseUint(r.URL.Query().Get("since"), 10, 64)

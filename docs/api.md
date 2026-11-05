@@ -1,7 +1,8 @@
 # llm-request-tollgate HTTP API 参考
 
 本机模型请求的统一闸口对外提供的 HTTP 接口清单. 代理对客户端暴露两个 OpenAI 兼容转发
-端点 (客户端照常按 LLM 接入), 外加三个只读运维端点. 调度 / 限速 / 记账的内部语义见
+端点 (客户端照常按 LLM 接入), 外加运维端点: `/state` 只读, `/unlock` 与 `/sticky` 供
+人工干预, 都不带 `/v1` 前缀. 调度 / 限速 / 记账的内部语义见
 [design.md](design.md) 与 [README](../README.md); 部署与日常运维见
 [operations.md](operations.md).
 
@@ -12,8 +13,9 @@
 | `/v1/chat/completions` | POST | 转发 chat completions (替换凭据 / 调度 / fallback / 记账) | 客户端, 即各 agent |
 | `/v1/responses` | POST | 转发 Responses API, 同一链路 | 客户端, 即各 agent |
 | `/v1/models` | GET | 逻辑模型名清单 (不暴露真实上游 id) | 客户端与运维 |
-| `/v1/state` | GET | 只读观测面: 进行中的请求 + 候选调度状态 + 事件 | 运维 (TUI) |
-| `/v1/unlock` | POST | 调试用强制解锁: 清掉内存里的锁与失败计数 (query 可过滤 `upstream` / `model` / `group`) | 运维 (调试) |
+| `/state` | GET | 只读观测面: 进行中的请求 + 候选调度状态 + 事件 | 运维 (TUI) |
+| `/unlock` | POST | 调试用强制解锁: 清掉内存里的锁与失败计数 (query 可过滤 `upstream` / `model` / `group`) | 运维 (调试) |
+| `/sticky` | POST | 人工改粘性偏好: query `logical` + `upstream` (+ `model`, 省略取该上游首个) 置一次; 不给 `upstream` 则清除 (`logical` 省略清全部) | 运维 |
 
 其余路径一律 404 `not_found`. base URL 是配置里的 `listen` (缺省
 `127.0.0.1:8787`), 客户端 base URL 指到 `http://127.0.0.1:8787/v1`.
@@ -135,13 +137,13 @@ key):
 
 | 状态码 | code | 场景 |
 |---|---|---|
-| 400 | `invalid_request_error` | 请求体读不出 / 不是合法 JSON / 缺 `model` |
-| 404 | `not_found` | 不支持的路径或方法 |
+| 400 | `invalid_request_error` | 请求体读不出 / 不是合法 JSON / 缺 `model`; `/sticky` 给了 `upstream` 没给 `logical` |
+| 404 | `not_found` | 不支持的路径或方法; `/sticky` 指定的候选不在别名链里 |
 | 404 | `model_not_found` | 未注册的逻辑名; 或该别名没有任何可用上游 |
-| 405 | `method_not_allowed` | `/v1/models` `/v1/state` 非 GET |
+| 405 | `method_not_allowed` | `/v1/models` `/state` 非 GET; `/unlock` `/sticky` 非 POST |
 | 429 | `rate_limit_error` | 闸门挡下, 请求没发出去 (带 `Retry-After`) |
 | 429 | `upstream_locked` | 候选全在锁里 (上游限制的传导, 带 `Retry-After`) |
-| 500 | `internal_error` | `/v1/state` 载荷编码失败 |
+| 500 | `internal_error` | `/state` 载荷编码失败 |
 | 502 | `upstream_error` | 全部候选失败且没有可透传的 HTTP 状态 |
 
 ### 5.2 闸门挡下 (429 `rate_limit_error`)
@@ -189,7 +191,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 { "object": "list", "data": [ { "id": "deepseek-v4.1-flash", "object": "model" } ] }
 ```
 
-### 6.2 GET /v1/state
+### 6.2 GET /state
 
 只读观测面: 进行中的请求 + 每个候选的调度状态 + 事件. 纯内存, 不落盘、不参与记账与
 调度, 重启即清空; 消费方是 TUI, 也可给别的工具读.
@@ -225,7 +227,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 | 字段 | 含义 |
 |---|---|
 | `ts` | 结束时刻 (RFC3339Nano) |
-| `req` | 本进程内的请求编号 (与 `/v1/state` 事件的 `req` 对齐; 重启后从头计, 可省略) |
+| `req` | 本进程内的请求编号 (与 `/state` 事件的 `req` 对齐; 重启后从头计, 可省略) |
 | `logical` | 请求的逻辑模型名 |
 | `upstream` | 实际服务的上游 id |
 | `model` | 实际服务的真实模型 id |

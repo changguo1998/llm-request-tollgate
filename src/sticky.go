@@ -86,6 +86,35 @@ func (s *sticky) served(logical string, servedIdx, prefIdx int, blocked, longLoc
 	}
 }
 
+// set 人工置一次偏好 (纯内存, 不落盘): 立即生效, 但自动迁移规则照旧 —— 之后偏好候选
+// 连续真实失败或被长期锁挡下时, 仍会迁到顶班候选。下标由调用方按当前 alias 解析。
+func (s *sticky) set(logical string, idx int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.prefs[logical]
+	if !ok {
+		p = &stickyPref{}
+		s.prefs[logical] = p
+	}
+	p.pref, p.streak, p.moved = idx, 0, time.Now()
+}
+
+// reset 清掉偏好 (logical 为空 = 清全部), 返回清掉的条数; 之后回落配置首候选。
+func (s *sticky) reset(logical string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if logical != "" {
+		if _, ok := s.prefs[logical]; !ok {
+			return 0
+		}
+		delete(s.prefs, logical)
+		return 1
+	}
+	n := len(s.prefs)
+	s.prefs = map[string]*stickyPref{}
+	return n
+}
+
 // prune 配置热加载后清掉失效偏好: 逻辑名没了或下标越界 (候选集变化) 一律作废,
 // 让流量从配置顺序重新积累。调用方持 a.mu (applyConfig 重建 aliases 后调用)。
 func (s *sticky) prune(aliases map[string][]aliasTarget) {

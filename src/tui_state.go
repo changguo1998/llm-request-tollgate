@@ -17,7 +17,7 @@ func (m *tuiModel) addEvent(e routeEvent) {
 	}
 }
 
-// pollState 同进程直接读内存; 另进程走 GET /v1/state?since=。
+// pollState 同进程直接读内存; 另进程走 GET /state?since=。
 func (m *tuiModel) pollState(app *App, since uint64) uint64 {
 	if app != nil {
 		p := app.snapshot(since)
@@ -26,7 +26,7 @@ func (m *tuiModel) pollState(app *App, since uint64) uint64 {
 		m.mergeEvents(p.Events)
 		return p.MaxSeq
 	}
-	url := m.stateURL + "/v1/state?since=" + strconv.FormatUint(since, 10)
+	url := m.stateURL + "/state?since=" + strconv.FormatUint(since, 10)
 	cl := http.Client{Timeout: 2 * time.Second}
 	resp, err := cl.Get(url)
 	if err != nil {

@@ -216,7 +216,7 @@ python3 scripts/gen_tollgate_config.example.py
 | `gate-state.json` | 定时锁 (额度 / 熔断 / 低性能) 的到期时间与原因 | 锁内存在, 重启恢复 |
 | `tui-pulse.json` | 每秒观测快照 (同进程 `-tui` 时) | 仅 `-tui` 时 |
 
-`/v1/state` 的 HTTP 面是只读输出, 见 [api.md](api.md) §6.
+`/state` 的 HTTP 面是只读输出, 见 [api.md](api.md) §6.
 
 ### 7.3 离线子命令
 
@@ -258,7 +258,7 @@ python3 scripts/gen_tollgate_config.example.py
 | 提示缺二进制 / 缺配置 | install 会检查; 先 `make build` 与备好 `config.local.json` |
 | 密钥没加载 (401) | `./deploy/tollgate.sh logs` 看 `Loaded xxx.ai`; `-check` 验证 key_env |
 | 一片 429 | 先分 `gate` 字段: `locked` 看 `var/gate-state.json` (锁到几点、什么原因); `sem_timeout` / `queue_timeout` 是并发 / 排队不够, 调 `gate` 参数 |
-| 某模型持续 429 / 慢 | 熔断锁只锁 `上游/模型`, 换别的模型或等锁到期; 看 `/v1/state` 的 `cands[].models` |
+| 某模型持续 429 / 慢 | 熔断锁只锁 `上游/模型`, 换别的模型或等锁到期; 看 `/state` 的 `cands[].models` |
 | hup 后不生效 | 确认改的是别名 / 上游 / 扁平全局键 (gate / timeouts 的 `*_sec` 键); 只有 `listen` / `log_path` 要重启 |
 | 上游报错种类怪 | `unclassified upstream error` 会打进服务日志, 按 docs/providers-api.md 补 `errors` 规则后 hup |
 | 日志磁盘增长 | 归档不自动清理, 配 logrotate 或定时删除 |

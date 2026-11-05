@@ -30,7 +30,7 @@ const (
 )
 
 // flow 是一笔进行中的请求 (只用于展示, 不参与调度判断)。字段导出, 因为它要按原样
-// 进 /v1/state 的 JSON。
+// 进 /state 的 JSON。
 type flow struct {
 	ID        uint64    `json:"id"`
 	Logical   string    `json:"logical"`
@@ -111,7 +111,7 @@ type stickyView struct {
 	Model    string `json:"model"`
 }
 
-// pulse 是 GET /v1/state (以及 -tui 时的 var/tui-pulse.json) 的载荷。
+// pulse 是 GET /state (以及 -tui 时的 var/tui-pulse.json) 的载荷。
 type pulse struct {
 	Ver       string      `json:"ver"` // 观测面版本: 用来认出"对端不是这个接口"
 	Listen    string      `json:"listen"`

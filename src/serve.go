@@ -29,10 +29,12 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // serveSide 处理不参与转发的旁路请求, 返回是否已经应答。
 func (a *App) serveSide(w http.ResponseWriter, r *http.Request) bool {
 	switch r.URL.Path {
-	case "/v1/state":
+	case "/state":
 		a.serveState(w, r)
-	case "/v1/unlock":
+	case "/unlock":
 		a.serveUnlock(w, r)
+	case "/sticky":
+		a.serveSticky(w, r)
 	case "/v1/models":
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed",

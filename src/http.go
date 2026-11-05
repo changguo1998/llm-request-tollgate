@@ -121,6 +121,69 @@ func (a *App) serveModels(w http.ResponseWriter) {
 	json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
 }
 
+// serveSticky 处理 POST /sticky (人工改粘性偏好), query 参数:
+//   - logical: 逻辑名; 清全部时可省略
+//   - upstream: 目标上游; 省略 = 清除偏好 (回落配置首候选)
+//   - model: 目标真实模型; 省略时取该上游在候选链里的第一个
+//
+// 只置一次: 立即生效, 自动迁移规则照旧 (之后真实失败 / 长期锁仍可迁走); 纯内存不落盘。
+func (a *App) serveSticky(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "only POST /sticky")
+		return
+	}
+	if a.sticky == nil {
+		writeError(w, http.StatusServiceUnavailable, "not_ready", "preference store is not initialized")
+		return
+	}
+	q := r.URL.Query()
+	logical, upstream, model := q.Get("logical"), q.Get("upstream"), q.Get("model")
+	if upstream == "" {
+		n := a.sticky.reset(logical)
+		a.evAdd("sticky", logical, "", "", "人工清除偏好 "+strconv.Itoa(n)+" 条")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"cleared": n})
+		return
+	}
+	if logical == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error",
+			"logical is required when upstream is set")
+		return
+	}
+	// 在 a.mu 下解析并写入 (锁序 a.mu -> sticky.mu, 与 applyConfig 一致), 免得解析出的
+	// 下标被并发热加载挪走。
+	a.mu.RLock()
+	list, ok := a.aliases[logical]
+	idx := -1
+	if ok {
+		for i, at := range list {
+			if at.Upstream == upstream && (model == "" || at.Model == model) {
+				idx = i
+				break
+			}
+		}
+	}
+	if idx >= 0 {
+		a.sticky.set(logical, idx)
+	}
+	a.mu.RUnlock()
+	if !ok {
+		writeError(w, http.StatusNotFound, "model_not_found", "unknown model: "+logical)
+		return
+	}
+	if idx < 0 {
+		writeError(w, http.StatusNotFound, "not_found",
+			"candidate not in alias chain: "+upstream+"/"+model)
+		return
+	}
+	at := list[idx]
+	a.evAdd("sticky", logical, at.Upstream, at.Model, "人工置偏好 (置一次, 自动迁移照旧)")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"logical": logical, "upstream": at.Upstream, "model": at.Model,
+	})
+}
+
 // forceUnlock 强制解锁 (调试用): 清掉全部候选 (或指定 upstream) 的锁与连续错误计数, 落盘。
 // model / group 非空时按它们过滤。返回清掉的锁数。
 func (a *App) forceUnlock(upID, model, group string) int {
@@ -145,11 +208,11 @@ func (a *App) forceUnlock(upID, model, group string) int {
 	return total
 }
 
-// serveUnlock 处理 POST /v1/unlock (调试用强制解锁)。可用 query 过滤:
+// serveUnlock 处理 POST /unlock (调试用强制解锁)。可用 query 过滤:
 // upstream / model / group; 都不给 = 清掉所有候选的所有锁与退避。
 func (a *App) serveUnlock(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "only POST /v1/unlock")
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "only POST /unlock")
 		return
 	}
 	q := r.URL.Query()

@@ -1,5 +1,5 @@
 // api_http_test.go: HTTP 层的集成用例 —— 路由 (支持 / 不支持的路径与方法)、请求体校验、
-// 别名解析失败、/v1/models 与 /v1/state 观测面、/v1/responses 的路径与用量注入差异。
+// 别名解析失败、/v1/models 与 /state 观测面、/v1/responses 的路径与用量注入差异。
 package main
 
 import (
@@ -112,7 +112,7 @@ func TestUnknownModelEmitsErrorEvent(t *testing.T) {
 	}
 }
 
-// 观测面走完整 HTTP 服务: /v1/models 只给逻辑名 (GET 之外 405), /v1/state 给得出观测载荷。
+// 观测面走完整 HTTP 服务: /v1/models 只给逻辑名 (GET 之外 405), /state 给得出观测载荷。
 func TestHTTPServeModelsAndState(t *testing.T) {
 	app := newTestApp(t, "http://127.0.0.1:1/v1", GateCfg{}, nil)
 	app.flowStart("m1", "agent", "/v1/chat/completions", true)
@@ -151,15 +151,15 @@ func TestHTTPServeModelsAndState(t *testing.T) {
 		t.Errorf("405 的错误体不对: code=%q msg=%q", c, m)
 	}
 
-	// /v1/state: 观测面 (ver + 进行中的请求)。
-	resp, err = http.Get(proxy.URL + "/v1/state?since=0")
+	// /state: 观测面 (ver + 进行中的请求)。
+	resp, err = http.Get(proxy.URL + "/state?since=0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	b, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("/v1/state 应返回 200, 得到 %d", resp.StatusCode)
+		t.Fatalf("/state 应返回 200, 得到 %d", resp.StatusCode)
 	}
 	var p pulse
 	if err := json.Unmarshal(b, &p); err != nil {

@@ -161,7 +161,7 @@ func TestServeState(t *testing.T) {
 	app.flowStart("m1", "agent", "/v1/chat/completions", true)
 
 	rec := httptest.NewRecorder()
-	app.serveState(rec, httptest.NewRequest(http.MethodGet, "/v1/state?since=0", nil))
+	app.serveState(rec, httptest.NewRequest(http.MethodGet, "/state?since=0", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET 应返回 200, 得到 %d", rec.Code)
 	}
@@ -177,7 +177,7 @@ func TestServeState(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	app.serveState(rec, httptest.NewRequest(http.MethodPost, "/v1/state", nil))
+	app.serveState(rec, httptest.NewRequest(http.MethodPost, "/state", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("非 GET 应返回 405, 得到 %d", rec.Code)
 	}

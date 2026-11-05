@@ -3,6 +3,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -245,6 +246,98 @@ func TestStickyProxySingleBlipDoesNotMigrate(t *testing.T) {
 	}
 	if got := u2hits.Load(); got != 0 {
 		t.Fatalf("u1 健康时不该落到 u2, 实为 %d 次", got)
+	}
+}
+
+// 人工置一次: 立即生效; 自动迁移规则照旧 (连续两次真实顶班仍迁走); 清除后回落首候选。
+func TestStickySetAndReset(t *testing.T) {
+	s := newSticky()
+	s.set("m1", 2)
+	if got := s.prefIdx("m1", 3); got != 2 {
+		t.Fatalf("人工置偏好后应为 2, 实为 %d", got)
+	}
+	s.served("m1", 1, 2, false, false) // 置一次后真实顶班 #1
+	if got := s.prefIdx("m1", 3); got != 2 {
+		t.Fatalf("一次真实顶班不该迁走人工偏好, 实为 %d", got)
+	}
+	s.served("m1", 1, 2, false, false) // 顶班 #2 -> 自动迁移照旧
+	if got := s.prefIdx("m1", 3); got != 1 {
+		t.Fatalf("人工置一次后自动迁移仍应生效 (应为 1), 实为 %d", got)
+	}
+	if n := s.reset(""); n != 1 {
+		t.Fatalf("清全部应清掉 1 条, 实为 %d", n)
+	}
+	if got := s.prefIdx("m1", 3); got != 0 {
+		t.Fatalf("清除后应回落首候选, 实为 %d", got)
+	}
+	if n := s.reset("m1"); n != 0 {
+		t.Fatalf("无偏好时清除应为 0 条, 实为 %d", n)
+	}
+}
+
+// POST /sticky 人工置偏好后下一笔直接走指定候选; 无 upstream 清除; 参数错误有明确状态码。
+func TestStickyEndpointSetAndClear(t *testing.T) {
+	var u1hits, u2hits atomic.Int64
+	u1 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u1hits.Add(1)
+		_, _ = w.Write([]byte(`{"model":"real-1","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	})
+	u2 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u2hits.Add(1)
+		_, _ = w.Write([]byte(`{"model":"real-2","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	})
+	app, proxy := twoUpApp(t, u1, u2, GateCfg{IntervalMs: 5, SemWaitMs: 50, QueueWaitMs: 300})
+	base := proxy.URL + "/sticky"
+
+	// 只接受 POST。
+	resp, err := http.Get(base + "?logical=m1&upstream=u2&model=real-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /sticky 应返回 405, 得到 %d", resp.StatusCode)
+	}
+
+	// 置到 u2/real-2: 立即生效。
+	code, body := postJSON(t, base+"?logical=m1&upstream=u2&model=real-2", "")
+	if code != http.StatusOK {
+		t.Fatalf("POST /sticky 应返回 200, 得到 %d (%s)", code, body)
+	}
+	if got := app.sticky.prefIdx("m1", 2); got != 1 {
+		t.Fatalf("人工偏好应为 u2 (1), 实为 %d", got)
+	}
+
+	// 下一笔直接走 u2, u1 不再被碰。
+	if code, _ := postJSON(t, proxy.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`); code != http.StatusOK {
+		t.Fatalf("应返回 200, 得到 %d", code)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := u1hits.Load(); got != 0 {
+		t.Fatalf("置偏好后不该先试 u1, 实为 %d 次", got)
+	}
+	if got := u2hits.Load(); got != 1 {
+		t.Fatalf("应由 u2 服务一笔, 实为 %d 次", got)
+	}
+
+	// 参数校验: 未知逻辑名 / 候选链里没有的候选 / 缺 logical。
+	if code, _ := postJSON(t, base+"?logical=nope&upstream=u2&model=real-2", ""); code != http.StatusNotFound {
+		t.Fatalf("未知逻辑名应返回 404, 得到 %d", code)
+	}
+	if code, _ := postJSON(t, base+"?logical=m1&upstream=u9", ""); code != http.StatusNotFound {
+		t.Fatalf("候选链外上游应返回 404, 得到 %d", code)
+	}
+	if code, _ := postJSON(t, base+"?upstream=u2", ""); code != http.StatusBadRequest {
+		t.Fatalf("缺 logical 应返回 400, 得到 %d", code)
+	}
+
+	// 清除该逻辑名的偏好: 回落配置首候选。
+	if code, body := postJSON(t, base+"?logical=m1", ""); code != http.StatusOK {
+		t.Fatalf("清除应返回 200, 得到 %d (%s)", code, body)
+	}
+	if got := app.sticky.prefIdx("m1", 2); got != 0 {
+		t.Fatalf("清除后应回落首候选, 实为 %d", got)
 	}
 }
 

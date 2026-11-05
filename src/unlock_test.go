@@ -1,4 +1,4 @@
-// unlock_test.go: 调试用强制解锁 (POST /v1/unlock)。
+// unlock_test.go: 调试用强制解锁 (POST /unlock)。
 
 package main
 

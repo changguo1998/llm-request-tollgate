@@ -137,7 +137,7 @@ func TestPollStateSameProcess(t *testing.T) {
 	}
 }
 
-// pollState 另进程走 GET /v1/state?since=: 正常 / 坏载荷 / 老对端三种情况。
+// pollState 另进程走 GET /state?since=: 正常 / 坏载荷 / 老对端三种情况。
 func TestPollStateHTTP(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Query().Get("since"); got != "7" {
