@@ -745,3 +745,25 @@ func TestLoadConfigValidatesGroups(t *testing.T) {
 		t.Fatalf("旧配置不该凭空多出 models: %+v", cfg.Upstreams[0].Models)
 	}
 }
+
+// 低性能豁免名单 (扁平顶层键 lowperf_exempt): 按真实模型 id 匹配, 去空白、剔除空串,
+// 且能经 gate() 透传到内部 GateCfg。
+func TestLoadConfigLowPerfExempt(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "exempt.json")
+	if err := os.WriteFile(p, []byte(`{
+	  "lowperf_exempt": [" m1 ", "", "m2"],
+	  "upstreams": [{"id": "u1", "base_url": "http://x"}]
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(p)
+	if err != nil {
+		t.Fatalf("应照常加载: %v", err)
+	}
+	if got := cfg.LowPerfExempt; len(got) != 2 || got[0] != "m1" || got[1] != "m2" {
+		t.Fatalf("豁免名单应去空白并剔除空串, 实为 %#v", got)
+	}
+	if got := cfg.gate().LowPerfExempt; len(got) != 2 || got[0] != "m1" || got[1] != "m2" {
+		t.Fatalf("gate() 应透传豁免名单, 实为 %#v", got)
+	}
+}

@@ -158,6 +158,59 @@ func TestProxyRecordsPerfSamples(t *testing.T) {
 	}
 }
 
+// 豁免名单 (lowperf_exempt) 内的模型禁止触发低性能锁: 低吞吐与高延迟都不锁,
+// 也不收集样本; 名单外模型照常判定。
+func TestLowPerfLockExempt(t *testing.T) {
+	g := normGate(GateCfg{LowPerfTtfbMaxMs: 100, LowPerfExempt: []string{"m1"}})
+	a, c := newPerfApp(g)
+
+	a.notePerfRequest("u1", "m1", 1, 5000, 500, "") // 0.2 t/s + 500ms: 任一分支都够触发
+	a.notePerfRequest("u1", "m1", 1, 5000, 500, "")
+	if locked, _, reason := c.locked("m1", ""); locked {
+		t.Fatalf("豁免名单内的模型不该触发低性能锁: reason=%s", reason)
+	}
+	c.mu.Lock()
+	n := len(c.gate("m1").tps) + len(c.gate("m1").lat)
+	c.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("豁免模型不应收集性能样本, 实为 %d 笔", n)
+	}
+
+	// 名单外: 同样的两笔低吞吐照常触发。
+	a.notePerfRequest("u1", "m2", 1, 5000, 0, "")
+	a.notePerfRequest("u1", "m2", 1, 5000, 0, "")
+	if locked, _, reason := c.locked("m2", ""); !locked || reason != lowPerfReason {
+		t.Fatalf("名单外模型应照常触发低性能锁: locked=%v reason=%s", locked, reason)
+	}
+}
+
+// 代理链路: 已经触发的低性能锁里, 再成功一笔也不影响豁免名单的拦截。
+func TestLowPerfLockExemptInProxy(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"choices":[{"delta":{"content":"hi"}}]}`+"\n\n")
+		time.Sleep(2 * time.Millisecond)
+		_, _ = io.WriteString(w, `data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer up.Close()
+	app := newTestApp(t, up.URL, GateCfg{IntervalMs: 5, LowPerfExempt: []string{"real-1"}}, nil)
+	proxy := httptest.NewServer(app)
+	defer proxy.Close()
+
+	for i := 0; i < 4; i++ {
+		status, body := postJSON(t, proxy.URL+"/v1/chat/completions",
+			`{"model":"m1","messages":[],"stream":true}`)
+		if status != http.StatusOK {
+			t.Fatalf("流式请求应为 200, 实为 %d %s", status, body)
+		}
+	}
+	c := app.cands["u1"]
+	if locked, _, reason := c.locked("real-1", ""); locked {
+		t.Fatalf("代理链路上豁免模型不该触发低性能锁: reason=%s", reason)
+	}
+}
+
 // 低性能锁与熔断锁共用同一份落盘: 重启后按 reason=lowperf 恢复。
 func TestLowPerfLockPersists(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "gate-state.json")

@@ -15,6 +15,7 @@
   "lowperf_avg_max": 1,
   "lowperf_ttfb_max_sec": 30,
   "lowperf_lock_sec": 300,
+  "lowperf_exempt": [],
   "retry_backoff_sec": [
     10,
     20,

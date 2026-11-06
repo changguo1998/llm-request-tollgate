@@ -9,6 +9,17 @@ import (
 // lowPerfReason 是低性能锁的原因标记 (落盘与观测面都按它认)。
 const lowPerfReason = "lowperf"
 
+// lowPerfExempt 是否该模型在低性能锁豁免名单里 (按真实模型 id 匹配): 名单内的模型
+// 禁止触发低性能锁。名单来自全局扁平键 lowperf_exempt, 热加载即生效。
+func (g GateCfg) lowPerfExempt(model string) bool {
+	for _, m := range g.LowPerfExempt {
+		if m == model {
+			return true
+		}
+	}
+	return false
+}
+
 // 判定样本: 至少 minPerfSamples 笔才判 (单笔可能是刚开流就断的短请求);
 // 至多留 maxPerfSamples 笔只为防内存涨 (慢请求时远到不了这个数)。
 const (
@@ -22,6 +33,10 @@ const (
 // true), 由调用方加锁并落盘。
 // 触发后清空样本: 锁到期从新样本重判, 不至于被旧样本立刻再锁一次。
 func (c *cand) notePerf(model string, tp *tokPoint, ttfbMs int64, g GateCfg) (peak, avg, latAvg float64, low bool) {
+	// 豁免名单 (lowperf_exempt): 名单内的模型禁止触发低性能锁, 也不收集样本。
+	if g.lowPerfExempt(model) {
+		return 0, 0, 0, false
+	}
 	now := time.Now()
 	window := g.lowPerfWindow()
 	c.mu.Lock()

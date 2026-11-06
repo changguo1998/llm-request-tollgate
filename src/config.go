@@ -51,18 +51,20 @@ type Config struct {
 	ResponseHeaderSec float64 `json:"response_header_sec"`
 	StreamIdleSec     float64 `json:"stream_idle_sec"`
 	// gate 门控参数 (扁平; 时间为秒可小数, 非时间项原单位)
-	IntervalSec        float64   `json:"interval_sec"`
-	SemWaitSec         float64   `json:"sem_wait_sec"`
-	QueueWaitSec       float64   `json:"queue_wait_sec"`
-	ConcurrencyLockSec float64   `json:"concurrency_lock_sec"`
-	QuotaLockSec       float64   `json:"quota_lock_sec"`
-	BreakerLockSec     float64   `json:"breaker_lock_sec"`
-	LowPerfWindowSec   float64   `json:"lowperf_window_sec"`
-	LowPerfPeakMax     int       `json:"lowperf_peak_max"`     // tokens/s, 非时间
-	LowPerfAvgMax      int       `json:"lowperf_avg_max"`      // tokens/s, 非时间
-	LowPerfTtfbMaxSec  float64   `json:"lowperf_ttfb_max_sec"` // 高延迟阈值 (秒); 0 = 关闭
-	LowPerfLockSec     float64   `json:"lowperf_lock_sec"`
-	RetryBackoffSec    []float64 `json:"retry_backoff_sec"`
+	IntervalSec        float64 `json:"interval_sec"`
+	SemWaitSec         float64 `json:"sem_wait_sec"`
+	QueueWaitSec       float64 `json:"queue_wait_sec"`
+	ConcurrencyLockSec float64 `json:"concurrency_lock_sec"`
+	QuotaLockSec       float64 `json:"quota_lock_sec"`
+	BreakerLockSec     float64 `json:"breaker_lock_sec"`
+	LowPerfWindowSec   float64 `json:"lowperf_window_sec"`
+	LowPerfPeakMax     int     `json:"lowperf_peak_max"`     // tokens/s, 非时间
+	LowPerfAvgMax      int     `json:"lowperf_avg_max"`      // tokens/s, 非时间
+	LowPerfTtfbMaxSec  float64 `json:"lowperf_ttfb_max_sec"` // 高延迟阈值 (秒); 0 = 关闭
+	LowPerfLockSec     float64 `json:"lowperf_lock_sec"`
+	// LowPerfExempt 是低性能锁豁免名单: 名单内的真实模型 id 禁止触发低性能锁。
+	LowPerfExempt   []string  `json:"lowperf_exempt,omitempty"`
+	RetryBackoffSec []float64 `json:"retry_backoff_sec"`
 	// TUI 显示窗口 (秒, 可小数)
 	RateWindowSec  float64 `json:"rate_window_sec"`
 	BlockWindowSec float64 `json:"block_window_sec"`
@@ -119,6 +121,7 @@ func (c *Config) gate() GateCfg {
 		ConcurrencyLockMs: secToMs(c.ConcurrencyLockSec), QuotaLockMs: secToMs(c.QuotaLockSec), BreakerLockMs: secToMs(c.BreakerLockSec),
 		LowPerfWindowMs: secToMs(c.LowPerfWindowSec), LowPerfPeakMax: c.LowPerfPeakMax, LowPerfAvgMax: c.LowPerfAvgMax,
 		LowPerfLockMs: secToMs(c.LowPerfLockSec), LowPerfTtfbMaxMs: secToMs(c.LowPerfTtfbMaxSec),
+		LowPerfExempt:  c.LowPerfExempt,
 		RetryBackoffMs: secListToMs(c.RetryBackoffSec),
 	}
 }
@@ -130,6 +133,7 @@ func (c *Config) setGate(g GateCfg) {
 	c.LowPerfWindowSec = msToSec(g.LowPerfWindowMs)
 	c.LowPerfPeakMax, c.LowPerfAvgMax = g.LowPerfPeakMax, g.LowPerfAvgMax
 	c.LowPerfLockSec, c.LowPerfTtfbMaxSec = msToSec(g.LowPerfLockMs), msToSec(g.LowPerfTtfbMaxMs)
+	c.LowPerfExempt = g.LowPerfExempt
 	c.RetryBackoffSec = msListToSec(g.RetryBackoffMs)
 }
 
@@ -143,12 +147,14 @@ type GateCfg struct {
 	BreakerLockMs     int `json:"breaker_lock_ms"`
 	// 低性能锁: 覆盖两种「慢到没有实用价值」—— 低吞吐 (窗口内解码吞吐的峰值与平均都
 	// 低于门槛) 或 高延迟 (窗口内平均首字节时延超过阈值), 任一命中即锁该 上游/模型。
-	LowPerfWindowMs  int   `json:"lowperf_window_ms"`
-	LowPerfPeakMax   int   `json:"lowperf_peak_max"`    // 低吞吐峰值上限 (tokens/s)
-	LowPerfAvgMax    int   `json:"lowperf_avg_max"`     // 低吞吐平均上限 (tokens/s)
-	LowPerfTtfbMaxMs int   `json:"lowperf_ttfb_max_ms"` // 高延迟阈值 (平均首字节时延, ms); 0 = 关闭该项
-	LowPerfLockMs    int   `json:"lowperf_lock_ms"`
-	RetryBackoffMs   []int `json:"retry_backoff_ms"`
+	LowPerfWindowMs  int `json:"lowperf_window_ms"`
+	LowPerfPeakMax   int `json:"lowperf_peak_max"`    // 低吞吐峰值上限 (tokens/s)
+	LowPerfAvgMax    int `json:"lowperf_avg_max"`     // 低吞吐平均上限 (tokens/s)
+	LowPerfTtfbMaxMs int `json:"lowperf_ttfb_max_ms"` // 高延迟阈值 (平均首字节时延, ms); 0 = 关闭该项
+	LowPerfLockMs    int `json:"lowperf_lock_ms"`
+	// LowPerfExempt 是低性能锁豁免名单: 名单内的模型禁止触发低性能锁 (按真实模型 id 匹配)。
+	LowPerfExempt  []string `json:"lowperf_exempt,omitempty"`
+	RetryBackoffMs []int    `json:"retry_backoff_ms"`
 }
 
 // gateIntervalMs 是出队节拍的缺省值。
@@ -305,6 +311,14 @@ func loadConfigOpt(path string, lenient bool) (*Config, error) {
 			}
 		}
 	}
+	// 低性能豁免名单: 按真实模型 id 匹配, 手写配置容易带多余空白, 去空白并剔除空串。
+	exempt := c.LowPerfExempt[:0]
+	for _, m := range c.LowPerfExempt {
+		if m = strings.TrimSpace(m); m != "" {
+			exempt = append(exempt, m)
+		}
+	}
+	c.LowPerfExempt = exempt
 	// key_env: 配置只存环境变量名, 真 key 启动/热加载时从环境取, 不落盘。
 	for i := range c.Upstreams {
 		u := &c.Upstreams[i]
