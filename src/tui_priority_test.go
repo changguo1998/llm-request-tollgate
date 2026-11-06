@@ -422,8 +422,12 @@ func TestPrioDraw(t *testing.T) {
 	if !strings.Contains(frame, "[优先级未保存]") {
 		t.Errorf("改了没存应显示 [优先级未保存]")
 	}
-	if !strings.Contains(frame, "预览") {
-		t.Errorf("右栏应是预览")
+	if strings.Contains(frame, "预览") {
+		t.Errorf("候选预览栏已移除, 模型列表应分两栏")
+	}
+	if !strings.Contains(frame, tuiBold+"deepseek-v4.1-flash"+tuiReset) ||
+		!strings.Contains(frame, tuiBold+"solo"+tuiReset) {
+		t.Errorf("模型列表应按逻辑名分组 (缺分组标题 deepseek-v4.1-flash / solo)")
 	}
 
 	// store 读不到时只报错, 不 panic (把 FFF_HOME 指到空目录, 免得退回真 store)。
@@ -485,13 +489,51 @@ func TestSettingsPrioWidthAndProviderColors(t *testing.T) {
 	}
 }
 
-// 模型列应顶到内容区底部 (消息行上方), 不被第 1 列的高度公式压短:
-// 模型够多时, 可见行数由窗口高度决定, 最后一个模型行贴近内容区末尾。
+// 模型列表按逻辑名分组 (sticky 页同款: 组与组之间用加粗逻辑名隔开), 组内按候选顺序
+// 列出模型行 (含优先级与 provider 专属色)。
+func TestSettingsModelListGroupedRows(t *testing.T) {
+	_, cfg := prioFixture(t)
+	m := newTUIModel(cfg)
+	m.prio = newTuiEditor(cfg)
+	m.tab = tabSettings
+	frame := m.draw()
+	plain := stripANSI(frame)
+
+	// 1. 加粗分组标题依次是 deepseek-v4.1-flash、solo (字典序, 与 sticky 同款)。
+	gi := strings.Index(plain, "  deepseek-v4.1-flash")
+	si := strings.Index(plain, "  solo")
+	if gi < 0 || si < 0 || gi > si {
+		t.Fatalf("分组标题应出现且 deepseek 在 solo 前: g=%d s=%d\n%s", gi, si, plain)
+	}
+	// 2. 组内模型行缩进, 顺序 = 模型优先级 -> provider 优先级 -> 上游顺序 -> 模型 id。
+	for _, want := range []string{
+		"M 2 P0 ustc/deepseek-flash",
+		"M 0 P3 group/deepseek-v4.1-flash",
+		"M 0 P0 ustc/deepseek-flash-2",
+		"M 5 P3 group/solo",
+	} {
+		if !strings.Contains(plain, "  "+want) {
+			t.Errorf("模型行应缩进且带 %q, 得到:\n%s", want, plain)
+		}
+	}
+	// 3. deepseek 组内三个模型行都落在 deepseek 标题与 solo 标题之间, solo 行在其后。
+	first := strings.Index(plain, "  M 2 P0 ustc/deepseek-flash")
+	last := strings.Index(plain, "  M 5 P3 group/solo")
+	if first < gi || first > si {
+		t.Errorf("deepseek 组第 1 行应在 deepseek 标题与 solo 标题之间: first=%d", first)
+	}
+	if first < 0 || last < 0 || last < si {
+		t.Errorf("solo 行应在 solo 标题之后: first=%d last=%d si=%d", first, last, si)
+	}
+}
+
+// 模型列表分两栏铺满内容区: 模型够多时, 每栏高度由窗口高度决定, 全部模型行都在画面
+// 里 (两栏合计覆盖全部显示行), 分组标题只出现一次, 最后一栏贴到内容区底部。
 func TestSettingsModelColumnFillsHeight(t *testing.T) {
 	dir := t.TempDir()
 	fakeModels := make([]map[string]any, 0, 30)
 	for i := 0; i < 30; i++ {
-		fakeModels = append(fakeModels, map[string]any{"id": "m-" + strconv.Itoa(i)})
+		fakeModels = append(fakeModels, map[string]any{"id": "m-" + strconv.Itoa(i), "tollgate_group": "g"})
 	}
 	store := map[string]any{
 		"providers": map[string]any{
@@ -520,19 +562,19 @@ func TestSettingsModelColumnFillsHeight(t *testing.T) {
 	if got := m.prio.vis; got < body-3 {
 		t.Fatalf("模型列应顶到消息行上方: vis=%d, body=%d (期望 ≈%d)", got, body, body-2)
 	}
+	if !strings.Contains(frame, tuiBold+"g"+tuiReset) {
+		t.Fatalf("模型列表应按逻辑名分组 (缺分组标题 g)")
+	}
 	lines := strings.Split(strings.TrimRight(frame, "\n"), "\n")
-	modelRows, lastModelIdx := 0, -1
-	for i, line := range lines {
+	modelRows := 0
+	for _, line := range lines {
 		if strings.Contains(stripANSI(line), "/m-") {
 			modelRows++
-			lastModelIdx = i
 		}
 	}
-	if modelRows < body-4 {
-		t.Errorf("模型行应铺满 ≈%d 行, 实际 %d", body-2, modelRows)
-	}
-	if lastModelIdx < len(lines)-4 {
-		t.Errorf("最后一个模型行应贴近内容区底部, 得到行号 %d (共 %d 行)", lastModelIdx, len(lines))
+	// 两栏几乎每一行都铺上模型行 (个别行让给分组标题), 模型区顶到内容区底部。
+	if modelRows < body-3 {
+		t.Errorf("两栏应几乎每行铺满模型行: 实际 %d 行, body=%d (期望 ≈%d)", modelRows, body, body-2)
 	}
 }
 
