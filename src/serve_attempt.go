@@ -124,6 +124,7 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 			a.recordGenericFailure(at.cd, at.mod, s.gate, s.upPath)
 			s.noteFailure(rerr, at.up.ID, at.mod)
 			s.obs.mark(-1)
+			s.logUpstreamError(at, 0, nil, nil, rerr)
 			continue
 		}
 		s.obs.stage(stageRecv)
@@ -145,6 +146,9 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 			if berr != nil {
 				s.lastErr = berr
 			}
+			// 每次上游真实请求以错误收场都落一笔日志 (带上原始响应体/头与归类);
+			// 后续候选兜底成功时这笔记错误也留痕, 供排查额度与到期时间。
+			s.logUpstreamError(at, resp.StatusCode, b, s.lastHdr, nil)
 			if moveOn {
 				return
 			}
@@ -194,6 +198,27 @@ func (s *serveState) noteFailure(err error, upID, mod string) {
 	s.lastErr = err
 	s.lastUpID, s.lastMod = upID, mod
 	s.failed++
+}
+
+// logUpstreamError 在每次上游真实请求以错误收场时落一笔日志: 携带原始响应体 (截断)
+// 与全部响应头, 以及按该上游规则表归类的结果 (quota / concurrency / other)。即使
+// 后续候选兜底成功, 这笔上游错误也留痕, 供排查额度限制与到期时间 (Retry-After /
+// x-ratelimit-reset-* / body 内 budget 字段)。传输出错 (terr != nil) 时没有响应
+// 内容可记, 归类记为 transport。
+func (s *serveState) logUpstreamError(at attempt, status int, body []byte, hdr http.Header, terr error) {
+	rec := s.baseLog()
+	rec.Upstream, rec.Model = at.up.ID, at.mod
+	rec.Missing = true
+	if terr != nil {
+		rec.Status, rec.Err, rec.Class = 0, terr.Error(), "transport"
+	} else {
+		rec.Status = status
+		rec.Err = fmt.Sprintf("upstream %s returned %d", at.up.ID, status)
+		rec.ErrBody = errBodyText(body)
+		rec.ErrHeaders = hdr.Clone()
+		rec.Class = at.up.classify(status, body).String()
+	}
+	s.app.logReq(rec)
 }
 
 // noteLeft 只保留最长的那把锁剩余时间 (Retry-After 用)。

@@ -234,20 +234,28 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 | `model` | 实际服务的真实模型 id |
 | `path` | 转发端点 (`/v1/chat/completions` 或 `/v1/responses`) |
 | `stream` | 是否流式 |
-| `status` | 最终状态码 |
+| `status` | 最终状态码; 上游错误行 = 该上游返回的状态码 |
 | `usage` | `{prompt, completion, total, cached?}` (归一口径; `cached` 是命中缓存输入 token) |
 | `missing_usage` | true = 上游没回 usage, 走了字符粗估 |
 | `queued` / `queue_ms` / `sem_ms` | 是否排过队 / 排队总时长 / 等信号量总时长 |
 | `client` / `ua` / `source` | 来源 (remote addr / User-Agent / `X-Tollgate-Source`) |
 | `fallbacks` | 换候选次数 |
 | `err` | 错误说明 |
-| `err_body` | 上游真实出错时的响应体原文 (截断到 1KB); 锁内跳过的候选无此字段 |
-| `err_headers` | 上游真实出错时的全部响应头 (如 `Retry-After` / `x-ratelimit-reset-*`, 供查额度重置时间); 锁内跳过的候选无此字段 |
+| `err_body` | 上游真实错误 (有响应内容) 时的响应体原文 (截断 1KB); 锁内跳过 / 传输失败无此字段 |
+| `err_headers` | 上游真实错误时的全部响应头 (如 `Retry-After` / `x-ratelimit-reset-*`, 供查额度重置与到期时间); 锁内跳过 / 传输失败无此字段 |
+| `class` | 上游错误的归类: `quota` / `concurrency` / `other` (按该上游的 `errors` 规则表); 传输失败记 `transport` |
 | `gate` | 被闸门挡下未发出时的原因 (见 5.2) |
 | `lock_skips` / `backoff_skips` | 候选被锁 / 在退避而被跳过的次数 |
 | `ttfb_ms` / `decode_ms` / `tps` | 首字节时延 / 解码段时长(首字节到流末, 仅流式) / 解码吞吐 tokens/s (流式才有) |
 | `bytes` / `bps` | 转发给客户端的响应体字节数 / 接收的字节吞吐 bytes/s (流式才有 bps) |
 | `duration_ms` | 请求耗时 (收到请求到写完响应), 供不把空闲计入分母的吞吐 |
+
+一笔请求通常落一行; 若候选链里有上游真实返回了 HTTP 错误, 每个这样的错误都会
+独立多落一行 (即使后续候选兜底成功), `status` = 该上游返回的状态码, 并带
+`err` / `err_body` / `err_headers` / `class`, 便于查额度限制与到期时间; 随后整体
+结局 (成功或最终失败) 再落一行正常记录。传输层失败 (没拿到响应) 也留一行,
+只有 `err` 与 `class=transport`。请求级累计字段 (`fallbacks` / `queued` 等)
+逐行保留当前值。
 
 明细事实来源是日志 (观测面重启即清空, 设计 D12); `-summary` 与 `-usage` 两个离线子命
 令都能跨归档读, 见 [operations.md](operations.md) §7.

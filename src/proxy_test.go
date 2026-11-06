@@ -586,6 +586,75 @@ func TestPassthroughErrBodyAndHeadersInLog(t *testing.T) {
 	}
 }
 
+// TestUpstreamErrorLoggedEvenWhenFallbackSucceeds 覆盖: 首候选真实返回额度错误时,
+// 即使第二候选兜底成功, 这笔上游错误也要留痕 (err_body / err_headers / class=quota),
+// 供排查额度限制与到期时间 —— 这是「上游真实请求错误如实记录」的核心行为。
+func TestUpstreamErrorLoggedEvenWhenFallbackSucceeds(t *testing.T) {
+	q := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "37")
+		w.Header().Set("X-RateLimit-Reset", "6m0s")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"Budget has been exceeded! Current cost: 100.0, Max budget: 100.0","type":"budget_exceeded"}}`)
+	}))
+	defer q.Close()
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"id":"ok","object":"chat.completion","choices":[]}`)
+	}))
+	defer ok.Close()
+
+	cfg := &Config{
+		Upstreams: []UpstreamCfg{
+			{ID: "quota", BaseURL: q.URL, AuthHeader: "Authorization", Key: "k", IncludeUsage: true,
+				Errors: &ErrRules{Quota: []ErrRule{{Status: []int{429}, Contains: []string{"budget"}}}}},
+			{ID: "ok", BaseURL: ok.URL, AuthHeader: "Authorization", Key: "k", IncludeUsage: true},
+		},
+		Aliases: map[string][][2]string{"m1": {{"quota", "r1"}, {"ok", "r2"}}},
+	}
+	app := appWithGate(t, cfg, GateCfg{IntervalMs: 5, SemWaitMs: 50, QueueWaitMs: 200,
+		RetryBackoffMs: []int{5, 10, 15}})
+	proxy := httptest.NewServer(app)
+	defer proxy.Close()
+
+	status, _ := postJSON(t, proxy.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
+	if status != http.StatusOK {
+		t.Fatalf("第二候选应兜底成功, 实为 %d", status)
+	}
+	// 轮询扫全部日志, 找 quota 错误行与成功行各一条。
+	var errRec, okRec *logRec
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, rr := range readAllLog(app) {
+			switch {
+			case rr.Status == http.StatusTooManyRequests && rr.Class == "quota" && rr.ErrBody != "":
+				errRec = &rr
+			case rr.Status == http.StatusOK && rr.Upstream == "ok":
+				okRec = &rr
+			}
+		}
+		if errRec != nil && okRec != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if errRec == nil {
+		t.Fatal("兜底成功后, quota 上游的错误没落进请求日志")
+	}
+	if !strings.Contains(errRec.ErrBody, "Budget has been exceeded!") {
+		t.Errorf("err_body 应为上游响应体原文: %q", errRec.ErrBody)
+	}
+	hdr := http.Header(errRec.ErrHeaders)
+	if hdr.Get("Retry-After") != "37" || hdr.Get("X-RateLimit-Reset") != "6m0s" {
+		t.Errorf("err_headers 应含上游响应头: %v", errRec.ErrHeaders)
+	}
+	if okRec == nil {
+		t.Fatal("兜底成功的日志行缺失")
+	}
+	if errRec.Req != okRec.Req {
+		t.Errorf("两行应属于同一笔请求 (req=%d vs %d)", errRec.Req, okRec.Req)
+	}
+}
+
 // TestProxyBreakerIsPerModel 覆盖熔断的粒度: 同一个上游下 m1 的模型连错熔断后, 只跳过 m1,
 // m2 (另一个真实模型) 照常真发并成功。
 func TestProxyBreakerIsPerModel(t *testing.T) {

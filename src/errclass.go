@@ -29,6 +29,17 @@ const (
 	classQuota                       // 额度限制: 锁整个候选
 )
 
+// String 输出便于日志/界面展示的类名 (额度 / 并发 / 其他)。
+func (c errClass) String() string {
+	switch c {
+	case classQuota:
+		return "quota"
+	case classConcurrency:
+		return "concurrency"
+	}
+	return "other"
+}
+
 // errMatchText 拼出关键词匹配用的文本: error.type + error.code + error.message 转小写;
 // body 不是 JSON, 或没有 error 对象 (有的上游回纯文本) 时退回整段 body
 // (docs/providers-api.md §1.2 第 2/3 步 —— 不同上游的关键词落在不同字段上)。

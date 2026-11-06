@@ -33,17 +33,20 @@ type logRec struct {
 	Err       string `json:"err,omitempty"`
 	// 上游真实出错 (有响应内容) 时的原始响应: 体 (截断) 与全部响应头, 供排查额度
 	// 重置时间等; 锁内跳过的候选没有响应内容, 不记这两个字段。
-	ErrBody      string              `json:"err_body,omitempty"`
-	ErrHeaders   map[string][]string `json:"err_headers,omitempty"`
-	Gate         string              `json:"gate,omitempty"` // 被闸门挡下没发出去时: locked | sem_timeout | queue_timeout | backoff_timeout | canceled
-	LockSkips    int                 `json:"lock_skips,omitempty"`
-	BackoffSkips int                 `json:"backoff_skips,omitempty"`
-	TtfbMs       int64               `json:"ttfb_ms,omitempty"`     // 首字节时延 (被动采样)
-	DecodeMs     int64               `json:"decode_ms,omitempty"`   // 解码段时长: 首字节到流末 (仅流式有值)
-	Tps          float64             `json:"tps,omitempty"`         // 解码吞吐 tokens/s (流式才有)
-	Bytes        int64               `json:"bytes,omitempty"`       // 转发给客户端的响应体字节数
-	Bps          float64             `json:"bps,omitempty"`         // 接收的字节吞吐 bytes/s (流式才有)
-	DurationMs   int64               `json:"duration_ms,omitempty"` // 请求耗时 (收到请求到写完响应), 供非空闲吞吐
+	ErrBody    string              `json:"err_body,omitempty"`
+	ErrHeaders map[string][]string `json:"err_headers,omitempty"`
+	// Class 是这条日志的错误归类: quota / concurrency / other (HTTP 错误响应按上游
+	// 规则表归类), transport 是传输层失败 (没有响应头/体)。便于直接筛出额度限制。
+	Class        string  `json:"class,omitempty"`
+	Gate         string  `json:"gate,omitempty"` // 被闸门挡下没发出去时: locked | sem_timeout | queue_timeout | backoff_timeout | canceled
+	LockSkips    int     `json:"lock_skips,omitempty"`
+	BackoffSkips int     `json:"backoff_skips,omitempty"`
+	TtfbMs       int64   `json:"ttfb_ms,omitempty"`     // 首字节时延 (被动采样)
+	DecodeMs     int64   `json:"decode_ms,omitempty"`   // 解码段时长: 首字节到流末 (仅流式有值)
+	Tps          float64 `json:"tps,omitempty"`         // 解码吞吐 tokens/s (流式才有)
+	Bytes        int64   `json:"bytes,omitempty"`       // 转发给客户端的响应体字节数
+	Bps          float64 `json:"bps,omitempty"`         // 接收的字节吞吐 bytes/s (流式才有)
+	DurationMs   int64   `json:"duration_ms,omitempty"` // 请求耗时 (收到请求到写完响应), 供非空闲吞吐
 }
 
 // logDayOf 返回时间所在本地日历天 (轮转边界按本地日期算)。

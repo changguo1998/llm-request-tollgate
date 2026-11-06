@@ -94,6 +94,29 @@ func readLastLog(app *App) (logRec, bool) {
 	return logRec{}, false
 }
 
+// readAllLog 读全部请求日志记录 (测试内核对同一笔请求的多条记录时用)。
+func readAllLog(app *App) []logRec {
+	app.logMu.Lock()
+	path := app.logW.Name()
+	app.logMu.Unlock()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var recs []logRec
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var rec logRec
+		if json.Unmarshal([]byte(line), &rec) == nil {
+			recs = append(recs, rec)
+		}
+	}
+	return recs
+}
+
 // lastLogRec 立即读最后一行请求日志 (非流式请求在返回前已写日志, 可直接读)。
 func lastLogRec(t *testing.T, app *App) logRec {
 	t.Helper()
