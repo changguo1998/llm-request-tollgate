@@ -46,7 +46,7 @@ type rowSample struct {
 // flowMinRows 给每个分块定数据行区高度: 参考行数来自一段时间的统计, 最后用此刻的笔数校准。
 // 参考行数 (blockRefRows): 每个样本先算各块笔数占该样本在飞笔数的比例, 再按高斯权重对各
 // 样本的比例取加权平均 (近的重、远的轻, 于是某一段时间挂着很多笔不会独占统计), 乘以「同时在飞
-// 笔数峰值」(总并发数), 四舍五入成参考行数, 至少 1 行 (不设上限)。
+// 笔数峰值」(总并发数), 向上取整成参考行数, 至少 1 行 (不设上限)。
 // 校准: 行数 = max(此刻笔数, 参考行数, 1)。笔数超过参考值时按实际留, 有空行的块也不把
 // 请求藏起来; 空块最少留 1 行撑住版式。
 func (m *tuiModel) flowMinRows() []int {
@@ -99,7 +99,7 @@ func (m *tuiModel) noteRows(now time.Time) {
 
 // blockRefRows 用最近一段的样本算参考行数: 每个样本先算各块笔数占该样本在飞笔数的比例,
 // 再按高斯权重 (离参看时刻越远越轻) 对各样本的比例取加权平均, 最后乘「同时在飞笔数峰值」
-// (总并发数), 四舍五入成参考行数。
+// (总并发数), 向上取整成参考行数。
 // 权重的时间尺度 t0 = 实测平均停留时长 (从开始请求信号量到请求结束): 停留 t0 那么久的样本
 // 权重 0.9, 见 gaussWeight。
 // 参看时刻: 此刻有进行中的请求就用当前时间, 没有就用最后一次请求结束的时刻 (最后一个非空
@@ -143,7 +143,7 @@ func (m *tuiModel) blockRefRows(now time.Time) ([]int, bool) {
 	}
 	out := make([]int, k)
 	for i := 0; i < k; i++ {
-		out[i] = clampRows(int(math.Round(share[i] / weight * peak)))
+		out[i] = clampRows(int(math.Ceil(share[i] / weight * peak)))
 	}
 	return out, true
 }

@@ -29,12 +29,12 @@ func TestFlowMinRowsWindow(t *testing.T) {
 	}
 	m := newTUIModel("cfg")
 	// 日志里还没有请求时 t0 取缺省 35s: 1min 前的样本权重 0.9^((60/35)²)≈0.73, 刚发生的为 1,
-	// 峰值为 8, 于是已发送 3 行, 接收中 5 行。
+	// 峰值为 8, 于是已发送 4 行 (向上取整), 接收中 5 行。
 	m.rowHist = []rowSample{
 		sample(now.Add(-2*time.Minute), map[int]int{3: 1}),
 		sample(now.Add(-time.Minute), map[int]int{4: 8}),
 	}
-	want := []int{1, 1, 1, 3, 5, 1}
+	want := []int{1, 1, 1, 4, 5, 1}
 	if got := m.flowMinRows(); !sameInts(got, want) {
 		t.Errorf("参考行数应为 %v, 得到 %v", want, got)
 	}
@@ -46,15 +46,15 @@ func TestFlowMinRowsWindow(t *testing.T) {
 		t.Errorf("接收中块应按 10 笔留 10 行, 得到 %d", got)
 	}
 	// 高斯权重按日志里的平均耗时缩放: t0 = 10s 时, 20s 前的 8 笔样本权重 0.9⁴≈0.66,
-	// 近的 1 笔接收中权重 1, 按占比给行数 (已发送 3 行, 接收中 5 行), 旧样本只把峰值抬到 8。
+	// 近的 1 笔接收中权重 1, 按占比给行数 (已发送 4 行, 接收中 5 行, 向上取整), 旧样本只把峰值抬到 8。
 	m.pulse.Active = nil
 	m.durSum, m.durN = 10000, 1 // 平均耗时 10s
 	m.rowHist = []rowSample{
 		sample(now.Add(-80*time.Second), map[int]int{3: 8}),
 		sample(now.Add(-time.Minute), map[int]int{4: 1}),
 	}
-	if got := m.flowMinRows(); got[3] != 3 || got[4] != 5 {
-		t.Errorf("远的样本应按高斯衰减 (已发送 3 行, 接收中 5 行), 得到 %v", got)
+	if got := m.flowMinRows(); got[3] != 4 || got[4] != 5 {
+		t.Errorf("远的样本应按高斯衰减 (已发送 4 行, 接收中 5 行), 得到 %v", got)
 	}
 	// 最近一段全是空样本: 参看时刻仍是最后一个有请求的样本, 不塌回缺省档。
 	m.durSum, m.durN = 0, 0
