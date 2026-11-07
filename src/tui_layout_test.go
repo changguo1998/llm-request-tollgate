@@ -552,20 +552,6 @@ func TestFlowRowsSortByIDDesc(t *testing.T) {
 	}
 }
 
-// 整十的编号前加 "*", 其余原样; 编号 0 不存在, 不加。
-func TestFlowIDCellMarksTens(t *testing.T) {
-	for _, tc := range []struct {
-		id   uint64
-		want string
-	}{
-		{9, "9"}, {10, "*10"}, {11, "11"}, {20, "*20"}, {100, "*100"},
-	} {
-		if got := flowIDCell(tc.id); got != tc.want {
-			t.Errorf("flowIDCell(%d) = %q, 期望 %q", tc.id, got, tc.want)
-		}
-	}
-}
-
 // flowTitleRows 找出第 1 页各分块标题所在的行号 (下标对应 flowBlocks 的顺序)。
 func flowTitleRows(t *testing.T, out string) []int {
 	t.Helper()

@@ -38,22 +38,13 @@ func (m *tuiModel) flowCells(f flow) []string {
 		}
 	}
 	return []string{
-		flowIDCell(f.ID),
+		strconv.FormatUint(f.ID, 10),
 		f.Logical,
 		tag,
 		m.upModel(f.Up, f.Model),
 		m.durCell(f),
 		status,
 	}
-}
-
-// flowIDCell 是编号格: 整十的编号前加 "*", 让每十条有个肉眼可数的锚点。
-func flowIDCell(id uint64) string {
-	s := strconv.FormatUint(id, 10)
-	if id > 0 && id%10 == 0 {
-		return "*" + s
-	}
-	return s
 }
 
 // drawFlow 是第 1 页: 活动连接按流程阶段分块, 每块内按编号倒序 (大的在上)。列名固定在
