@@ -14,7 +14,7 @@ import (
 
 type logRec struct {
 	Ts        string `json:"ts"`
-	Req       uint64 `json:"req,omitempty"` // 本进程内的请求编号 (与观测面事件对齐; 重启后从头计)
+	Req       uint64 `json:"req,omitempty"` // 跨重启唯一的请求编号 ((分钟数+1)*100+分钟内序号, 见 observe_flow.go; 0 = 未派发的请求)
 	Logical   string `json:"logical"`
 	Upstream  string `json:"upstream"`
 	Model     string `json:"model"`

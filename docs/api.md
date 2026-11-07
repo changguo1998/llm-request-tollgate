@@ -213,7 +213,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
   `segs` (各阶段已结算的累计耗时, 秒, 下标 =
   `stage`)、`cur_at` (当前阶段进入时刻, Unix 毫秒, TUI 用它现算正在走的那一段) 与
   `max_stage` (到过的最远阶段, TUI 据此决定写几段).
-- `events` 每条: `seq` / `ts` / `kind` / `req` (本进程内的请求编号, 省略 = 不挂某笔请求) /
+- `events` 每条: `seq` / `ts` / `kind` / `req` (跨重启唯一的请求编号, 省略 = 不挂某笔请求) /
   `logical` / `upstream` / `model` / `msg`. `kind`: `stage` (请求阶段战报) / `ok` / `error`
   (收尾) / `gate` (进入退避) / `lock` / `unlock` / `probe` / `start` / `reload`.
   阶段战报与收尾带 `req` + `logical`; 锁 / 探测 / 启动没有 `req`, 消费方按 `upstream` /
@@ -228,7 +228,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 | 字段 | 含义 |
 |---|---|
 | `ts` | 结束时刻 (RFC3339Nano) |
-| `req` | 本进程内的请求编号 (与 `/state` 事件的 `req` 对齐; 重启后从头计, 可省略) |
+| `req` | 跨重启唯一的请求编号 = (自最近一次某月 1 日 03:00 本地起的分钟数 + 1) * 100 + 该分钟内的请求序号, 进程重启后从更大的分钟数继续, 不回落; 跨月回绕时以 `ts` 里的月份区分; 可省略 |
 | `logical` | 请求的逻辑模型名 |
 | `upstream` | 实际服务的上游 id |
 | `model` | 实际服务的真实模型 id |

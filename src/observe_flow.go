@@ -41,11 +41,37 @@ func (a *App) eventsSince(since uint64) ([]viewEvent, uint64) {
 	return out, a.evNext
 }
 
+// monthBefore03 返回 t 之前最近的一个「某月 1 日 03:00 本地」时刻: 月初 03:00 之后
+// (含) 基准是当月 1 日 03:00, 之前基准是上月 1 日 03:00。编号的月边界落在凌晨 3 点,
+// 不影响月末回绕的唯一性复查 (跨月要靠日志 ts 里的日期与分钟数一起看)。
+func monthBefore03(t time.Time) time.Time {
+	y, m, _ := t.Date()
+	loc := t.Location()
+	cur := time.Date(y, m, 1, 3, 0, 0, 0, loc)
+	if !t.Before(cur) {
+		return cur
+	}
+	prev := time.Date(y, m, 1, 0, 0, 0, 0, loc).AddDate(0, -1, 0)
+	return time.Date(prev.Year(), prev.Month(), 1, 3, 0, 0, 0, loc)
+}
+
+// minsSinceBase 是 t 距基准时刻的整分钟数 (向下取整)。
+func minsSinceBase(t, base time.Time) int {
+	return int(t.Sub(base) / time.Minute)
+}
+
+// flowStart 为一笔请求分配跨重启唯一的编号并登记进进行中表。编号 = (分钟数+1)*100 +
+// 该分钟内从 0 起的请求序号: 分钟数单调递增, 重启后从更大的分钟数继续, 不回落到旧的小号;
+// +1 偏移保证编号最小 100, 与「无编号 = 0」不冲突。每笔请求只会走到这一步一次。
 func (a *App) flowStart(logical, source, path string, stream bool) uint64 {
 	now := time.Now()
 	a.flowMu.Lock()
-	a.nextFlow++
-	id := a.nextFlow
+	mins := minsSinceBase(now, monthBefore03(now))
+	if mins != a.idMin {
+		a.idMin, a.idSeq = mins, 0
+	}
+	id := uint64(mins+1)*100 + uint64(a.idSeq)
+	a.idSeq++                        // 同一分钟的第 100 笔起序号自然超出 2 位并继续递增, 保持唯一
 	if len(a.flows) >= viewActives { // 兜底: 异常堆积时丢最老的, 不让它无界长
 		oldest, ok := uint64(0), false
 		for k := range a.flows {

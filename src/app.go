@@ -46,12 +46,15 @@ type App struct {
 
 	// 只读观测面 (TUI): 进行中的请求、最近事件、事件序号。纯内存、不落盘、不参与记账,
 	// 服务重启即清空 —— 明细的事实来源仍是日志。
-	flowMu   sync.Mutex
-	flows    map[uint64]*flow
-	nextFlow uint64
-	evMu     sync.Mutex
-	events   [viewEvents]viewEvent
-	evNext   uint64 // 累计事件序号 (TUI 拿它当起点, 只取新增的那部分)
+	flowMu sync.Mutex
+	flows  map[uint64]*flow
+	// 跨重启唯一的请求编号: 分钟数 (自最近一次「某月 1 日 03:00 本地」起, 见 observe_flow.go)
+	// + 该分钟内从 0 起的请求序号。下一笔在 idMin 不变时序号 +1, 分钟变化时序号归零。
+	idMin  int
+	idSeq  int
+	evMu   sync.Mutex
+	events [viewEvents]viewEvent
+	evNext uint64 // 累计事件序号 (TUI 拿它当起点, 只取新增的那部分)
 }
 
 type aliasTarget struct {
