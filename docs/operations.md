@@ -249,13 +249,13 @@ python3 scripts/gen_tollgate_config.example.py
 ### 8.2 全量自测 (假上游, 不影响真上游)
 
 ```bash
-./test/run_selftest.sh all       # 16 组用例, 每用例独立起假上游 + 代理
-./test/run_selftest.sh <case>    # 跑单组: alias|keyenv|fallback|fallback-gate|breaker|quota|rotate|stream|usage|usage-report|ratelimit|logging|overhead|responses|hup
+./test/run_selftest.sh all       # 17 组用例, 每用例独立起假上游 + 代理
+./test/run_selftest.sh <case>    # 跑单组: alias|keyenv|fallback|fallback-gate|breaker|quota|rotate|stream|usage|usage-report|ratelimit|logging|overhead|responses|hup|reqid
 ```
 
 产物在 `test/tmp/` (gitignored). 用例覆盖: 白名单 404 / 认证替换 / fallback 与闸门 /
 熔断与额度锁 / 隔天轮转 / 流式透传与断流 / usage 提取与兜底 / 节拍与并发挡下 / 日志字
-段 / 开销 / /v1/responses / SIGHUP 热加载.
+段 / 开销 / /v1/responses / SIGHUP 热加载 / 请求编号跨重启唯一 (reqid).
 
 ## 9. 排障
 

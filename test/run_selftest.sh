@@ -2,7 +2,7 @@
 # llm-request-tollgate 自测: 对本地假上游跑代理, 按用例断言 (设计 §4.7)。
 #
 # 用法: test/run_selftest.sh <case|all>
-#   case: alias | keyenv | fallback | fallback-gate | breaker | quota | rotate | ratelimit | usage | usage-report | stream | logging | overhead | responses | hup
+#   case: alias | keyenv | fallback | fallback-gate | breaker | quota | rotate | ratelimit | usage | usage-report | stream | logging | overhead | responses | hup | reqid
 # 每个用例独立起一个假上游 + 一个代理 (各自端口, 互不干扰)。
 set -u
 
@@ -844,6 +844,63 @@ case_hup() {
         pass "门控节拍热加载生效 (queue_ms=${qms}ms >= 400)" || fail "节拍未热加载 (code=$code queue_ms=$qms)"
 }
 
+# reqid: 请求编号跨重启唯一 —— 自最近一次「某月 1 日 03:00 本地」起的分钟数 (+1 偏移,
+# 最小 100, 不与「无编号 0」冲突) 拼当分钟内从 0 起的请求序号; 分钟内连续 +1, 重启后
+# 分钟基数不回退。
+case_reqid() {
+    say "=== reqid (请求编号: 分钟基数 + 分钟内序号, 跨重启不回落) ==="
+    local LOG="$TMP/log-reqid.jsonl"
+    rm -f "$LOG"
+    gen_config1 "$TMP/cfg-reqid.json" 18850 "$LOG" 19050 fu true 20 400 400 test-model
+    start_fake 19050 20
+    start_proxy 18850 "$TMP/cfg-reqid.json"
+
+    # 3 笔连续请求: 每笔都带编号, 进程内编号严格递增 (无重复)。
+    local i code
+    for i in 1 2 3; do
+        code=$(post 18850 '{"model":"test-model","messages":[{"role":"user","content":"hi"}]}')
+        [ "$code" = "200" ] || fail "reqid 第 $i 笔 -> $code (want 200)"
+    done
+    local ids n dup minid maxid mins
+    ids=$(jq -r 'select(.upstream=="fu" and .req>0) | .req' "$LOG")
+    n=$(printf '%s\n' "$ids" | wc -l | tr -d ' ')
+    [ "$n" = "3" ] && pass "3 笔日志都带请求编号" || fail "带编号的日志行数=$n (want 3)"
+    dup=$(printf '%s\n' "$ids" | sort -n | uniq -d | wc -l | tr -d ' ')
+    [ "$dup" = "0" ] && pass "进程内编号无重复" || fail "编号重复: $(printf '%s\n' "$ids" | sort -n | uniq -d | tr '\n' ' ')"
+    minid=$(printf '%s\n' "$ids" | sort -n | head -1)
+    maxid=$(printf '%s\n' "$ids" | sort -n | tail -1)
+    [ "$minid" -ge 100 ] && pass "编号 >= 100 (不与无编号 0 冲突, 最小 $minid)" || fail "最小编号 $minid (< 100)"
+
+    # 编号的分钟基数 (编号 / 100) 与墙钟算出的「自当月 1 日 03:00 起的分钟数 + 1」对齐,
+    # 容差 2 分钟 (测试可能跨分钟).
+    local walldiff lo hi
+    walldiff=$(( ( $(date +%s) - $(date -d "$(date +%Y-%m)-01 03:00" +%s) ) / 60 ))
+    mins=$(( maxid / 100 ))
+    lo=$(( walldiff ))
+    hi=$(( walldiff + 2 ))
+    if [ "$mins" -ge "$lo" ] && [ "$mins" -le "$hi" ]; then
+        pass "编号分钟基数对齐墙钟 (编号/100=$mins, 期望 $lo-$hi)"
+    else
+        fail "编号分钟基数=$mins, 期望区间 $lo-$hi"
+    fi
+
+    # 重启进程: 新请求的编号与重启前最后一笔不同 (序号从头数), 且分钟基数不回退。
+    local pid lastold last
+    pid="${PROCS[${#PROCS[@]} - 1]}"
+    lastold=$(jq -r 'select(.upstream=="fu" and .req>0) | .req' "$LOG" | tail -1)
+    kill "$pid"
+    wait "$pid" 2> /dev/null
+    start_proxy 18850 "$TMP/cfg-reqid.json"
+    code=$(post 18850 '{"model":"test-model","messages":[{"role":"user","content":"hi"}]}')
+    [ "$code" = "200" ] && pass "重启后新请求 200" || fail "重启后 -> $code"
+    last=$(jq -r 'select(.upstream=="fu" and .req>0) | .req' "$LOG" | tail -1)
+    [ "$last" = "$lastold" ] \
+        && fail "重启后编号与旧进程最后一笔相同 ($last)" \
+        || pass "重启后编号与旧进程最后一笔不同 (旧 $lastold -> 新 $last)"
+    [ "$last" -ge "$mins" ] \
+        && pass "重启后编号分钟基数不回退" || fail "重启后编号分钟基数回退 ($last / 100 = $(( last / 100 )))"
+}
+
 # ---------- 分发 ----------
 
 case_responses() {
@@ -916,6 +973,7 @@ case_all() {
     case_overhead
     case_responses
     case_hup
+    case_reqid
 }
 
 main() {
@@ -939,6 +997,7 @@ main() {
         overhead) case_overhead ;;
         responses) case_responses ;;
         hup) case_hup ;;
+        reqid) case_reqid ;;
         all) case_all ;;
         *)
             say "unknown case: $1"

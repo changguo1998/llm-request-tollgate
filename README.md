@@ -71,7 +71,7 @@
 make build   # 源码在 src/, 二进制产出到根目录 (等价 cd src && go build -o ../llm-request-tollgate .)
 # 填好 config.local.json (从 config.example.json 复制) 后:
 ./llm-request-tollgate -config config.local.json
-# 起假上游 + 全量自测 (16 组用例 117 项断言):
+# 起假上游 + 全量自测 (17 组用例 128 项断言):
 ./test/run_selftest.sh all
 # 常驻 (systemd 用户服务, 崩了自动拉起). 部署模板示例在
 # deploy/tollgate.service.example (仓库不跟踪本机版 tollgate.service:
@@ -306,7 +306,7 @@ token) 与 `-usage` (上游 + 模型 × 窗口的 token 分解)。
   支持中途断流, 验证 F6)。
 - `analysis/` 历史请求日志的分析脚本 (只读 `var/` 的 JSONL 归档, 评估锁阈值)。
 - `Makefile` 根目录唯一构建入口 (build / vet / test / fmt 都在 `src/` 下跑, 二进制产出到根目录)。
-- `test/run_selftest.sh` 自测: 16 组用例 117 项断言, 对本地假上游跑代理。
+- `test/run_selftest.sh` 自测: 17 组用例 128 项断言, 对本地假上游跑代理。
 - `test/healthcheck.example.sh` 自检示例: 二进制 / 配置 (-check) / 端口三项, 退出码
   0 = 全通过 (本机版 `healthcheck.sh` 在 dotfiles, 多一项 fff 密钥自动加载)。
 - `deploy/` 常驻: `tollgate.service.example` 模板 (公开示例, 本机版 `tollgate.service`
