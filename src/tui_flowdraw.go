@@ -51,7 +51,7 @@ func (m *tuiModel) flowCells(f flow) []string {
 // 页签下方, 不随内容滚走;
 // 分块内容单独滚动 (up/down 只动分块), 块与块之间不再空行 (标题自带分隔); 每块的数据
 // 行区高度按窗口统计定参考、再用此刻笔数校准 (flowMinRows): 笔数多按实际留, 空块最少
-// 1 行, 有空行时也不超过 6 行, 于是各块位置相对稳定。
+// 1 行撑住版式, 于是各块位置相对稳定。
 // 列按全部请求一起算: 表头只有一份, 各块必须同列同宽。
 // 分块下面是上游状态与模型/路由聚合两张表 (drawModelsBody), 与分块一起滚动。
 func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {

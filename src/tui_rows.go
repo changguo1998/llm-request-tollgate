@@ -23,8 +23,8 @@ var flowBlocks = []struct {
 	{"已失败", []int{stageFailed}},
 }
 
-// defaultMinRows 是各块数据行区的缺省档: 统计窗口里还没有样本时用这一档。
-var defaultMinRows = []int{4, 4, 2, 4, 2, 2}
+// defaultMinRows 是各块数据行区的缺省档: 统计窗口里还没有样本时用这一档 (每块 1 行)。
+var defaultMinRows = []int{1, 1, 1, 1, 1, 1}
 
 // 行数统计的权重与样本上限 (取观测面每秒一拍; 样本按高斯权重衰减, 2h 的样本留在内存里)。
 // 高斯的时间尺度 t0 是实测的平均停留时长: 停留这么久的样本权重 0.9, 2 倍处 0.66, 3 倍处
@@ -46,7 +46,7 @@ type rowSample struct {
 // flowMinRows 给每个分块定数据行区高度: 参考行数来自一段时间的统计, 最后用此刻的笔数校准。
 // 参考行数 (blockRefRows): 每个样本先算各块笔数占该样本在飞笔数的比例, 再按高斯权重对各
 // 样本的比例取加权平均 (近的重、远的轻, 于是某一段时间挂着很多笔不会独占统计), 乘以「同时在飞
-// 笔数峰值」(总并发数), 四舍五入成参考行数, 1 至 6 行。
+// 笔数峰值」(总并发数), 四舍五入成参考行数, 至少 1 行 (不设上限)。
 // 校准: 行数 = max(此刻笔数, 参考行数, 1)。笔数超过参考值时按实际留, 有空行的块也不把
 // 请求藏起来; 空块最少留 1 行撑住版式。
 func (m *tuiModel) flowMinRows() []int {
@@ -177,13 +177,10 @@ func blockTotal(cnt []int) int {
 	return n
 }
 
-// clampRows 把行数夹进 1 至 6 行: 至少 1 行撑版式, 最多 6 行不占满屏。
+// clampRows 保证行数至少 1 行撑版式, 不设上限。
 func clampRows(n int) int {
 	if n < 1 {
 		return 1
-	}
-	if n > 6 {
-		return 6
 	}
 	return n
 }
