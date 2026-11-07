@@ -27,12 +27,12 @@ var flowBlocks = []struct {
 var defaultMinRows = []int{4, 4, 2, 4, 2, 2}
 
 // 行数统计的权重与样本上限 (取观测面每秒一拍; 样本按高斯权重衰减, 2h 的样本留在内存里)。
-// 高斯的时间尺度 t0 是实测的平均停留时长: 停留这么久的样本权重 0.8, 2 倍处 0.41, 3 倍处
-// 0.13 (公式 0.8^((age/t0)²)); 权重低于 gaussKeep 的样本 (约 5.6 倍 t0 之前) 不再参与统计。
+// 高斯的时间尺度 t0 是实测的平均停留时长: 停留这么久的样本权重 0.9, 2 倍处 0.66, 3 倍处
+// 0.39 (公式 0.9^((age/t0)²)); 权重低于 gaussKeep 的样本 (约 8.1 倍 t0 之前) 不再参与统计。
 // 还没测到停留时长时用 rowStatTau0 兜底。
 const (
 	rowStatTau0 = 35 * time.Second
-	gaussAtTau  = 0.8
+	gaussAtTau  = 0.9
 	gaussKeep   = 1e-3
 	rowHistMax  = 7200
 )
@@ -101,7 +101,7 @@ func (m *tuiModel) noteRows(now time.Time) {
 // 再按高斯权重 (离参看时刻越远越轻) 对各样本的比例取加权平均, 最后乘「同时在飞笔数峰值」
 // (总并发数), 四舍五入成参考行数。
 // 权重的时间尺度 t0 = 实测平均停留时长 (从开始请求信号量到请求结束): 停留 t0 那么久的样本
-// 权重 0.8, 见 gaussWeight。
+// 权重 0.9, 见 gaussWeight。
 // 参看时刻: 此刻有进行中的请求就用当前时间, 没有就用最后一次请求结束的时刻 (最后一个非空
 // 样本), 于是空闲一阵之后仍然沿用上一段有请求的数据, 版式不塌回缺省档。权重低于 gaussKeep
 // 的样本直接跳过, 没有硬截断, 只是越远的样本越轻。第二个返回值 = 有没有可用的样本。
@@ -157,8 +157,8 @@ func (m *tuiModel) rowTau() time.Duration {
 	return time.Duration(m.durSum/m.durN) * time.Millisecond
 }
 
-// gaussWeight 是样本的高斯权重: 停留 t0 那么久时为 0.8, 越远越轻, 写作 0.8^((age/t0)²)
-// (指数的底换成 e: exp((age/t0)² · ln 0.8))。
+// gaussWeight 是样本的高斯权重: 停留 t0 那么久时为 0.9, 越远越轻, 写作 0.9^((age/t0)²)
+// (指数的底换成 e: exp((age/t0)² · ln 0.9))。
 func gaussWeight(at, ref time.Time, tau time.Duration) float64 {
 	t := tau.Seconds()
 	if t <= 0 {

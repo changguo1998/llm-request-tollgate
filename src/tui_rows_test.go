@@ -15,7 +15,7 @@ func TestFlowMinRowsFallback(t *testing.T) {
 
 // 行数 = max(此刻笔数, 参考行数, 1); 参考行数 = 各样本占比按高斯权重平均后乘以同时在飞
 // 笔数峰值。取比例的平均而不是累计耗时的比例: 某一刻挂着很多笔不会独占统计; 远的样本按
-// 高斯衰减 (平均耗时处的权重 0.8), 没有硬截断。
+// 高斯衰减 (平均耗时处的权重 0.9), 没有硬截断。
 func TestFlowMinRowsWindow(t *testing.T) {
 	now := time.Now()
 	k := len(flowBlocks)
@@ -28,7 +28,7 @@ func TestFlowMinRowsWindow(t *testing.T) {
 		return s
 	}
 	m := newTUIModel("cfg")
-	// 日志里还没有请求时 t0 取缺省 35s: 1min 前的样本权重 0.8^((60/35)²)≈0.52, 刚发生的为 1,
+	// 日志里还没有请求时 t0 取缺省 35s: 1min 前的样本权重 0.9^((60/35)²)≈0.73, 刚发生的为 1,
 	// 峰值为 8, 于是已发送 3 行, 接收中 5 行。
 	m.rowHist = []rowSample{
 		sample(now.Add(-2*time.Minute), map[int]int{3: 1}),
@@ -45,16 +45,16 @@ func TestFlowMinRowsWindow(t *testing.T) {
 	if got := m.flowMinRows()[4]; got != 10 {
 		t.Errorf("接收中块应按 10 笔留 10 行, 得到 %d", got)
 	}
-	// 高斯权重按日志里的平均耗时缩放: t0 = 10s 时, 20s 前的 8 笔样本权重只剩 0.8⁴≈0.41,
-	// 近的 1 笔接收中几乎独占统计 (参考行数 6 行封顶), 旧样本只把峰值抬到 8。
+	// 高斯权重按日志里的平均耗时缩放: t0 = 10s 时, 20s 前的 8 笔样本权重 0.9⁴≈0.66,
+	// 近的 1 笔接收中权重 1, 按占比给行数 (已发送 3 行, 接收中 5 行), 旧样本只把峰值抬到 8。
 	m.pulse.Active = nil
 	m.durSum, m.durN = 10000, 1 // 平均耗时 10s
 	m.rowHist = []rowSample{
 		sample(now.Add(-80*time.Second), map[int]int{3: 8}),
 		sample(now.Add(-time.Minute), map[int]int{4: 1}),
 	}
-	if got := m.flowMinRows(); got[3] != 2 || got[4] != 6 {
-		t.Errorf("远的样本应按高斯衰减 (已发送 2 行, 接收中 6 行), 得到 %v", got)
+	if got := m.flowMinRows(); got[3] != 3 || got[4] != 5 {
+		t.Errorf("远的样本应按高斯衰减 (已发送 3 行, 接收中 5 行), 得到 %v", got)
 	}
 	// 最近一段全是空样本: 参看时刻仍是最后一个有请求的样本, 不塌回缺省档。
 	m.durSum, m.durN = 0, 0

@@ -175,18 +175,18 @@ func TestSegStr(t *testing.T) {
 	}
 }
 
-// gaussWeight: 参看时刻权重 1, 停留 t0 那么久权重 0.8, 越远越轻; t0 无效时权重恒为 1。
+// gaussWeight: 参看时刻权重 1, 停留 t0 那么久权重 0.9, 越远越轻; t0 无效时权重恒为 1。
 func TestGaussWeight(t *testing.T) {
 	ref := time.Now()
 	tau := 10 * time.Second
 	if got := gaussWeight(ref, ref, tau); got != 1 {
 		t.Errorf("同时刻权重应为 1, 得到 %v", got)
 	}
-	if got := gaussWeight(ref.Add(-tau), ref, tau); math.Abs(got-0.8) > 1e-9 {
-		t.Errorf("t0 处的权重应为 0.8, 得到 %v", got)
+	if got := gaussWeight(ref.Add(-tau), ref, tau); math.Abs(got-0.9) > 1e-9 {
+		t.Errorf("t0 处的权重应为 0.9, 得到 %v", got)
 	}
-	if got := gaussWeight(ref.Add(-2*tau), ref, tau); math.Abs(got-0.4096) > 1e-9 {
-		t.Errorf("2 倍 t0 处权重应为 0.8⁴ = 0.4096, 得到 %v", got)
+	if got := gaussWeight(ref.Add(-2*tau), ref, tau); math.Abs(got-0.6561) > 1e-9 {
+		t.Errorf("2 倍 t0 处权重应为 0.9⁴ = 0.6561, 得到 %v", got)
 	}
 	if got, far := gaussWeight(ref.Add(-10*tau), ref, tau), gaussWeight(ref.Add(-2*tau), ref, tau); got >= far {
 		t.Errorf("越远的样本权重应越小: %v >= %v", got, far)
