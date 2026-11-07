@@ -147,39 +147,76 @@ func openTestPTY(t *testing.T, rows, cols int) {
 	ioctlCall(f.Fd(), syscall.TIOCSWINSZ, unsafe.Pointer(&tuiWinsize{Row: uint16(rows), Col: uint16(cols)}))
 }
 
-// packPieces 按可见宽度拼行: 放不下就换行, 换行后的片段去掉前导分隔, 每行不超过宽度。
-func TestPackPieces(t *testing.T) {
-	lines := packPieces([]string{"状态 live", "   进行中 3", "   已读日志 128 条", "   运行 12m3s"}, 16)
-	if len(lines) < 2 {
-		t.Fatalf("宽度 16 应折成多行, 得到 %q", lines)
-	}
-	for i, ln := range lines {
-		if w := tuiWidth(ln); w > 16 {
-			t.Errorf("第 %d 行宽 %d 超过 16: %q", i+1, w, ln)
-		}
-		if i > 0 && strings.HasPrefix(ln, " ") {
-			t.Errorf("折行后的行不该带前导空格: %q", ln)
-		}
-	}
-	// 单段自己就超宽时截断成一行。
-	one := packPieces([]string{strings.Repeat("x", 40)}, 10)
-	if len(one) != 1 || tuiWidth(one[0]) > 10 {
-		t.Errorf("超宽单段应截断成一行, 得到 %q", one)
-	}
-}
-
-// 窄终端: 状态行折行, 内容区相应缩小, 键位仍贴底。
+// 顶栏状态区固定 2 行 (实时 + 统计), 不随终端宽窄折行; 键位仍贴底。
 func TestStatusLineWrapsAndHintStays(t *testing.T) {
 	openTestPTY(t, 24, 80)
 	m := newTUIModel("cfg")
 	m.pulse.Cands = []candView{{ID: "ustc", SoftCap: 1}}
 	out := m.draw()
-	if m.statusRows < 2 {
-		t.Errorf("80 列时状态行应折成多行, 得到 %d 行", m.statusRows)
+	if m.statusRows != 2 {
+		t.Errorf("顶栏状态区应固定 2 行, 得到 %d 行", m.statusRows)
 	}
 	hintRow := strings.Count(out[:strings.Index(out, "q 退出")], "\r\n") + 1
 	if hintRow != 24 {
 		t.Errorf("键位应贴底 (第 24 行), 实际第 %d 行", hintRow)
+	}
+}
+
+// 顶栏三行: 标题 / 实时状态 / 统计状态。第 2 行是实时值 (live / 进行中 / 路由 /
+// 首字节 / 进行中流量 / 运行 / 窗口), 第 3 行是窗口累计 (已读日志 / 请求 / 错误 /
+// 换候选 / 总 token), 报错与 no-state 各归其位。
+func TestHeaderRealTimeAndStatsRows(t *testing.T) {
+	openTestPTY(t, 30, 140)
+	now := time.Now()
+	m := newTUIModel("cfg")
+	m.live = true
+	m.scanned = 42
+	m.pulse.Active = []flow{
+		{ID: 1, Logical: "m", Up: "ustc", Model: "m1", Stage: stageRecv, StartTime: now,
+			RecvBytes: 1<<20 + 5},
+		{ID: 2, Logical: "m", Up: "ustc", Model: "m1", Stage: stageRecv, StartTime: now,
+			RecvBytes: 1 << 10},
+	}
+	m.routes = map[string]*routeRow{
+		"k": {Logical: "m", Upstream: "ustc", Model: "m1", Reqs: 3, Errs: 1, Fallbacks: 2,
+			Total: 500, Cached: 300,
+			TtfbPts: []ttfbPoint{
+				{ts: now.Add(-time.Minute), ms: 200},
+				{ts: now.Add(-2 * time.Minute), ms: 400},
+			},
+			Last: now},
+	}
+	lines := strings.Split(stripANSI(m.draw()), "\r\n")
+	if len(lines) < 3 {
+		t.Fatalf("顶栏应有 3 行, 得到 %d 行", len(lines))
+	}
+	// 第 2 行 (下标 1): 实时状态 (首字节 平均 300ms/谷值 200ms, 活跃字节 1M+).
+	rt := lines[1]
+	for _, want := range []string{"状态 live", "进行中 2", "路由 1 条",
+		"首字节 0.3s/0.2s", "流量 1M", "窗口 03:00:00"} {
+		if !strings.Contains(rt, want) {
+			t.Errorf("实时行缺 %q: %q", want, rt)
+		}
+	}
+	// 第 3 行 (下标 2): 统计状态。
+	st := lines[2]
+	for _, want := range []string{"已读日志 42 条", "3 请求", "1 错误",
+		"2 次换候选", "500 token (缓存 60%)"} {
+		if !strings.Contains(st, want) {
+			t.Errorf("统计行缺 %q: %q", want, st)
+		}
+	}
+	// 无观测面: 实时行状态位写 no-state。
+	m2 := newTUIModel("cfg")
+	lines2 := strings.Split(stripANSI(m2.draw()), "\r\n")
+	if !strings.Contains(lines2[1], "状态 no-state") {
+		t.Errorf("无观测面时实时行应写 no-state: %q", lines2[1])
+	}
+	// 最近报错跟在统计行末尾。
+	m2.errf("观测面不可达: 测试")
+	lines2 = strings.Split(stripANSI(m2.draw()), "\r\n")
+	if !strings.Contains(lines2[2], "观测面不可达: 测试") {
+		t.Errorf("报错应出现在统计行末: %q", lines2[2])
 	}
 }
 

@@ -148,47 +148,42 @@ func (m *tuiModel) routeRows() []*routeRow {
 	return out
 }
 
-func (m *tuiModel) routeSummary(rows []*routeRow) string {
-	var reqs, errs, fb, total, cached int
-	var ttfbPts []ttfbPoint
-	var first, last time.Time
+// routeAgg 是窗口内所有路由聚合后的计数, 顶栏的实时行与统计行共用这一次遍历。
+type routeAgg struct {
+	reqs, errs, fb, total int
+	ttfbPts               []ttfbPoint
+	cache                 string // 缓存占比 ("-" = 窗口内没有请求)
+}
+
+// aggRoutes 遍历路由行, 聚合请求计数、token 与首字节样本 (顶栏统计行用)。
+func aggRoutes(rows []*routeRow) routeAgg {
+	var a routeAgg
+	var cached int
 	for _, r := range rows {
-		reqs += r.Reqs
-		errs += r.Errs
-		fb += r.Fallbacks
-		total += r.Total
+		a.reqs += r.Reqs
+		a.errs += r.Errs
+		a.fb += r.Fallbacks
+		a.total += r.Total
 		cached += r.Cached
-		ttfbPts = append(ttfbPts, r.TtfbPts...)
-		if r.First.IsZero() {
-			continue
-		}
-		if first.IsZero() || r.First.Before(first) {
-			first = r.First
-		}
-		if last.IsZero() || r.Last.After(last) {
-			last = r.Last
-		}
+		a.ttfbPts = append(a.ttfbPts, r.TtfbPts...)
 	}
-	span := "n/a"
-	if !first.IsZero() {
-		span = durStr(last.Sub(first))
+	a.cache = "-"
+	if a.total > 0 {
+		a.cache = ftoa(float64(cached)*100/float64(a.total), 0) + "%"
 	}
-	cache := "-"
-	if total > 0 {
-		cache = ftoa(float64(cached)*100/float64(total), 0) + "%"
+	return a
+}
+
+// ttfbCell 首字节汇总: 窗口内平均/谷值 (与模型表列同一口径)。
+func (m *tuiModel) ttfbCell(a routeAgg) string {
+	if len(a.ttfbPts) == 0 {
+		return "-"
 	}
-	// 首字节汇总与表格列同口径: 平均/谷值。
-	ttfb := "-"
-	if len(ttfbPts) > 0 {
-		if avg, ok := ttfbAvg(ttfbPts, time.Now(), m.rateWin); ok {
-			ttfb = durStr(time.Duration(avg)*time.Millisecond) + "/" +
-				durStr(time.Duration(ttfbMin(ttfbPts))*time.Millisecond)
-		}
+	if avg, ok := ttfbAvg(a.ttfbPts, time.Now(), m.rateWin); ok {
+		return durStr(time.Duration(avg)*time.Millisecond) + "/" +
+			durStr(time.Duration(ttfbMin(a.ttfbPts))*time.Millisecond)
 	}
-	return "窗口 " + durStr(m.window) + " (实际 " + span + ")   " + strconv.Itoa(len(rows)) + " 条路由   " +
-		strconv.Itoa(reqs) + " 请求   " + strconv.Itoa(errs) + " 错误   " +
-		strconv.Itoa(fb) + " 次换候选   " + strings.TrimLeft(humanTokens(total), " ") + " token (缓存 " + cache +
-		")   首字节 平均/谷值: " + ttfb
+	return "-"
 }
 
 // mages 是"最近一次"列的写法: 距现在多久 (与其它时长同一口径)。

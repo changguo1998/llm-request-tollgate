@@ -16,7 +16,7 @@ func (m *tuiModel) draw() string {
 		m.cols = 60
 	}
 	c := &tuiCanvas{cols: m.cols}
-	// 版式: 标题 / 状态 (含路由聚合汇总) / 页签 / 内容 / ... / 键位 (贴底);
+	// 版式: 标题 / 实时状态 / 统计状态 / 页签 / 内容 / ... / 键位 (贴底);
 	// 上游状态并进第 1 页正文。上游专属色按上游表的固定顺序分配, 各页同色; 红黄绿的正色
 	// 留给状态, 上游用的是它们的亮色变体。
 	m.upColors = make(map[string]string, len(m.pulse.Cands))
@@ -46,7 +46,7 @@ func (m *tuiModel) draw() string {
 	return "\x1b[H" + c.clip(m.rows)
 }
 
-// bodyRows 是内容区行数: 固定区占 标题 + 状态 (可能折行) + 页签 + 键位, 其余全部给内容。
+// bodyRows 是内容区行数: 固定区占 标题 + 实时状态 + 统计状态 + 页签 + 键位, 其余全部给内容。
 // 布局不用空行做分隔, 屏幕上每一行都是内容或键位。
 func (m *tuiModel) bodyRows() int {
 	if body := m.rows - 3 - m.statusRows; body >= 3 {
@@ -143,58 +143,36 @@ func (m *tuiModel) drawHeader(c *tuiCanvas) {
 	// 第 1 行整行都用前景色 (只有程序名加粗): 灰字在深色终端上太弱。
 	c.line(tuiIndent + tuiBold + "tollgate tui" + tuiReset + "  观测 " + src +
 		"   监听 " + m.listen + "   日志 " + m.logPath)
-	act := len(m.pulse.Active)
-	// 各段自带前导分隔: 换行到下一行时由 packPieces 去掉, 段间间距保持原样。
-	pieces := []string{
-		"状态 " + live,
-		"   进行中 " + strconv.Itoa(act),
-		"   已读日志 " + strconv.Itoa(m.scanned) + " 条",
-		"   运行 " + durStr(time.Since(m.start)),
-	}
+	// 第 2 行实时状态: 此刻正在发生什么 (连接 / 路由 / 首字节 / 活跃字节 / 运行 / 窗口)。
+	// 第 3 行统计状态: 窗口内的累计计数 (读日志 / 请求 / 错误 / 换候选 / token), 报错放行末。
+	// 两行各固定一行, 超宽由 line 截断 (不再折行)。
+	rows := m.routeRows()
+	a := aggRoutes(rows)
+	c.line(tuiIndent + "状态 " + live +
+		"   进行中 " + strconv.Itoa(len(m.pulse.Active)) +
+		"   路由 " + strconv.Itoa(len(rows)) + " 条" +
+		"   首字节 " + m.ttfbCell(a) +
+		"   流量 " + strings.TrimLeft(humanByte(float64(m.activeBytes())), " ") +
+		"   运行 " + durStr(time.Since(m.start)) +
+		"   窗口 " + durStr(m.window))
+	stats := "已读日志 " + strconv.Itoa(m.scanned) + " 条   " +
+		strconv.Itoa(a.reqs) + " 请求   " + strconv.Itoa(a.errs) + " 错误   " +
+		strconv.Itoa(a.fb) + " 次换候选   " + strings.TrimLeft(humanTokens(a.total), " ") +
+		" token (缓存 " + a.cache + ")"
 	if e := m.lastError(); e != "" {
-		pieces = append(pieces, "   "+tuiYell+e+tuiReset)
+		stats += "   " + tuiYell + e + tuiReset
 	}
-	// 路由聚合的整体状态 (窗口 / 请求 / 错误 / 换候选 / token / 首字节) 接在状态行末尾;
-	// 排在错误提示之后, 免得长行先把报错截掉。按空格切段, 太长时在词边界换行。
-	for i, f := range strings.Fields(m.routeSummary(m.routeRows())) {
-		if i == 0 {
-			pieces = append(pieces, "   "+f)
-			continue
-		}
-		pieces = append(pieces, " "+f)
-	}
-	lines := packPieces(pieces, m.cols-len(tuiIndent))
-	for _, ln := range lines {
-		c.line(tuiIndent + ln)
-	}
-	m.statusRows = len(lines)
+	c.line(tuiIndent + stats)
+	m.statusRows = 2
 }
 
-// packPieces 把带前导分隔的片段按可见宽度拼成若干行: 放不下就换行并去掉该片段的前导
-// 空格; 单段自己就超宽时至多占一行 (截断), 段内不拆, 免得切断词或 ANSI 序列。
-func packPieces(pieces []string, width int) []string {
-	var lines []string
-	cur, curW := "", 0
-	for _, p := range pieces {
-		if p == "" {
-			continue
-		}
-		w := tuiWidth(p)
-		if cur != "" && width > 0 && curW+w > width {
-			lines = append(lines, cur)
-			p, cur, curW = strings.TrimLeft(p, " "), "", 0
-			w = tuiWidth(p)
-		}
-		if width > 0 && w > width {
-			p, w = tuiTrunc(p, width), width
-		}
-		cur += p
-		curW += w
+// activeBytes 是进行中请求已转发的响应字节总和 (接收中阶段的 RecvBytes)。
+func (m *tuiModel) activeBytes() int64 {
+	var n int64
+	for _, f := range m.pulse.Active {
+		n += f.RecvBytes
 	}
-	if cur != "" || len(lines) == 0 {
-		lines = append(lines, cur)
-	}
-	return lines
+	return n
 }
 
 // drawTabs 画页签行; 上游状态不放在顶端, 并进第 1 页正文。

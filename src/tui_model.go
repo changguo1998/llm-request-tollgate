@@ -37,7 +37,7 @@ type tuiModel struct {
 	scroll     [4]int // 每页各自的滚动位置: m.scroll[m.tab]
 	cols       int
 	rows       int
-	statusRows int       // 状态行折行后的物理行数 (窄终端会多行), 内容区高度按它扣
+	statusRows int       // 顶栏状态区固定占行数 (=2), 内容区高度按它扣
 	refreshed  time.Time // 上次重读日志/取观测的时刻 (按键连发时别每次都重读)
 	pageTotal  int       // 第 1 页 (分块 + 两张模型表) 的总行数 (滚动用)
 	pageTop    int       // 该页当前窗口的第一行
