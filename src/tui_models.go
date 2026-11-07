@@ -243,6 +243,19 @@ func (r *modelRow) blank() bool {
 		r.Last.IsZero()
 }
 
+// sweepRoutes 删掉最后一行日志已超出回看窗口 (m.window) 的路由聚合, 让超过 3h 的行
+// 在下一拍自动消失。聚合状态只增不减: 一行再没有新日志时, 增量路径不会裁它的旧样本,
+// 只有这里的定期清扫 (每个刷新周期跑一次, 见 refresh) 会按行移除。
+// Last 是该行最新一笔已消费日志的时间 (消费时已按窗口过滤过), 它超窗即整行数据都在窗口外。
+func (m *tuiModel) sweepRoutes() {
+	now := time.Now()
+	for k, r := range m.routes {
+		if !r.Last.IsZero() && now.Sub(r.Last) > m.window {
+			delete(m.routes, k)
+		}
+	}
+}
+
 // modelRows 合并观测面里的模型队列与日志聚合, 按 逻辑名 分组 (同一逻辑名的候选相邻):
 // 只保留真正有过请求的 上游/模型; 所有数据都是 0 / - 的行 (配置里有、但从没请求过)
 // 不进表。观测面的队列 / 锁状态没有逻辑名维度, 按 上游/模型 补到引用它的每组 —

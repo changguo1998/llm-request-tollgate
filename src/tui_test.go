@@ -251,3 +251,29 @@ func TestUpstreamNameColored(t *testing.T) {
 		t.Errorf("上游名没带专属色 %q", want)
 	}
 }
+
+// sweepRoutes: 最后一行日志已超出回看窗口的行被删掉, 窗口内的保留; Last 为空的行 (还没
+// 消费到日志) 不动。
+func TestSweepRoutes(t *testing.T) {
+	m := newTUIModel("cfg")
+	m.window = time.Hour
+	now := time.Now()
+	m.routes = map[string]*routeRow{
+		"fresh": {Last: now},
+		"old":   {Last: now.Add(-2 * time.Hour)},
+		"zero":  {},
+	}
+	m.sweepRoutes()
+	if _, ok := m.routes["fresh"]; !ok {
+		t.Errorf("窗口内的行不应被删")
+	}
+	if _, ok := m.routes["zero"]; !ok {
+		t.Errorf("Last 为空的行不应被删")
+	}
+	if _, ok := m.routes["old"]; ok {
+		t.Errorf("超窗的行应被删掉")
+	}
+	if len(m.routes) != 2 {
+		t.Errorf("应剩 2 行, 得到 %d: %+v", len(m.routes), m.routes)
+	}
+}

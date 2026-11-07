@@ -140,6 +140,7 @@ func runTUI(cfgPath, stateURL string) {
 		}
 		m.refreshed = time.Now()
 		m.pollLog()
+		m.sweepRoutes() // 顺手裁掉已超出回看窗口的路由聚合, 不用等按 r 才消失
 		since = m.pollState(app, since)
 	}
 	refresh(true)
