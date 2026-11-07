@@ -193,7 +193,7 @@ func TestHeaderRealTimeAndStatsRows(t *testing.T) {
 	// 第 2 行 (下标 1): 实时状态 (首字节 最近一次 200ms/平均 300ms, 活跃字节 1M+).
 	rt := lines[1]
 	for _, want := range []string{"状态 live", "进行中 2", "路由 1 条",
-		"首字节 0.2s/0.3s", "流量 1M", "窗口 03:00:00"} {
+		"首字节 0.2s/0.3s", "流量 1 MB/s", "窗口 03:00:00"} {
 		if !strings.Contains(rt, want) {
 			t.Errorf("实时行缺 %q: %q", want, rt)
 		}

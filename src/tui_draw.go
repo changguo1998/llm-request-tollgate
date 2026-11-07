@@ -152,7 +152,7 @@ func (m *tuiModel) drawHeader(c *tuiCanvas) {
 		"   进行中 " + strconv.Itoa(len(m.pulse.Active)) +
 		"   路由 " + strconv.Itoa(len(rows)) + " 条" +
 		"   首字节 " + m.ttfbCell(a) +
-		"   流量 " + strings.TrimLeft(humanByte(float64(m.activeBytes())), " ") +
+		"   流量 " + humanRate(float64(m.activeBytes())) +
 		"   运行 " + durStr(time.Since(m.start)) +
 		"   窗口 " + durStr(m.window))
 	stats := "已读日志 " + strconv.Itoa(m.scanned) + " 条   " +
