@@ -174,14 +174,16 @@ func aggRoutes(rows []*routeRow) routeAgg {
 	return a
 }
 
-// ttfbCell 首字节汇总: 窗口内平均/谷值 (与模型表列同一口径)。
+// ttfbCell 首字节汇总: 最近一次/平均 (平均 = rateWin 内算术平均)。
 func (m *tuiModel) ttfbCell(a routeAgg) string {
 	if len(a.ttfbPts) == 0 {
 		return "-"
 	}
 	if avg, ok := ttfbAvg(a.ttfbPts, time.Now(), m.rateWin); ok {
-		return durStr(time.Duration(avg)*time.Millisecond) + "/" +
-			durStr(time.Duration(ttfbMin(a.ttfbPts))*time.Millisecond)
+		if last, ok2 := ttfbLast(a.ttfbPts); ok2 {
+			return durStr(time.Duration(last)*time.Millisecond) + "/" +
+				durStr(time.Duration(avg)*time.Millisecond)
+		}
 	}
 	return "-"
 }

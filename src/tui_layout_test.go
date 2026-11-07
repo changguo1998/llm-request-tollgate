@@ -190,10 +190,10 @@ func TestHeaderRealTimeAndStatsRows(t *testing.T) {
 	if len(lines) < 3 {
 		t.Fatalf("顶栏应有 3 行, 得到 %d 行", len(lines))
 	}
-	// 第 2 行 (下标 1): 实时状态 (首字节 平均 300ms/谷值 200ms, 活跃字节 1M+).
+	// 第 2 行 (下标 1): 实时状态 (首字节 最近一次 200ms/平均 300ms, 活跃字节 1M+).
 	rt := lines[1]
 	for _, want := range []string{"状态 live", "进行中 2", "路由 1 条",
-		"首字节 0.3s/0.2s", "流量 1M", "窗口 03:00:00"} {
+		"首字节 0.2s/0.3s", "流量 1M", "窗口 03:00:00"} {
 		if !strings.Contains(rt, want) {
 			t.Errorf("实时行缺 %q: %q", want, rt)
 		}

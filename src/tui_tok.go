@@ -69,6 +69,20 @@ func ttfbMin(pts []ttfbPoint) int64 {
 	return min
 }
 
+// ttfbLast 返回样本里最近的一笔首字节时延 (ms); 样本为空时 ok=false。
+func ttfbLast(pts []ttfbPoint) (ms int64, ok bool) {
+	if len(pts) == 0 {
+		return 0, false
+	}
+	l := pts[0]
+	for _, p := range pts[1:] {
+		if p.ts.After(l.ts) {
+			l = p
+		}
+	}
+	return l.ms, true
+}
+
 // routeRow 是「逻辑名 x 上游 x 真实模型」的一行聚合 (来自日志)。
 type routeRow struct {
 	Logical, Upstream, Model string
