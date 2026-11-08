@@ -1,5 +1,6 @@
-// quota_reset.go: 从额度类错误的响应体 / 响应头里解析「额度何时重置 (到期)」, 用真实的
-// 重置时刻设定额度锁的倒计时, 而不是固定 quota_lock_ms。解析来源按优先级:
+// quota_reset.go: 从错误响应的响应体 / 响应头里解析「恢复 / 重置时刻」, 用它设定定时锁的
+// 倒计时而不是固定时长: 额度错误 -> 额度锁 (quota_lock_ms 是回退值), 通用兜底的错误 ->
+// 熔断锁 (breaker_lock_ms 是回退值)。解析来源按优先级:
 //   1. 响应体里的绝对时间 (Limit resets at ... / It will reset at ...);
 //   2. 响应头里的绝对时间 (Reset_at / x-ratelimit-reset-*), 已知键按固定顺序判;
 //   3. Retry-After (相对秒数或 HTTP-date) 与 reset 头的时长形态 (如 "6m0s")。
@@ -55,9 +56,9 @@ var resetTimeLayouts = []string{
 // 避免 map 遍历序造成的取源不确定; 值形态交给 resetDur 统一判。
 var resetHeaderKeys = []string{"Reset_at", "X-RateLimit-Reset", "RateLimit-Reset", "X-Ratelimit-Reset"}
 
-// quotaResetDur 从额度类错误的响应体与响应头解析额度重置倒计时 (到下一个重置时刻的
-// 距离); 解析不到返回 0。可用来源按顺序取第一个落在边界内的结果。
-func quotaResetDur(body []byte, hdr http.Header, now time.Time) time.Duration {
+// recoveryDur 从错误响应的响应体与响应头解析恢复倒计时 (到某个恢复 / 重置时刻的距离);
+// 解析不到返回 0。额度与通用兜底两条设锁路径共用, 用来源按顺序取第一个落在边界内的结果。
+func recoveryDur(body []byte, hdr http.Header, now time.Time) time.Duration {
 	if len(body) > bodyScanCap {
 		body = body[:bodyScanCap]
 	}

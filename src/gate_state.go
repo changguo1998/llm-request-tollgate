@@ -27,14 +27,20 @@ type gateState struct {
 }
 
 // recordGenericFailure 记一次通用兜底失败: 该模型连续错误计数 +1 并按 retry_backoff_ms
-// 暂停它; 到阈值就熔断 (只锁该 upstream/model 5min) 并清零计数。返回 true 表示该模型进了
-// 熔断锁, 这一笔该换下一个候选; false 表示退避后重试同一候选。
-func (a *App) recordGenericFailure(c *cand, model string, g GateCfg, path string) bool {
+// 暂停它; 到阈值就熔断 (只锁该 upstream/model, 恢复时长优先用调用方解析出的恢复时间,
+// 解析不到才用 breaker_lock_ms) 并清零计数。返回 true 表示该模型进了熔断锁, 这一笔该
+// 换下一个候选; false 表示退避后重试同一候选。recoverDur 是调用方从错误响应 (body /
+// 响应头) 解析出的恢复倒计时, 0 = 没解析到。
+func (a *App) recordGenericFailure(c *cand, model string, g GateCfg, path string, recoverDur time.Duration) bool {
 	if !c.recordOther(model, g) {
 		a.evAdd("gate", "", c.id, model, "上游报错, 进入退避")
 		return false
 	}
-	a.addLockModel(c, model, "breaker", g.breakerLock(), path)
+	dur := g.breakerLock()
+	if recoverDur > 0 {
+		dur = recoverDur
+	}
+	a.addLockModel(c, model, "breaker", dur, path)
 	c.recordSuccess(model) // 熔断后重新计数, 锁到期从 0 开始
 	return true
 }

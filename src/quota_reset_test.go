@@ -1,4 +1,4 @@
-// quota_reset_test.go: 额度重置时间解析 (quotaResetDur) 与「按解析时间设额度锁倒计时」
+// quota_reset_test.go: 额度重置时间解析 (recoveryDur) 与「按解析时间设额度锁倒计时」
 // 的端到端行为。
 
 package main
@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -17,7 +18,7 @@ import (
 func TestQuotaResetDurBodyUstc(t *testing.T) {
 	now := time.Date(2026, 11, 7, 13, 35, 10, 0, time.UTC)
 	body := []byte(`{"error":{"message":"Rate limit exceeded for api_key: abc123. Limit type: requests. Current limit: 20, Remaining: 0. Limit resets at: 2026-11-07 13:36:10 UTC","type":"throttling_error","code":"429"}}`)
-	if d := quotaResetDur(body, nil, now); d != 60*time.Second {
+	if d := recoveryDur(body, nil, now); d != 60*time.Second {
 		t.Fatalf("ustc 文本应解析出 60s, 实为 %s", d)
 	}
 }
@@ -29,7 +30,7 @@ func TestQuotaResetDurBodyArkcp(t *testing.T) {
 	body := []byte(`{"error":{"code":"AccountQuotaExceeded","message":"You have exceeded the weekly usage quota. It will reset at 2026-11-09 00:00:00 +0800 CST. We recommend upgrading your plan for more quota, or waiting for the reset.","param":"","type":"TooManyRequests"}}`)
 	// 2026-11-09 00:00:00 +0800 == 2026-11-08 16:00:00 UTC。
 	want := time.Date(2026, 11, 8, 16, 0, 0, 0, time.UTC).Sub(now)
-	if d := quotaResetDur(body, nil, now); d != want {
+	if d := recoveryDur(body, nil, now); d != want {
 		t.Fatalf("arkcp 文本应解析出 %s, 实为 %s", want, d)
 	}
 }
@@ -40,7 +41,7 @@ func TestQuotaResetDurBodyPicksKeywordTime(t *testing.T) {
 	now := time.Date(2026, 11, 7, 13, 35, 10, 0, time.UTC)
 	// "queued at 13:36:00" (50s, 也在边界内) 先出现; 真正重置是 13:36:10 (60s)。
 	body := []byte(`{"error":{"message":"Request queued at 2026-11-07 13:36:00 UTC. Rate limit exceeded. Limit resets at: 2026-11-07 13:36:10 UTC","type":"throttling_error"}}`)
-	if d := quotaResetDur(body, nil, now); d != 60*time.Second {
+	if d := recoveryDur(body, nil, now); d != 60*time.Second {
 		t.Fatalf("应取关键字后的重置时刻 (60s), 实为 %s", d)
 	}
 }
@@ -49,7 +50,7 @@ func TestQuotaResetDurBodyPicksKeywordTime(t *testing.T) {
 func TestQuotaResetDurBodyScanCap(t *testing.T) {
 	now := time.Date(2026, 11, 7, 13, 35, 10, 0, time.UTC)
 	body := []byte(strings.Repeat("A", bodyScanCap) + " It will reset at 2026-11-07 13:36:10 UTC")
-	if d := quotaResetDur(body, nil, now); d != 0 {
+	if d := recoveryDur(body, nil, now); d != 0 {
 		t.Fatalf("扫描上限之外的重置时间应判无效 (0), 实为 %s", d)
 	}
 }
@@ -60,7 +61,7 @@ func TestQuotaResetDurBodyWinsOverRetryAfter(t *testing.T) {
 	now := time.Date(2026, 11, 7, 13, 35, 10, 0, time.UTC)
 	body := []byte("Limit resets at: 2026-11-07 13:36:10 UTC")
 	hdr := http.Header{"Retry-After": {"5"}}
-	if d := quotaResetDur(body, hdr, now); d != 60*time.Second {
+	if d := recoveryDur(body, hdr, now); d != 60*time.Second {
 		t.Fatalf("body 绝对时间应优先于 Retry-After, 实为 %s", d)
 	}
 }
@@ -81,7 +82,7 @@ func TestQuotaResetDurHeaders(t *testing.T) {
 		{"无相关头", http.Header{"Content-Type": {"application/json"}}, 0},
 	}
 	for _, c := range cases {
-		if got := quotaResetDur(nil, c.hdr, now); got != c.want {
+		if got := recoveryDur(nil, c.hdr, now); got != c.want {
 			t.Errorf("%s: 应得 %s, 实为 %s", c.name, c.want, got)
 		}
 	}
@@ -95,7 +96,7 @@ func TestQuotaResetDurHeaderOrder(t *testing.T) {
 		"Reset_at":          {now.Add(25 * time.Minute).UTC().Format("2006-01-02 15:04:05 MST")},
 		"x-ratelimit-reset": {"6m0s"}, // 6min, 应被 Reset_at 盖过
 	}
-	if d := quotaResetDur(nil, hdr, now); d != 25*time.Minute {
+	if d := recoveryDur(nil, hdr, now); d != 25*time.Minute {
 		t.Fatalf("Reset_at 应优先于 x-ratelimit-reset, 实为 %s", d)
 	}
 }
@@ -106,7 +107,7 @@ func TestQuotaResetDurRetryAfterHTTPDate(t *testing.T) {
 	now := time.Date(2026, 11, 8, 5, 42, 3, 0, time.UTC)
 	retry := time.Date(2026, 11, 8, 5, 43, 3, 0, time.UTC).Format(http.TimeFormat)
 	hdr := http.Header{"Retry-After": {retry}}
-	if d := quotaResetDur(nil, hdr, now); d != 60*time.Second {
+	if d := recoveryDur(nil, hdr, now); d != 60*time.Second {
 		t.Fatalf("HTTP-date 形态应解析出 60s, 实为 %s", d)
 	}
 }
@@ -129,7 +130,7 @@ func TestQuotaResetDurBounds(t *testing.T) {
 		body string
 	}{"超过一周", "It will reset at " + far})
 	for _, c := range cases {
-		if d := quotaResetDur([]byte(c.body), nil, now); d != 0 {
+		if d := recoveryDur([]byte(c.body), nil, now); d != 0 {
 			t.Errorf("%s: 应判无效 (0), 实为 %s", c.name, d)
 		}
 	}
@@ -241,5 +242,52 @@ func TestProxyQuotaLockFallsBackOnOutOfBounds(t *testing.T) {
 	}
 	if left < 9*time.Minute {
 		t.Fatalf("越界的重置时间应回退固定 10min, 剩余 %s", left)
+	}
+}
+
+// TestProxyBreakerUsesParsedRecovery 端到端: 通用兜底 (类 other, 如 503 并发限制) 的
+// 响应带 Retry-After 恢复时间时, 熔断锁按解析出的恢复时长设倒计时 (~20s), 而不是固定
+// breaker_lock_ms (5min)。
+func TestProxyBreakerUsesParsedRecovery(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		w.Header().Set("Retry-After", "20")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":{"message":"no auth available (concurrent limit)","type":"throttling_error"}}`)
+	}))
+	defer up.Close()
+	gate := GateCfg{IntervalMs: 5, SemWaitMs: 50, QueueWaitMs: 200, RetryBackoffMs: []int{5, 10, 15}}
+	app := newTestApp(t, up.URL, gate, nil) // 无规则 -> 全部归通用兜底 (other)
+	proxy := httptest.NewServer(app)
+	defer proxy.Close()
+	url := proxy.URL + "/v1/chat/completions"
+
+	// 第一笔: 连续 4 次失败, 第 4 次触发熔断锁, 恢复时长取 Retry-After (20s)。
+	status, _ := postJSON(t, url, `{"model":"m1","messages":[]}`)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("应透传上游 503, 实为 %d", status)
+	}
+	locked, left, reason := app.cands["u1"].locked("real-1", "")
+	if !locked || reason != "breaker" {
+		t.Fatalf("连续 4 次失败后应熔断: locked=%v reason=%s", locked, reason)
+	}
+	if left <= 0 || left > 45*time.Second {
+		t.Fatalf("熔断锁应优先按 Retry-After (~20s) 设倒计时, 剩余 %s (若解析失败则会是固定 5min)", left)
+	}
+
+	// 第二笔: 候选在锁内, 不再真发。
+	status, _ = postJSON(t, url, `{"model":"m1","messages":[]}`)
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("熔断后应给 429, 实为 %d", status)
+	}
+	mu.Lock()
+	n := calls
+	mu.Unlock()
+	if n != 4 {
+		t.Fatalf("锁内不该真发, 上游被调用 %d 次", n)
 	}
 }

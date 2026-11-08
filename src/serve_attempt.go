@@ -119,9 +119,9 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 		s.obs.stage(stageSend)
 		resp, rerr := a.transport.RoundTrip(outReq)
 		if rerr != nil {
-			// 传输层失败: 没有状态码与 body 可判, 按通用兜底走。
+			// 传输层失败: 没有状态码与 body 可判, 按通用兜底走 (也没响应可解析恢复时间)。
 			at.cd.finish(kind, false)
-			a.recordGenericFailure(at.cd, at.mod, s.gate, s.upPath)
+			a.recordGenericFailure(at.cd, at.mod, s.gate, s.upPath, 0)
 			s.noteFailure(rerr, at.up.ID, at.mod)
 			s.obs.mark(-1)
 			s.logUpstreamError(at, 0, nil, nil, rerr)
@@ -175,9 +175,9 @@ func (a *App) classifyFailure(at attempt, kind slotKind, resp *http.Response, bo
 	case classQuota:
 		// 额度限制: 只锁该模型所属的额度组 (额度按组共享), 组内排队的请求随之迁移,
 		// 同家别的组照常发送。上游响应若带额度重置时间 (响应体 / 响应头), 按解析出的
-		// 重置时刻设锁 (quotaResetDur); 解析不到才回退配置的固定时长。
+		// 重置时刻设锁 (recoveryDur); 解析不到才回退配置的固定时长。
 		dur := gate.quotaLock()
-		if d := quotaResetDur(body, resp.Header, time.Now()); d > 0 {
+		if d := recoveryDur(body, resp.Header, time.Now()); d > 0 {
 			dur = d
 		}
 		a.addLockGroup(at.cd, at.group, "quota", dur, path)
@@ -187,13 +187,17 @@ func (a *App) classifyFailure(at attempt, kind slotKind, resp *http.Response, bo
 		// 按普通错误走 —— 退避后重试同一候选。
 		at.cd.lockConcurrency("concurrency", gate.concurrencyLock())
 		if kind != slotProbe {
-			return a.recordGenericFailure(at.cd, at.mod, gate, path), false
+			return a.recordGenericFailure(at.cd, at.mod, gate, path,
+				recoveryDur(body, resp.Header, time.Now())), false
 		}
 	default:
 		// 规则表没覆盖的样本: 把上游 + 状态码 + body 片段记进服务日志, 便于按真实文案补规则。
 		log.Printf("unclassified upstream error: upstream=%s status=%d body=%s",
 			at.up.ID, resp.StatusCode, bodySnippet(body, 200))
-		return a.recordGenericFailure(at.cd, at.mod, gate, path), false
+		// 通用兜底 (退避 + 熔断): 熔断锁的时长优先用响应里解析出的恢复时间 (如 503 并发
+		// 限制的 Retry-After, 常比固定 5min 长), 解析不到才回退 breaker_lock_ms。
+		return a.recordGenericFailure(at.cd, at.mod, gate, path,
+			recoveryDur(body, resp.Header, time.Now())), false
 	}
 	return true, false
 }
