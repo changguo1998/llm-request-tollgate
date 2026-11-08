@@ -32,13 +32,18 @@
       "key_env": "USTC_API_KEY",
       "headers": {},
       "include_usage": true,
+      "priority": 5,
       "models": [
         {
           "id": "deepseek-v4.1-flash",
+          "priority": 10,
+          "group": "deepseek-v4.1-flash",
           "billing_group": "deepseek"
         },
         {
           "id": "qwen2.5-chat",
+          "priority": 0,
+          "group": "qwen2.5-chat",
           "billing_group": "qwen"
         }
       ]
@@ -50,13 +55,18 @@
       "key_env": "GROUP_API_KEY",
       "headers": {},
       "include_usage": true,
+      "priority": 3,
       "models": [
         {
           "id": "deepseek-v4.1-flash",
+          "priority": 20,
+          "group": "deepseek-v4.1-flash",
           "billing_group": "deepseek"
         },
         {
           "id": "glm-5-lite",
+          "priority": 0,
+          "group": "glm-5-lite",
           "billing_group": "glm"
         }
       ]
