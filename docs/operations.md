@@ -124,10 +124,12 @@ connect 与 stream_idle 取每次建连 / 读写时的当前值, response_header
 该阈值视为探测失败继续锁; 且低性能锁每次解锁后一个观察窗口内再次触发时, 锁持时长翻倍
 (基础 ×2/×4/×8 封顶), 免得「放行一笔又锁上」的周期抖动.
 
-额度锁的时长另有来源: 上游错误响应 (响应体 / 响应头) 若带额度重置 / 到期时间
+额度锁与熔断锁的时长另有来源: 上游错误响应 (响应体 / 响应头) 若带恢复 / 重置时间
 (如 ustc 的 `Limit resets at`、方舟的 `It will reset at`, 或 `Reset_at` /
-`x-ratelimit-reset` / `Retry-After` 头), 额度锁按该时刻设倒计时 (封顶 7 天),
-解析不到才用固定 `quota_lock_sec`。锁剩余看 `var/gate-state.json` 的到期时刻.
+`x-ratelimit-reset` / `Retry-After` 头), 额度锁按重置时刻设倒计时 (封顶 7 天);
+通用兜底类 (如 503 并发限制) 的熔断锁同样优先按解析出的恢复时间 (如 `Retry-After`)
+设时长。都解析不到才用固定 `quota_lock_sec` / `breaker_lock_sec`。锁剩余看
+`var/gate-state.json` 的到期时刻.
 
 ## 5. 升级 / 回滚
 
