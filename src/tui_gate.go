@@ -442,17 +442,17 @@ func (e *tuiEditor) saveGate() error {
 	return nil
 }
 
-// saveSettings 一条龙保存: 调度参数写配置文件, store 有改动时重生成配置
-// (tollgate.json 的 aliases/upstreams 与 store 保持一致, 含停用模型剔除), 最后热加载。
+// saveSettings 一条龙保存: 调度参数写配置文件, 权重有改动时重生成配置
+// (tollgate.json 的 aliases/upstreams 与权重 + 模型列表保持一致, 含停用模型剔除), 最后热加载。
 // 任一环节失败即停, 不把不一致的半套推给运行中的代理。
 func (m *tuiModel) saveSettings() {
 	e := m.prio
 	if e == nil {
 		return
 	}
-	storeChanged := e.usable() && e.dirty
+	weightChanged := e.usable() && e.dirty
 	gateChanged := e.gateDirty
-	if !storeChanged && !gateChanged {
+	if !weightChanged && !gateChanged {
 		return // 没有改动, 无事可做
 	}
 	if gateChanged {
@@ -461,8 +461,8 @@ func (m *tuiModel) saveSettings() {
 			return
 		}
 	}
-	if storeChanged {
-		if err := e.regenerate(); err != nil { // 内部先存 store 再跑生成器
+	if weightChanged {
+		if err := e.regenerate(); err != nil { // 内部先把权重写回配置再跑生成器
 			return // 失败原因已写进 message
 		}
 	}

@@ -78,7 +78,7 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 			col1 = append(col1, attr+tuiIndent+m.upNameAttr(name, attr)+"  priority="+strconv.Itoa(prio)+state+tuiReset)
 		}
 	} else {
-		col1 = append(col1, tuiYell+"store 读不到: "+e.err+tuiReset)
+		col1 = append(col1, tuiYell+e.err+tuiReset)
 	}
 
 	// ---- 第 2 列: 模型 (按逻辑名分组, 与 sticky 页同款: 组与组之间用逻辑名隔开) ----
@@ -126,17 +126,17 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 	if e.focus == 0 && selLine >= 0 {
 		e.modelSel = clampInt(e.modelSel, 0, max(0, len(rows)-1))
 		span := 2 * window
-		if selLine < e.top {
-			e.top = selLine
+		if selLine < e.scrollTop {
+			e.scrollTop = selLine
 		}
-		if selLine >= e.top+span {
-			e.top = selLine - span + 1
+		if selLine >= e.scrollTop+span {
+			e.scrollTop = selLine - span + 1
 		}
 	}
-	if e.top > max(0, len(lines)-1) {
-		e.top = max(0, len(lines)-1)
+	if e.scrollTop > max(0, len(lines)-1) {
+		e.scrollTop = max(0, len(lines)-1)
 	}
-	// 两栏都从 e.top 开始连续铺: 左栏前 window 行, 右栏续后 window 行。
+	// 两栏都从 e.scrollTop 开始连续铺: 左栏前 window 行, 右栏续后 window 行。
 	appendPrio := func(dst []string, from, to int) []string {
 		if from < 0 {
 			from = 0
@@ -156,10 +156,10 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 		}
 		return dst
 	}
-	llen := min(e.top+window, len(lines))
-	rlen := min(e.top+2*window, len(lines))
-	col2 = appendPrio(col2, e.top, llen)
-	col3 := appendPrio(make([]string, 0, body), e.top+window, rlen)
+	llen := min(e.scrollTop+window, len(lines))
+	rlen := min(e.scrollTop+2*window, len(lines))
+	col2 = appendPrio(col2, e.scrollTop, llen)
+	col3 := appendPrio(make([]string, 0, body), e.scrollTop+window, rlen)
 
 	// 三列并排 (模型列表占第 2 / 3 两列): 第 1 列按内容宽, 模型两栏平分剩余宽度,
 	// 顶到终端右边界; 内容区不足的行补空, 让三列贴满整个内容高度 (中间空白),
@@ -217,7 +217,7 @@ func (m *tuiModel) prioMessage(e *tuiEditor) string {
 		text += " 配置读不到: " + e.gateErr
 	}
 	if e.err != "" {
-		text += " store 读不到: " + e.err
+		text += " " + e.err
 	}
 	bg := tuiRev
 	if e.prompt != nil {

@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-func (e *tuiEditor) saveStore() {
+func (e *tuiEditor) saveWeights() {
 	if !e.usable() {
 		return
 	}
@@ -19,18 +19,18 @@ func (e *tuiEditor) saveStore() {
 		return
 	}
 	e.dirty = false
-	e.message = "已保存 " + e.path
+	e.message = "已保存 " + e.config
 }
 
-// regenerate 先存盘再跑生成器 (生成器读 store, 不先存就白跑); 失败返回 error, 原因也写进 message。
+// regenerate 先把权重写回配置, 再跑生成器 (生成器读 store 的模型列表 + 配置里的权重, 不先存就白跑); 失败返回 error, 原因也写进 message。
 func (e *tuiEditor) regenerate() error {
 	if !e.usable() {
-		e.message = "store 读不到, 无法生成配置"
-		return fmt.Errorf("store unavailable")
+		e.message = "store 或配置读不到, 无法生成配置"
+		return fmt.Errorf("editor unavailable")
 	}
-	e.saveStore()
+	e.saveWeights()
 	if e.dirty {
-		return fmt.Errorf("store 存盘失败, 配置未重新生成")
+		return fmt.Errorf("权重存盘失败, 配置未重新生成")
 	}
 	args := []string{
 		filepath.Join(e.root, "scripts", "gen_tollgate_config.py"),
@@ -158,7 +158,7 @@ func (e *tuiEditor) key(b byte) (quit bool, handled bool) {
 	case '/':
 		e.prompt = &tuiPrompt{label: "过滤 (空 = 清除):", commit: func(v string) {
 			e.filter = v
-			e.modelSel, e.top, e.prevKey = 0, 0, ""
+			e.modelSel, e.scrollTop, e.prevKey = 0, 0, ""
 			e.rebuild()
 		}}
 	default:

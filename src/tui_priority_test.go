@@ -13,6 +13,7 @@ import (
 	"testing"
 )
 
+// store 只带模型列表与模型参数, 不再有 tollgate_* 权重字段。
 const prioTestStore = `{
     "providers": {
         "ustc": {
@@ -22,20 +23,13 @@ const prioTestStore = `{
             "models": [
                 {
                     "contextWindow": 1000000,
-                    "id": "deepseek-flash",
-                    "tollgate_group": "deepseek-v4.1-flash",
-                    "tollgate_priority": 2
+                    "id": "deepseek-flash"
                 },
                 {
                     "contextWindow": 1000000,
-                    "id": "deepseek-flash-2",
-                    "tollgate_group": "deepseek-v4.1-flash"
+                    "id": "deepseek-flash-2"
                 }
-            ],
-            "tollgate_priority": 0,
-            "x_unknown": {
-                "keep": true
-            }
+            ]
         },
         "group": {
             "api": "openai-responses",
@@ -43,15 +37,12 @@ const prioTestStore = `{
             "baseUrl": "http://group.invalid/v1",
             "models": [
                 {
-                    "id": "deepseek-v4.1-flash",
-                    "tollgate_group": "deepseek-v4.1-flash"
+                    "id": "deepseek-v4.1-flash"
                 },
                 {
-                    "id": "solo",
-                    "tollgate_priority": 5
+                    "id": "solo"
                 }
-            ],
-            "tollgate_priority": 3
+            ]
         },
         "tollgate": {
             "baseUrl": "http://127.0.0.1:8787/v1",
@@ -66,17 +57,51 @@ const prioTestStore = `{
 }
 `
 
+// 权重在配置的 upstreams / upstreams[].models 上 (priority / group / billing_group)。
 const prioTestConfig = `{
     "listen": "127.0.0.1:8787",
     "log_path": "var/requests.jsonl",
+    "x_unknown": {
+        "keep": true
+    },
     "upstreams": [
         {
             "id": "ustc",
-            "base_url": "https://ustc.invalid/v1"
+            "base_url": "https://ustc.invalid/v1",
+            "auth_header": "Authorization",
+            "key_env": "USTC_API_KEY",
+            "headers": {},
+            "include_usage": true,
+            "priority": 0,
+            "models": [
+                {
+                    "id": "deepseek-flash",
+                    "priority": 2,
+                    "group": "deepseek-v4.1-flash"
+                },
+                {
+                    "id": "deepseek-flash-2",
+                    "priority": 0,
+                    "group": "deepseek-v4.1-flash"
+                }
+            ]
         },
         {
             "id": "group",
-            "base_url": "http://group.invalid/v1"
+            "base_url": "http://group.invalid/v1",
+            "priority": 3,
+            "models": [
+                {
+                    "id": "deepseek-v4.1-flash",
+                    "priority": 0,
+                    "group": "deepseek-v4.1-flash"
+                },
+                {
+                    "id": "solo",
+                    "priority": 5,
+                    "group": "solo"
+                }
+            ]
         }
     ],
     "aliases": {}
@@ -106,13 +131,34 @@ func candIDs(cands []tuiPrioCand) []string {
 	return out
 }
 
+// upByID 从配置 JSON 里按 id 找上游条目 (存盘后的上游顺序 = 优先级降序, 按 id 找更稳)。
+func upByID(t *testing.T, cfgPath string, id string) map[string]any {
+	t.Helper()
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("读配置: %v", err)
+	}
+	var top map[string]any
+	if err := json.Unmarshal(b, &top); err != nil {
+		t.Fatalf("配置不是合法 JSON: %v", err)
+	}
+	list, _ := top["upstreams"].([]any)
+	for _, raw := range list {
+		if up, ok := raw.(map[string]any); ok && up["id"] == id {
+			return up
+		}
+	}
+	t.Fatalf("配置里没有上游 %s:\n%s", id, b)
+	return nil
+}
+
 // 候选顺序 = 模型优先级降序 -> provider 优先级降序 -> 上游顺序 -> 模型 id;
 // 本代理自己 (kind=proxy) 与黑名单里的模型都不该出现在列表里。
 func TestPrioCandidateOrder(t *testing.T) {
 	_, cfg := prioFixture(t)
 	e := newTuiEditor(cfg)
 	if !e.usable() {
-		t.Fatalf("store 装载失败: %v", e.err)
+		t.Fatalf("编辑器装载失败: %v", e.err)
 	}
 	if got := strings.Join(e.providers, ","); got != "group,ustc" {
 		t.Fatalf("上游应按优先级降序 (group 3 > ustc 0, 代理自身排除), 得到 %q", got)
@@ -143,7 +189,7 @@ func TestPrioOrderMatchesGenerator(t *testing.T) {
 		t.Skip("没有 python3")
 	}
 	cmd := exec.Command("python3", gen, "--dry-run", "--fff-dir", filepath.Dir(store),
-		"--out", cfg, "--providers", "ustc,group")
+		"--out", cfg, "--providers", "ustc,group", "--no-store")
 	cmd.Dir = root
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -159,7 +205,7 @@ func TestPrioOrderMatchesGenerator(t *testing.T) {
 	}
 	e := newTuiEditor(cfg)
 	if !e.usable() {
-		t.Fatalf("store 装载失败: %v", e.err)
+		t.Fatalf("编辑器装载失败: %v", e.err)
 	}
 	for alias, pairs := range generated.Aliases {
 		want := make([]string, 0, len(pairs))
@@ -173,37 +219,37 @@ func TestPrioOrderMatchesGenerator(t *testing.T) {
 	}
 }
 
-// 存盘: 数值原样 (不出现 .0)、没动过的字段还在、2 空格缩进、不留 .tmp。
+// 存盘: 权重写进配置 (upstreams/models 的 priority), 数值原样 (不出现 .0)、没动过的字段还在、
+// 2 空格缩进、不留 .tmp; store 保持原状 (权重不在 store)。
 func TestPrioSaveRoundTrip(t *testing.T) {
 	store, cfg := prioFixture(t)
 	e := newTuiEditor(cfg)
 	e.adjust(5) // 选中行是 ustc/deepseek-flash (M2)
-	e.saveStore()
+	e.saveWeights()
 	if e.dirty {
 		t.Fatalf("存盘后不该还是脏的: %s", e.message)
 	}
-	b, err := os.ReadFile(store)
+	b, err := os.ReadFile(cfg)
 	if err != nil {
 		t.Fatalf("读回: %v", err)
 	}
-	if !bytes.Contains(b, []byte("\n  \"providers\"")) {
+	if !bytes.Contains(b, []byte("\n  \"upstreams\"")) {
 		t.Errorf("缩进应为 2 空格:\n%s", b[:80])
 	}
 	if !bytes.HasSuffix(b, []byte("}\n")) {
 		t.Errorf("结尾应有一个换行")
 	}
-	if _, err := os.Stat(store + ".tmp"); err == nil {
+	if _, err := os.Stat(cfg + ".tmp"); err == nil {
 		t.Errorf("不该留下 .tmp")
 	}
 	var got map[string]any
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatalf("存出来的不是 JSON: %v", err)
 	}
-	providers := got["providers"].(map[string]any)
-	ustc := providers["ustc"].(map[string]any)
-	if _, ok := ustc["x_unknown"]; !ok {
-		t.Errorf("没动过的字段丢了: %v", ustc)
+	if _, ok := got["x_unknown"]; !ok {
+		t.Errorf("没动过的字段丢了: %v", got)
 	}
+	ustc := upByID(t, cfg, "ustc")
 	if prio := prioOf(ustc); prio != 0 {
 		t.Errorf("provider 优先级不该被动过, 得到 %d", prio)
 	}
@@ -211,8 +257,16 @@ func TestPrioSaveRoundTrip(t *testing.T) {
 	if len(models) != 2 || prioOf(models[0]) != 7 {
 		t.Errorf("模型优先级应为 7, 得到 %v", models)
 	}
-	if !bytes.Contains(b, []byte("\"tollgate_priority\": 7")) {
+	if !bytes.Contains(b, []byte("\"priority\": 7")) {
 		t.Errorf("存盘把整数写成了别的形式:\n%s", b)
+	}
+	// store 不该被动过 (权重已不在 store)。
+	bs, err := os.ReadFile(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(bs, []byte("priority")) {
+		t.Errorf("store 不该带权重字段:\n%s", bs)
 	}
 }
 
@@ -308,7 +362,7 @@ func TestPrioKeys(t *testing.T) {
 	}
 }
 
-// 负优先级 (下限 -1) = 停用: adjust / setValue 都钳到 -1, 存盘写进 store;
+// 负优先级 (下限 -1) = 停用: adjust / setValue 都钳到 -1, 存盘写进配置的 priority;
 // 该行保持显示 (列表在, 预览排在最后), 重读后仍是停用; provider 优先级不受影响。
 func TestPrioNegativeDisableClampAndVisible(t *testing.T) {
 	store, cfg := prioFixture(t)
@@ -328,15 +382,18 @@ func TestPrioNegativeDisableClampAndVisible(t *testing.T) {
 	if rows := e.filtered(); len(rows) != 4 {
 		t.Fatalf("停用后该行仍应显示 (列表 4 行), 得到 %d", len(rows))
 	}
-	e.saveStore()
-	b, err := os.ReadFile(store)
+	e.saveWeights()
+	b, err := os.ReadFile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(b, []byte("\"tollgate_priority\": -1")) {
+	if !bytes.Contains(b, []byte("\"priority\": -1")) {
 		t.Errorf("存盘应为 -1:\n%s", b)
 	}
-	// 重读 store: -1 原样读回, 行仍可见, provider 优先级不受影响。
+	if bs, err := os.ReadFile(store); err != nil || bytes.Contains(bs, []byte("priority")) {
+		t.Errorf("store 不该带权重字段")
+	}
+	// 重读配置: -1 原样读回, 行仍可见, provider 优先级不受影响。
 	e2 := newTuiEditor(cfg)
 	if got := prioOf(e2.provEntry("ustc")); got != 0 {
 		t.Fatalf("provider 优先级不该被模型调整动到, 得到 %d", got)
@@ -367,12 +424,12 @@ func TestPrioNegativeDisableClampAndVisible(t *testing.T) {
 }
 
 // Provider 负优先级 (下限 -1) = 停用整家: 面板仍显示 (可调回), 但它的模型不进候选
-// 预览与模型列表; 调回非负后全部恢复。与生成器同一口径 (见 TestSettingsRegenerateDropsDisabledProvider)。
+// 预览与模型列表; 调回非负后全部恢复。与生成器同一口径 (见 TestSettingsRegenerateKeepsDisabledProvider)。
 func TestProviderNegativeDisableAndRestore(t *testing.T) {
 	_, cfg := prioFixture(t)
 	e := newTuiEditor(cfg)
 	if !e.usable() {
-		t.Fatalf("store 装载失败: %v", e.err)
+		t.Fatalf("编辑器装载失败: %v", e.err)
 	}
 	if got := strings.Join(e.providers, ","); got != "group,ustc" {
 		t.Fatalf("初始应按优先级降序, 得到 %q", got)
@@ -431,20 +488,24 @@ func TestProviderNegativeDisableAndRestore(t *testing.T) {
 	}
 }
 
-// 生成器视角: provider 负优先级 = 整家不进 upstreams 与 aliases (停用模型本来就不进)。
-func TestSettingsRegenerateDropsDisabledProvider(t *testing.T) {
+// 生成器视角: provider 负优先级 = 整家不进 aliases (停用模型同样只在 upstreams 保留);
+// 它留在 upstreams 里带负优先级, 这样权重不丢、TUI 可调回 (与停用前的行为不同: 旧的
+// 停用 provider 会整家从 upstreams 退出, 现在保留是为了让权重有地方存)。
+func TestSettingsRegenerateKeepsDisabledProvider(t *testing.T) {
 	dir := t.TempDir()
 	store := `{"providers": {
 		"ustc": {"apiKey": "$USTC_API_KEY", "baseUrl": "https://u.invalid/v1",
-			"models": [{"id": "m1", "tollgate_group": "g"}]},
-		"group": {"apiKey": "$GROUP_API_KEY", "baseUrl": "http://g.invalid/v1", "tollgate_priority": -1,
+			"models": [{"id": "m1"}]},
+		"group": {"apiKey": "$GROUP_API_KEY", "baseUrl": "http://g.invalid/v1",
 			"models": [{"id": "solo"}]}
 	}}`
 	cfgText := `{
 		"listen": "127.0.0.1:8787",
 		"upstreams": [
-			{"id": "ustc", "base_url": "https://u.invalid/v1"},
-			{"id": "group", "base_url": "http://g.invalid/v1"}
+			{"id": "ustc", "base_url": "https://u.invalid/v1", "priority": 0,
+			 "models": [{"id": "m1", "priority": 0, "group": "g"}]},
+			{"id": "group", "base_url": "http://g.invalid/v1", "priority": -1,
+			 "models": [{"id": "solo", "priority": 0, "group": "solo"}]}
 		],
 		"aliases": {}
 	}`
@@ -464,7 +525,7 @@ func TestSettingsRegenerateDropsDisabledProvider(t *testing.T) {
 		t.Skip("没有 python3")
 	}
 	cmd := exec.Command("python3", gen, "--dry-run", "--fff-dir", dir,
-		"--out", cfg, "--providers", "ustc,group")
+		"--out", cfg, "--providers", "ustc,group", "--no-store")
 	cmd.Dir = root
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -474,27 +535,28 @@ func TestSettingsRegenerateDropsDisabledProvider(t *testing.T) {
 	}
 	var got struct {
 		Upstreams []struct {
-			ID string `json:"id"`
+			ID       string `json:"id"`
+			Priority int    `json:"priority"`
 		} `json:"upstreams"`
 		Aliases map[string][][2]string `json:"aliases"`
 	}
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("生成器输出不是 JSON: %v", err)
 	}
-	// 停用的 provider 整家退出 upstreams。
-	seenUstc := false
+	// 停用的 provider 留在 upstreams, 带负优先级 (权重保留, TUI 可调回)。
+	seenGroup := false
 	for _, u := range got.Upstreams {
 		if u.ID == "group" {
-			t.Error("停用的 provider 不该在 upstreams 里")
-		}
-		if u.ID == "ustc" {
-			seenUstc = true
+			seenGroup = true
+			if u.Priority != -1 {
+				t.Errorf("停用 provider 应保留负优先级, 得到 %d", u.Priority)
+			}
 		}
 	}
-	if !seenUstc {
-		t.Errorf("未停用的 provider 应保留, 得到 %v", got.Upstreams)
+	if !seenGroup {
+		t.Errorf("停用的 provider 应留在 upstreams: %v", got.Upstreams)
 	}
-	// aliases 里也不该有停用 provider 的候选。
+	// aliases 里不该有停用 provider 的候选。
 	for _, pairs := range got.Aliases {
 		for _, p := range pairs {
 			if p[0] == "group" {
@@ -571,7 +633,7 @@ func TestPrioDraw(t *testing.T) {
 		t.Errorf("模型列表应按逻辑名分组 (缺分组标题 deepseek-v4.1-flash / solo)")
 	}
 
-	// store 读不到时只报错, 不 panic (把 FFF_HOME 指到空目录, 免得退回真 store)。
+	// store / 配置读不到时只报错, 不 panic (把 FFF_HOME 指到空目录, 免得退回真 store)。
 	t.Setenv("FFF_HOME", t.TempDir())
 	bad := newTUIModel(filepath.Join(t.TempDir(), "nope.json"))
 	bad.prio = newTuiEditor(bad.cfgPath)
@@ -670,11 +732,12 @@ func TestSettingsModelListGroupedRows(t *testing.T) {
 
 // 模型列表分两栏铺满内容区: 模型够多时, 每栏高度由窗口高度决定, 全部模型行都在画面
 // 里 (两栏合计覆盖全部显示行), 分组标题只出现一次, 最后一栏贴到内容区底部。
+// 逻辑名来自配置的 group (store 只带模型列表, 不再有 tollgate 字段)。
 func TestSettingsModelColumnFillsHeight(t *testing.T) {
 	dir := t.TempDir()
 	fakeModels := make([]map[string]any, 0, 30)
 	for i := 0; i < 30; i++ {
-		fakeModels = append(fakeModels, map[string]any{"id": "m-" + strconv.Itoa(i), "tollgate_group": "g"})
+		fakeModels = append(fakeModels, map[string]any{"id": "m-" + strconv.Itoa(i)})
 	}
 	store := map[string]any{
 		"providers": map[string]any{
@@ -691,8 +754,23 @@ func TestSettingsModelColumnFillsHeight(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "llm-models.json"), b, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	fakeCfgModels := make([]map[string]any, 0, 30)
+	for i := 0; i < 30; i++ {
+		fakeCfgModels = append(fakeCfgModels, map[string]any{"id": "m-" + strconv.Itoa(i), "priority": 0, "group": "g"})
+	}
+	cfgEntry := map[string]any{
+		"id":       "ustc",
+		"base_url": "https://u.invalid/v1",
+		"priority": 0,
+		"models":   fakeCfgModels,
+	}
+	cfgText := map[string]any{"listen": "127.0.0.1:8787", "upstreams": []any{cfgEntry}}
+	cb, err := json.Marshal(cfgText)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := filepath.Join(dir, "tollgate.json")
-	if err := os.WriteFile(cfg, []byte(`{"listen":"127.0.0.1:8787","upstreams":[{"id":"ustc"}]}`), 0o600); err != nil {
+	if err := os.WriteFile(cfg, cb, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	m := newTUIModel(cfg)
@@ -826,8 +904,8 @@ func TestSettingsGateSave(t *testing.T) {
 	}
 }
 
-// s 一条龙: store 有改动时按 s = 存 store + 重生成配置 + 热加载一次到位;
-// 落盘的 aliases 与 store 一致 (停用模型被剔除), 不再需要单独的 r 键。
+// s 一条龙: 权重有改动时按 s = 存盘 + 重生成配置 + 热加载一次到位;
+// 落盘的 aliases 与权重一致 (停用模型被剔除), 不再需要单独的 r 键。
 func TestSettingsSaveRegenerateAndReload(t *testing.T) {
 	store, cfg := prioFixture(t)
 	root := repoRootFor(cfg)
@@ -854,18 +932,25 @@ func TestSettingsSaveRegenerateAndReload(t *testing.T) {
 	m.reloadFn = func() error { called = true; return nil }
 	send('s')
 	if !called {
-		t.Fatalf("s 保存 store 改动后应触发热加载")
+		t.Fatalf("s 保存权重改动后应触发热加载")
 	}
 	if m.prio.dirty || m.prio.gateDirty {
 		t.Fatalf("保存后不该再有未保存标记")
 	}
-	// store 已落盘 -1。
-	b, err := os.ReadFile(store)
+	// 权重已落配置 -1 (store 不带权重)。
+	b, err := os.ReadFile(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(b, []byte("\"tollgate_priority\": -1")) {
-		t.Errorf("store 应已写 -1:\n%s", b)
+	if !bytes.Contains(b, []byte("\"priority\": -1")) {
+		t.Errorf("配置应已写 -1:\n%s", b)
+	}
+	sb, err := os.ReadFile(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(sb, []byte("priority")) {
+		t.Errorf("store 不该带权重字段")
 	}
 	// 配置已被重生成: aliases 里不含停用模型。
 	raw, err := os.ReadFile(cfg)
@@ -1045,7 +1130,7 @@ func candsOrder(cands []candView) string {
 	return strings.Join(out, ",")
 }
 
-// 第 1 页上游表按 provider 优先级降序, 与 settings 页的 provider 面板同口径。
+// 第 1 页上游表按 provider 优先级降序 (优先级在配置的 upstreams 上), 与 settings 页同口径。
 func TestModelsCandsSortByPriority(t *testing.T) {
 	_, cfg := prioFixture(t)
 	m := newTUIModel(cfg)
@@ -1055,11 +1140,12 @@ func TestModelsCandsSortByPriority(t *testing.T) {
 	}
 }
 
-// 同优先级的两个上游保持配置顺序, 不看 id 字典序。
+// 同优先级的两个上游保持配置顺序, 不看 id 字典序 (优先级现在在配置上游条目上)。
 func TestModelsCandsTieByConfigOrder(t *testing.T) {
 	dir := t.TempDir()
-	store := `{"providers": {"zeta": {"tollgate_priority": 1}, "alpha": {"tollgate_priority": 1}}}`
-	cfgText := `{"upstreams": [{"id": "zeta"}, {"id": "alpha"}]}`
+	store := `{"providers": {"zeta": {"apiKey": "$K", "baseUrl": "http://z.invalid/v1", "models": []},
+		"alpha": {"apiKey": "$K", "baseUrl": "http://a.invalid/v1", "models": []}}}`
+	cfgText := `{"upstreams": [{"id": "zeta", "priority": 1}, {"id": "alpha", "priority": 1}]}`
 	if err := os.WriteFile(filepath.Join(dir, "llm-models.json"), []byte(store), 0o600); err != nil {
 		t.Fatalf("写 store: %v", err)
 	}
@@ -1074,18 +1160,18 @@ func TestModelsCandsTieByConfigOrder(t *testing.T) {
 	}
 }
 
-// store 读不到时保持观测面原序, 不在看板里硬排。
-func TestModelsCandsNoStoreKeepsOrder(t *testing.T) {
+// 配置读不到 / 解析失败时保持观测面原序, 不在看板里硬排。
+func TestModelsCandsNoPriorityKeepsOrder(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FFF_HOME", dir)
 	cfg := filepath.Join(dir, "tollgate.json")
-	if err := os.WriteFile(cfg, []byte(`{"upstreams": [{"id": "ustc"}, {"id": "group"}]}`), 0o600); err != nil {
+	if err := os.WriteFile(cfg, []byte(`{ not json`), 0o600); err != nil {
 		t.Fatalf("写配置: %v", err)
 	}
 	m := newTUIModel(cfg)
 	m.pulse.Cands = []candView{{ID: "ustc"}, {ID: "group"}}
 	if got := candsOrder(m.sortedCands()); got != "ustc,group" {
-		t.Fatalf("store 读不到应保持原序, 得到 %q", got)
+		t.Fatalf("优先级读不到应保持原序, 得到 %q", got)
 	}
 }
 
@@ -1094,7 +1180,7 @@ func TestEditorNavFocus(t *testing.T) {
 	_, cfg := prioFixture(t)
 	e := newTuiEditor(cfg)
 	if !e.usable() {
-		t.Fatalf("store 装载失败: %v", e.err)
+		t.Fatalf("编辑器装载失败: %v", e.err)
 	}
 	models := len(e.filtered())
 	if models < 2 {

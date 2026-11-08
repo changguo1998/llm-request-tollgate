@@ -59,9 +59,9 @@ type tuiModel struct {
 	stickyMsg string
 	stickyErr bool
 
-	// 第 1 页上游表的排序键 (provider 优先级), 按 store / 配置的 mtime 失效。
+	// 第 1 页上游表的排序键 (provider 优先级), 按配置的 mtime 失效 (权重在配置文件里)。
 	provRank    map[string][2]int
-	provRankMod [2]time.Time
+	provRankMod time.Time
 
 	// 上游专属色 (每帧按上游表顺序重算), 各页的 上游/模型 单元格共用。
 	upColors map[string]string

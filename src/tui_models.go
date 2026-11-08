@@ -32,15 +32,14 @@ func (m *tuiModel) sortedCands() []candView {
 	return cands
 }
 
-// provRanks 缓存排序键: 只有 store 或配置的文件时间变了才重读, 读不到就缓存空表,
+// provRanks 缓存排序键: 只有配置的文件时间变了才重读 (权重在配置文件里), 读不到就缓存空表,
 // 免得每帧反复解析。
 func (m *tuiModel) provRanks() map[string][2]int {
-	sm, serr := os.Stat(storePathFor(m.cfgPath))
 	cm, cerr := os.Stat(m.cfgPath)
-	if serr != nil || cerr != nil {
+	if cerr != nil {
 		return nil
 	}
-	key := [2]time.Time{sm.ModTime(), cm.ModTime()}
+	key := cm.ModTime()
 	if m.provRank == nil || key != m.provRankMod {
 		rank := provRank(m.cfgPath)
 		if rank == nil {

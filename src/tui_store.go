@@ -1,4 +1,4 @@
-// tui_store.go: 模型列表 store 与优先级顺序读取。
+// tui_store.go: 模型列表 store 与权重 (config) 读取。
 
 package main
 
@@ -53,21 +53,6 @@ func fileExists(p string) bool {
 	return err == nil && !st.IsDir()
 }
 
-// newTuiEditor 装载 store; 失败时把原因放进 message, 画面照常出 (还能看, 只是不能改)。
-func (e *tuiEditor) provEntries() map[string]any {
-	if p, ok := e.store["providers"].(map[string]any); ok {
-		return p
-	}
-	p := map[string]any{}
-	e.store["providers"] = p
-	return p
-}
-
-func (e *tuiEditor) provEntry(name string) map[string]any {
-	entry, _ := e.provEntries()[name].(map[string]any)
-	return entry
-}
-
 func modelsOf(entry map[string]any) []map[string]any {
 	list, _ := entry["models"].([]any)
 	out := make([]map[string]any, 0, len(list))
@@ -79,9 +64,9 @@ func modelsOf(entry map[string]any) []map[string]any {
 	return out
 }
 
-// prioOf 读优先级; 缺省 0 (最小); 负值 = 停用: 模型级负值停用该模型 (生成配置时跳过, 不进
-// tollgate 模型目录; settings 页该行仍显示, 可调回非负), provider 级负值停用整个 provider
-// (同样跳生成, 不进 upstreams/aliases; provider 面板仍显示, 可调回非负)。
+// prioOf 读优先级; 缺省 0 (最小); 负值 = 停用: 模型级负值停用该模型 (生成配置时跳过,
+// settings 页该行仍显示, 可调回非负), provider 级负值停用整个 provider (同样跳生成,
+// provider 面板仍显示, 可调回非负)。
 func prioOf(entry map[string]any) int {
 	switch v := entry[prioField].(type) {
 	case json.Number:
@@ -111,7 +96,7 @@ func modelID(model map[string]any) string {
 	return id
 }
 
-// aliasOf: 有条目的 tollgate_group 就用它, 否则用模型 id (与生成器同口径)。
+// aliasOf: 有条目的 group 就用它, 否则用模型 id (与生成器同口径)。
 func aliasOf(model map[string]any) string {
 	if g, ok := model[groupField].(string); ok && strings.TrimSpace(g) != "" {
 		return strings.TrimSpace(g)
@@ -148,11 +133,25 @@ func configOrder(cfgPath string) []string {
 
 // providerOrder 取配置里的上游顺序; 只留 store 里真有的, 并把本代理自己排除掉。
 func (e *tuiEditor) providerOrder() []string {
-	names := configOrder(e.config)
-	entries := e.provEntries()
+	var names []string
+	if e.cfg != nil {
+		if list, ok := e.cfg["upstreams"].([]any); ok {
+			for _, raw := range list {
+				if up, ok := raw.(map[string]any); ok {
+					if id, ok := up["id"].(string); ok && id != "" {
+						names = append(names, id)
+					}
+				}
+			}
+		}
+	}
+	if len(names) == 0 {
+		names = prioFallbackProviders
+	}
+	storeProvs, _ := e.store["providers"].(map[string]any)
 	var out []string
 	for _, name := range names {
-		entry, _ := entries[name].(map[string]any)
+		entry, _ := storeProvs[name].(map[string]any)
 		if entry == nil || isProxyEntry(name, entry) {
 			continue
 		}
@@ -161,10 +160,11 @@ func (e *tuiEditor) providerOrder() []string {
 	return out
 }
 
-// provPrios 只读 store 里各 provider 的优先级, 给第 1 页上游表排序用。别为了排序去装载
-// 整个编辑器: 那会把 settings 页的 gate 快照提前钉在启动时刻。读不到返回 nil。
+// provPrios 只读配置里各上游的优先级, 给第 1 页上游表排序用。别为了排序去装载整个
+// 编辑器: 那会把 settings 页的 gate 快照提前钉在启动时刻。读不到返回 nil。
+// 权重 (priority) 在 config.local.json 的 upstreams 上, 不再读 store。
 func provPrios(cfgPath string) map[string]int {
-	b, err := os.ReadFile(storePathFor(cfgPath))
+	b, err := os.ReadFile(cfgPath)
 	if err != nil {
 		return nil
 	}
@@ -174,18 +174,20 @@ func provPrios(cfgPath string) map[string]int {
 	if dec.Decode(&top) != nil {
 		return nil
 	}
-	entries, _ := top["providers"].(map[string]any)
-	out := make(map[string]int, len(entries))
-	for name, raw := range entries {
-		if entry, ok := raw.(map[string]any); ok {
-			out[name] = prioOf(entry)
+	list, _ := top["upstreams"].([]any)
+	out := make(map[string]int, len(list))
+	for _, raw := range list {
+		if up, ok := raw.(map[string]any); ok {
+			if id, ok := up["id"].(string); ok && id != "" {
+				out[id] = prioOf(up)
+			}
 		}
 	}
 	return out
 }
 
 // provRank 是第 1 页上游表的排序键: [优先级, 配置顺序], 优先级降序, 同优先级保持配置顺序,
-// 与 settings 页的 provider 面板同一口径。store 读不到时返回 nil (调用方保持观测面原序)。
+// 与 settings 页的 provider 面板同一口径。配置读不到时返回 nil (调用方保持观测面原序)。
 func provRank(cfgPath string) map[string][2]int {
 	prios := provPrios(cfgPath)
 	if prios == nil {
@@ -193,9 +195,11 @@ func provRank(cfgPath string) map[string][2]int {
 	}
 	rank := make(map[string][2]int, len(prios))
 	for i, name := range configOrder(cfgPath) {
-		rank[name] = [2]int{prios[name], i}
+		if _, ok := prios[name]; ok {
+			rank[name] = [2]int{prios[name], i}
+		}
 	}
-	// store 里有、配置里没有的上游: 优先级照算, 顺序排在同优先级最后。
+	// 配置里有优先级、但顺序表里没有 (理论不该有, 兜底): 顺序排在同优先级最后。
 	last := len(rank)
 	for name, p := range prios {
 		if _, ok := rank[name]; !ok {
