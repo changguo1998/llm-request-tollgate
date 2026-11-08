@@ -44,7 +44,7 @@ const prioTestStore = `{
                 }
             ]
         },
-        "tollgate": {
+        "tg": {
             "baseUrl": "http://127.0.0.1:8787/v1",
             "kind": "proxy",
             "models": [

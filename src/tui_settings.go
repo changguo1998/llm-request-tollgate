@@ -27,7 +27,7 @@ const (
 	groupField = "group"
 	idField    = "id"
 	proxyKind  = "proxy"
-	proxyName  = "tollgate" // store 里代表本代理自己的 provider
+	proxyName  = "tg" // store 里代表本代理自己的 provider
 )
 
 // prioFallbackProviders 是配置里读不到上游顺序时的兜底 (与生成器的缺省 --providers 一致)。

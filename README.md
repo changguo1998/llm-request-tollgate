@@ -258,9 +258,9 @@ thinkingLevelMap / reasoning) 与 `llm-models-droplist.json` (精确匹配黑名
   store 的模型条目继承。
 - `key_env` 取 store 里 `apiKey` 的占位符名; `auth_header` 等设置从现有配置继承, 不会被覆盖。
 - 写入 `config.local.json` (即 `~/fff/config/tollgate.json`); `--dry-run` 只打印,
-  `--providers` 改上游顺序; 不传时缺省是 store 里**除 tollgate 与 arkap 外**的全部 provider
+  `--providers` 改上游顺序; 不传时缺省是 store 里**除 tg 与 arkap 外**的全部 provider
   (arkap 要带就显式写进 `--providers`).
-- 只生成配置, 不再写 store: 代理自身的 `tollgate` (kind=proxy) 目录条目由
+- 只生成配置, 不再写 store: 代理自身的 `tg` (kind=proxy) 目录条目由
   独立脚本 `scripts/upsert_tollgate_provider.py` 维护 (fff 更新过 store 后
   跑一次, 让 agent 从 store 同步到本代理; `--dry-run` 先预览)。
 - 不在 store 里的手加上游在重生成时会丢 (`build_upstreams` 只认 store 里的 provider);
