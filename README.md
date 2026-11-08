@@ -236,6 +236,9 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 - 模型的 `tollgate_priority` 为负时该模型停用: 生成配置时跳过, 不进候选
   (aliases), 也不进上游的 `models` 声明/额度组; 想临时下掉某个上游模型就把它
   的优先级改成负数, 恢复时改回非负即可。
+- provider 自身的 `tollgate_priority` 为负时整家停用: 不进 `aliases` 候选,
+  也不进 `upstreams`; 想临时下掉整个上游就把它自身优先级改成负数, 恢复时改回
+  非负即可 (模型级与 provider 级共用同一个 `tollgate_priority` 字段)。
 - `tollgate_group` / `tollgate_priority` 手工维护, 但不会被 store 更新脚本冲掉
   (`merge_models_by_id` 继承 provider API 不提供的字段)。跨上游同族不同名的模型 (如 ustc 的
   `deepseek-flash` 与 ark 的 `deepseek-v4-1-flash*`) 就靠 `tollgate_group` 并成一个别名。
@@ -263,7 +266,8 @@ python3 scripts/gen_tollgate_config.example.py
 优先级用状态台的 `settings` 页调: provider 面板 + 模型列表 + 候选顺序实时预览;
 `m` / `p` / `g` 切模型 / provider / 调度参数, `+/-` 调值 (模型优先级减到 -1 即停用,
 再按 `-` 不再减小; 该行仍显示、预览里排最后、可调回, 但生成配置时被跳过,
-不会出现在 tollgate 模型目录), `=` 输入数值, `/` 过滤,
+不会出现在 tollgate 模型目录; provider 优先级减到 -1 即整家停用, 面板里行尾标
+"停用", 它的模型不进列表与预览, 调回非负即恢复), `=` 输入数值, `/` 过滤,
 `s` 保存并生成: 优先级写 store, 调度参数写配置, store 有改动时顺带重生成
 `tollgate.json` (aliases/upstreams 与 store 保持一致), 最后热加载一次到位;
 `h` 热加载, `q` 退出。

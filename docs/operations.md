@@ -163,6 +163,8 @@ mv llm-request-tollgate.bak llm-request-tollgate && ./deploy/tollgate.sh restart
   别名.
 - 候选顺序 = `tollgate_priority` 降序 (同值看 provider 的, 再同值按 `--providers` 顺
   序); 0 最小, 缺省即 0.
+- 模型 `tollgate_priority` 为负 = 该模型停用, provider 自身的为负 = 整家停用: 都
+  不进候选, 停用的 provider 连 `upstreams` 都不进; 恢复时改回非负即可.
 - 代理对外模型列表继承候选的 `thinkingLevelMap` (取交集) 与最小的 `contextWindow` /
   `maxTokens`; 缺等级表时 agent 汇报 `UNSUPPORTED_REASONING_EFFORT` 拒发.
 - `key_env` 取 store 里 `apiKey` 的占位符名; `auth_header` 等从现有配置继承.
@@ -187,7 +189,8 @@ python3 scripts/gen_tollgate_config.example.py
 `gate` 段, 其余字段与格式原样保留), 下半是 store (`~/fff/config/llm-models.json` 里的
 `tollgate_priority`), 右栏实时预览候选顺序. `m` / `p` / `g` 聚焦模型 / provider / 调度参数,
 `+/-` 调值, `=` 输数值, `/` 过滤, `s` 保存并生成: store 有改动时自动重生成配置
-(aliases/upstreams 与 store 一致, 含停用模型剔除), 再热加载一次到位; `h` 热加载, `q` 退出.
+(aliases/upstreams 与 store 一致, 含停用模型与停用 provider 剔除), 再热加载一次到位; `h` 热加载, `q` 退出.
+模型与 provider 优先级减到 -1 即停用 (前者停用该模型, 后者整家停用, 面板行尾标 "停用"; 都仍显示、可调回).
 
 ```bash
 # 同进程起代理 + 状态台 (q 退出):

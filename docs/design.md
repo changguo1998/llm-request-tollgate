@@ -187,6 +187,8 @@
   `config.local.json`, 只动 `gate` 段), 下半调 store 里的 `tollgate_priority`, 右栏实时
   预览候选顺序 (`m` / `p` / `g` 切模型 / provider / 调度参数), `s` 保存并生成
   (store 有改动时自动重生成配置再热加载) / `h` 热加载。它不碰转发路径。
+  模型与 provider 的 `tollgate_priority` 负值都是停用: 前者停用该模型, 后者整家
+  停用 (不进 `upstreams` / `aliases`), 面板与列表仍显示、可调回。
 - `sticky` 页改运行时偏好 (不走文件): 按配置候选链列出, `Enter` 调 `POST /sticky` 置一次,
   `c` 清除; 同进程发给自己, 观察常驻服务时发给被观测地址。
 

@@ -15,6 +15,7 @@ scripts/gen_tollgate_config.py 与它同源, 但直接读 ~/fff/config/llm-model
     - 候选顺序 = 模型 tollgate_priority 降序, 同值看 provider 的 tollgate_priority
       降序, 再同值按列表出现顺序. 0 最小, 缺省即 0.
     - 模型 tollgate_priority 为负: 该模型停用, 不进候选也不进上游 models 声明.
+    - provider 的 tollgate_priority 为负: 整家停用, 不进候选也不进 upstreams.
     - key_env = store 里 apiKey 占位符去掉 "$" 后的名字 ($USTC_API_KEY -> USTC_API_KEY).
     - 额度组 = 条目的 tollgate_billing, 同家同名一组, 缺省归默认组; 输出为上游
       models 里的 billing_group. 整家都没声明时不写 models (与加组之前的形状一致).
@@ -47,6 +48,8 @@ def build(list_path: Path) -> dict:
     # (逻辑名, 上游 id, 真实模型 id, 模型权重, provider 权重, 出现序)
     rows = []
     for up_id, prov in providers.items():
+        if provider_priority(prov) < 0:
+            continue  # provider 负优先级: 整家停用
         for order, model in enumerate(prov.get("models", [])):
             if model_priority(model) < 0:
                 continue  # 负优先级: 模型停用
@@ -61,6 +64,8 @@ def build(list_path: Path) -> dict:
 
     upstreams = []
     for up_id, prov in providers.items():
+        if provider_priority(prov) < 0:
+            continue  # provider 负优先级: 整家停用
         models = []
         for model in prov.get("models", []):
             if model_priority(model) < 0:

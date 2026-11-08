@@ -10,6 +10,7 @@ import (
 
 // buildAliases 复刻生成器的归并与排序, 右栏预览与落进配置的候选顺序一致; 停用模型
 // (负优先级, 下限 -1) 除外: 预览里排在最后, 但生成器会跳过, 不会落进 aliases/tollgate 目录。
+// 停用的 provider (负优先级) 整家跳过: 它的模型不进候选, 生成配置时也不进 upstreams。
 func (e *tuiEditor) buildAliases() []tuiAlias {
 	dropped := e.droplist()
 	type item struct {
@@ -23,6 +24,9 @@ func (e *tuiEditor) buildAliases() []tuiAlias {
 			continue
 		}
 		provPrio := prioOf(entry)
+		if provPrio < 0 {
+			continue // 负优先级: 整个 provider 停用, 与生成器一致
+		}
 		for _, model := range modelsOf(entry) {
 			id := modelID(model)
 			if id == "" || dropped[id] {

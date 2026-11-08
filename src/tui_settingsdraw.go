@@ -70,7 +70,12 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 			if e.focus == 1 && i == e.provSel {
 				attr = tuiRev
 			}
-			col1 = append(col1, attr+tuiIndent+m.upNameAttr(name, attr)+"  priority="+strconv.Itoa(prioOf(e.provEntry(name)))+tuiReset)
+			prio := prioOf(e.provEntry(name))
+			state := ""
+			if prio < 0 {
+				state = " (停用)"
+			}
+			col1 = append(col1, attr+tuiIndent+m.upNameAttr(name, attr)+"  priority="+strconv.Itoa(prio)+state+tuiReset)
 		}
 	} else {
 		col1 = append(col1, tuiYell+"store 读不到: "+e.err+tuiReset)

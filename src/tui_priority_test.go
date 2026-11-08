@@ -366,6 +366,147 @@ func TestPrioNegativeDisableClampAndVisible(t *testing.T) {
 	}
 }
 
+// Provider 负优先级 (下限 -1) = 停用整家: 面板仍显示 (可调回), 但它的模型不进候选
+// 预览与模型列表; 调回非负后全部恢复。与生成器同一口径 (见 TestSettingsRegenerateDropsDisabledProvider)。
+func TestProviderNegativeDisableAndRestore(t *testing.T) {
+	_, cfg := prioFixture(t)
+	e := newTuiEditor(cfg)
+	if !e.usable() {
+		t.Fatalf("store 装载失败: %v", e.err)
+	}
+	if got := strings.Join(e.providers, ","); got != "group,ustc" {
+		t.Fatalf("初始应按优先级降序, 得到 %q", got)
+	}
+	// 把 group (优先级 3) 减到 -1: 停用整家。
+	e.focus = 1
+	for i, n := range e.providers {
+		if n == "group" {
+			e.provSel = i
+		}
+	}
+	e.setValue(-1)
+	if got := prioOf(e.provEntry("group")); got != -1 {
+		t.Fatalf("provider 优先级应能到 -1, 得到 %d", got)
+	}
+	// 直接输入超大负数也钳到 -1。
+	e.setValue(-999)
+	if got := prioOf(e.provEntry("group")); got != -1 {
+		t.Fatalf("直接输入超大负数应钳到 -1, 得到 %d", got)
+	}
+	// 面板里仍在 (可调回), 按优先级降序排到后面。
+	stillThere := false
+	for _, n := range e.providers {
+		if n == "group" {
+			stillThere = true
+		}
+	}
+	if !stillThere {
+		t.Fatalf("停用的 provider 仍应在面板里, 得到 %v", e.providers)
+	}
+	if e.providers[0] != "ustc" {
+		t.Errorf("停用后 group 应排到后面, 得到 %v", e.providers)
+	}
+	// 模型列表与候选预览都不再含 group 的模型。
+	for _, row := range e.filtered() {
+		if row.provider == "group" {
+			t.Errorf("停用 provider 的模型不该出现在模型列表: %s/%s", row.provider, modelID(row.model))
+		}
+	}
+	if got := candIDs(e.candsFor("deepseek-v4.1-flash")); strings.Join(got, " ") != "ustc/deepseek-flash ustc/deepseek-flash-2" {
+		t.Errorf("停用后候选只该剩 ustc 的: %v", got)
+	}
+	if e.candsFor("solo") != nil {
+		t.Errorf("group 被停用后 solo 别名不该再有候选")
+	}
+	// 调回 3: 模型与候选全部恢复。
+	e.setValue(3)
+	if got := prioOf(e.provEntry("group")); got != 3 {
+		t.Fatalf("调回后应为 3, 得到 %d", got)
+	}
+	if got := candIDs(e.candsFor("deepseek-v4.1-flash")); strings.Join(got, " ") != "ustc/deepseek-flash group/deepseek-v4.1-flash ustc/deepseek-flash-2" {
+		t.Errorf("调回后候选顺序应恢复原样: %v", got)
+	}
+	if e.candsFor("solo") == nil {
+		t.Errorf("调回后 solo 别名应有候选")
+	}
+}
+
+// 生成器视角: provider 负优先级 = 整家不进 upstreams 与 aliases (停用模型本来就不进)。
+func TestSettingsRegenerateDropsDisabledProvider(t *testing.T) {
+	dir := t.TempDir()
+	store := `{"providers": {
+		"ustc": {"apiKey": "$USTC_API_KEY", "baseUrl": "https://u.invalid/v1",
+			"models": [{"id": "m1", "tollgate_group": "g"}]},
+		"group": {"apiKey": "$GROUP_API_KEY", "baseUrl": "http://g.invalid/v1", "tollgate_priority": -1,
+			"models": [{"id": "solo"}]}
+	}}`
+	cfgText := `{
+		"listen": "127.0.0.1:8787",
+		"upstreams": [
+			{"id": "ustc", "base_url": "https://u.invalid/v1"},
+			{"id": "group", "base_url": "http://g.invalid/v1"}
+		],
+		"aliases": {}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "llm-models.json"), []byte(store), 0o600); err != nil {
+		t.Fatalf("写 store: %v", err)
+	}
+	cfg := filepath.Join(dir, "tollgate.json")
+	if err := os.WriteFile(cfg, []byte(cfgText), 0o600); err != nil {
+		t.Fatalf("写配置: %v", err)
+	}
+	root := repoRootFor(cfg)
+	gen := filepath.Join(root, "scripts", "gen_tollgate_config.py")
+	if _, err := os.Stat(gen); err != nil {
+		t.Skipf("生成器不在: %v", err)
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("没有 python3")
+	}
+	cmd := exec.Command("python3", gen, "--dry-run", "--fff-dir", dir,
+		"--out", cfg, "--providers", "ustc,group")
+	cmd.Dir = root
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("生成器跑不起来: %v %s", err, stderr.String())
+	}
+	var got struct {
+		Upstreams []struct {
+			ID string `json:"id"`
+		} `json:"upstreams"`
+		Aliases map[string][][2]string `json:"aliases"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("生成器输出不是 JSON: %v", err)
+	}
+	// 停用的 provider 整家退出 upstreams。
+	seenUstc := false
+	for _, u := range got.Upstreams {
+		if u.ID == "group" {
+			t.Error("停用的 provider 不该在 upstreams 里")
+		}
+		if u.ID == "ustc" {
+			seenUstc = true
+		}
+	}
+	if !seenUstc {
+		t.Errorf("未停用的 provider 应保留, 得到 %v", got.Upstreams)
+	}
+	// aliases 里也不该有停用 provider 的候选。
+	for _, pairs := range got.Aliases {
+		for _, p := range pairs {
+			if p[0] == "group" {
+				t.Errorf("停用 provider 不该出现在 aliases 候选里: %v", pairs)
+			}
+		}
+	}
+	if pairs := got.Aliases["g"]; len(pairs) != 1 || pairs[0][0] != "ustc" {
+		t.Errorf("别名 g 应只剩 ustc 候选, 得到 %v", pairs)
+	}
+}
+
 // 页签: 3 键进 settings; settings 页的 h 是热加载 (失败也只报错, 不切页);
 // 状态页的 h/bash 语义不变。
 func TestPrioTabScopedKeys(t *testing.T) {

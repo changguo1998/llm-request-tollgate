@@ -79,8 +79,9 @@ func modelsOf(entry map[string]any) []map[string]any {
 	return out
 }
 
-// prioOf 读优先级; 缺省 0 (最小); 负值 = 停用该模型 (生成配置时跳过, 不进 tollgate 模型目录;
-// settings 页该行仍显示, 可调回非负)。Provider 条目也用它读 (排序用), 只有模型级负值有停用语义。
+// prioOf 读优先级; 缺省 0 (最小); 负值 = 停用: 模型级负值停用该模型 (生成配置时跳过, 不进
+// tollgate 模型目录; settings 页该行仍显示, 可调回非负), provider 级负值停用整个 provider
+// (同样跳生成, 不进 upstreams/aliases; provider 面板仍显示, 可调回非负)。
 func prioOf(entry map[string]any) int {
 	switch v := entry[prioField].(type) {
 	case json.Number:
