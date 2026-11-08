@@ -242,7 +242,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 | `fallbacks` | 换候选次数 |
 | `err` | 错误说明 |
 | `err_body` | 上游真实错误 (有响应内容) 时的响应体原文 (截断 1KB); 锁内跳过 / 传输失败无此字段 |
-| `err_headers` | 上游真实错误时的全部响应头 (如 `Retry-After` / `x-ratelimit-reset-*`, 供查额度重置与到期时间); 锁内跳过 / 传输失败无此字段 |
+| `err_headers` | 上游真实错误时的全部响应头 (如 `Retry-After` / `x-ratelimit-reset-*`, 供查额度重置与到期时间, 也可用于设定额度锁倒计时); 锁内跳过 / 传输失败无此字段 |
 | `class` | 上游错误的归类: `quota` / `concurrency` / `other` (按该上游的 `errors` 规则表); 传输失败记 `transport` |
 | `gate` | 被闸门挡下未发出时的原因 (见 5.2) |
 | `lock_skips` / `backoff_skips` | 候选被锁 / 在退避而被跳过的次数 |
@@ -252,7 +252,8 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 
 一笔请求通常落一行; 若候选链里有上游真实返回了 HTTP 错误, 每个这样的错误都会
 独立多落一行 (即使后续候选兜底成功), `status` = 该上游返回的状态码, 并带
-`err` / `err_body` / `err_headers` / `class`, 便于查额度限制与到期时间; 随后整体
+`err` / `err_body` / `err_headers` / `class`, 便于查额度限制与到期时间; 额度类错误
+解析出的重置时间还会直接用于设定额度锁的倒计时 (设计 §5.5.3); 随后整体
 结局 (成功或最终失败) 再落一行正常记录。传输层失败 (没拿到响应) 也留一行,
 只有 `err` 与 `class=transport`。请求级累计字段 (`fallbacks` / `queued` 等)
 逐行保留当前值。

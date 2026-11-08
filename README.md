@@ -22,7 +22,9 @@
     并记 `missing_usage`。`-usage` 按 上游/模型 × 窗口 列出 token 分解。
 05. 限制反应 (设计 §5.5.2/§5.5.3): 每个上游可用 `errors` 规则 (状态码 + body 关键词)
     把报错分成并发 / 额度 / 其他三类; 命中额度 -> 只锁该模型所属的**记账组**
-    `gate.quota_lock_ms` (10min, 一个上游可以有多组, 不锁整家), 其他 -> 按
+    `gate.quota_lock_ms` (10min 缺省; 上游响应若带额度重置/到期时间 —— 如 ustc 的
+    `Limit resets at` / 方舟的 `It will reset at`, 或 `Reset_at` / `x-ratelimit-reset`
+    / `Retry-After` 头 —— 则按解析出的重置时刻设锁而不用固定时长, 封顶 7 天), 其他 -> 按
     `gate.retry_backoff_ms` (10/20/30s) 退避、连续 4 次熔断锁 `gate.breaker_lock_ms`
     (5min)。**熔断按 `上游/模型` 粒度**: 只锁出错的那个真实模型, 同家别的模型照常发送
     (退避与连续错误计数也一样按模型分开记; 选候选时看到某模型正在退避就直接跳过, 不让

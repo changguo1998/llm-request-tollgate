@@ -175,7 +175,11 @@ func (a *App) classifyFailure(at attempt, kind slotKind, resp *http.Response, bo
 	case classQuota:
 		// 额度限制: 只锁该模型所属的额度组 (额度按组共享), 组内排队的请求随之迁移,
 		// 同家别的组照常发送。
-		a.addLockGroup(at.cd, at.group, "quota", gate.quotaLock(), path)
+		dur := gate.quotaLock()
+		if d := quotaResetDur(body, resp.Header, time.Now()); d > 0 {
+			dur = d
+		}
+		a.addLockGroup(at.cd, at.group, "quota", dur, path)
 		return true, true
 	case classConcurrency:
 		// 并发限制: 锁掉超发试探。试探撞上就锁完直接换下一个候选; 普通请求锁完后本笔

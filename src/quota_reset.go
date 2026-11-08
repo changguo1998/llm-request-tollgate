@@ -1,0 +1,108 @@
+// quota_reset.go: 从额度类错误的响应体 / 响应头里解析「额度何时重置 (到期)」, 用真实的
+// 重置时刻设定额度锁的倒计时, 而不是固定 quota_lock_ms。解析来源按优先级:
+//   1. 响应体里的绝对时间 (Limit resets at ... / It will reset at ...);
+//   2. 响应头里的绝对时间 (Reset_at / x-ratelimit-reset-*);
+//   3. Retry-After (相对秒数) 与 x-ratelimit-reset 的时长形态 (如 "6m0s")。
+// 全部解析不到时才回退配置的固定时长。上下限保护 (minLockDur / maxLockDur) 防止脏数据
+// 把锁设得太短或太长 (已过的、太近的、远超一周的都不认)。
+
+package main
+
+import (
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// minLockDur / maxLockDur 是解析结果可接受的范围: 至少锁 minLockDur, 封顶 maxLockDur。
+// 周额度重置约 3 天后, 7 天足够; 更长的重置时间视为异常, 回退固定时长。
+const (
+	minLockDur = time.Second
+	maxLockDur = 7 * 24 * time.Hour
+)
+
+// bodyScanCap 是被动扫描响应体的长度上限: 重置时间总在错误文案开头, 只扫前 8KB。
+const bodyScanCap = 8 * 1024
+
+// resetTimeRe 匹配带明确时区的日期时间 (数字偏移和/或缩写); 不带时区的不匹配, 免得把
+// 本地时区的文本错当 UTC。匹配形态: "2026-11-07 13:36:10 UTC" /
+// "2026-11-09 00:00:00 +0800 CST" / RFC3339。
+var resetTimeRe = regexp.MustCompile(
+	`\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[ ]+[+-]\d{2}:?\d{2})?(?:[ ]+[A-Za-z]{2,5})?`)
+
+// resetTimeLayouts 是各时区形态可用的解析布局, 从最具体到最通用。数字偏移优先于缩写:
+// 缩写 "CST" 在 Go 里默认是美国中部时区, 显式偏移 (如 +0800) 才可靠。
+var resetTimeLayouts = []string{
+	"2006-01-02 15:04:05 -0700 MST",
+	"2006-01-02 15:04:05 -07:00 MST",
+	"2006-01-02 15:04:05 -0700",
+	"2006-01-02 15:04:05 -07:00",
+	"2006-01-02 15:04:05 MST",
+	time.RFC3339Nano,
+	time.RFC3339,
+}
+
+// quotaResetDur 从额度类错误的响应体与响应头解析额度重置倒计时 (到下一个重置时刻的
+// 距离); 解析不到返回 0。可用来源按顺序取第一个落在边界内的结果。
+func quotaResetDur(body []byte, hdr http.Header, now time.Time) time.Duration {
+	if len(body) > bodyScanCap {
+		body = body[:bodyScanCap]
+	}
+	// 1. 响应体里的绝对时间。
+	if m := resetTimeRe.Find(body); m != nil {
+		if d, ok := resetDur(string(m), now); ok {
+			return d
+		}
+	}
+	// 2. 响应头里的绝对时间 (Reset_at / x-ratelimit-reset-*), 键名不区分大小写。
+	for k, vv := range hdr {
+		if !strings.Contains(strings.ToLower(k), "reset") {
+			continue
+		}
+		for _, v := range vv {
+			if d, ok := resetDur(v, now); ok {
+				return d
+			}
+		}
+	}
+	// 3. Retry-After 的相对秒数。
+	if v := hdr.Get("Retry-After"); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			if d := clampResetDur(time.Duration(n) * time.Second); d > 0 {
+				return d
+			}
+		}
+	}
+	return 0
+}
+
+// resetDur 解析一段文本为「到某个时刻为止的倒计时」: 先按带显式时区的日期时间解析
+// (无时区布局不在列表里), 再退到时长形态 (如 "6m0s" / "60s", 视作相对到期时间)。
+// 结果须落在 [minLockDur, maxLockDur] 内, 否则判无效。
+func resetDur(text string, now time.Time) (time.Duration, bool) {
+	text = strings.TrimSpace(text)
+	for _, l := range resetTimeLayouts {
+		t, err := time.Parse(l, text)
+		if err != nil {
+			continue
+		}
+		d := clampResetDur(t.Sub(now))
+		return d, d > 0
+	}
+	if d, err := time.ParseDuration(text); err == nil {
+		if c := clampResetDur(d); c > 0 {
+			return c, true
+		}
+	}
+	return 0, false
+}
+
+// clampResetDur 把倒计时按上下限收口; 收完还在范围内就返回它, 否则无效 (0)。
+func clampResetDur(d time.Duration) time.Duration {
+	if d < minLockDur || d > maxLockDur {
+		return 0
+	}
+	return d
+}
