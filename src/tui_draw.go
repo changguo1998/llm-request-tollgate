@@ -143,7 +143,7 @@ func (m *tuiModel) drawHeader(c *tuiCanvas) {
 	// 第 1 行整行都用前景色 (只有程序名加粗): 灰字在深色终端上太弱。
 	c.line(tuiIndent + tuiBold + "tollgate tui" + tuiReset + "  观测 " + src +
 		"   监听 " + m.listen + "   日志 " + m.logPath)
-	// 第 2 行实时状态: 此刻正在发生什么 (连接 / 路由 / 首字节 / 活跃字节 / 运行 / 窗口)。
+	// 第 2 行实时状态: 此刻正在发生什么 (连接 / 路由 / 首字节 / 字节速率 / 运行 / 窗口)。
 	// 第 3 行统计状态: 窗口内的累计计数 (读日志 / 请求 / 错误 / 换候选 / token), 报错放行末。
 	// 两行各固定一行, 超宽由 line 截断 (不再折行)。
 	rows := m.routeRows()
@@ -152,7 +152,7 @@ func (m *tuiModel) drawHeader(c *tuiCanvas) {
 		"   进行中 " + strconv.Itoa(len(m.pulse.Active)) +
 		"   路由 " + strconv.Itoa(len(rows)) + " 条" +
 		"   首字节 " + m.ttfbCell(a) +
-		"   流量 " + humanRate(float64(m.activeBytes())) +
+		"   流量 " + humanRate(m.flowRate) +
 		"   运行 " + durStr(time.Since(m.start)) +
 		"   窗口 " + durStr(m.window))
 	stats := "已读日志 " + strconv.Itoa(m.scanned) + " 条   " +
@@ -164,15 +164,6 @@ func (m *tuiModel) drawHeader(c *tuiCanvas) {
 	}
 	c.line(tuiIndent + stats)
 	m.statusRows = 2
-}
-
-// activeBytes 是进行中请求已转发的响应字节总和 (接收中阶段的 RecvBytes)。
-func (m *tuiModel) activeBytes() int64 {
-	var n int64
-	for _, f := range m.pulse.Active {
-		n += f.RecvBytes
-	}
-	return n
 }
 
 // drawTabs 画页签行; 上游状态不放在顶端, 并进第 1 页正文。

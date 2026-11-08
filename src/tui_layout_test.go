@@ -177,6 +177,7 @@ func TestHeaderRealTimeAndStatsRows(t *testing.T) {
 		{ID: 2, Logical: "m", Up: "ustc", Model: "m1", Stage: stageRecv, StartTime: now,
 			RecvBytes: 1 << 10},
 	}
+	m.flowRate = 1 << 20 // 每秒速率由 sampleFlowBytes 算好, 顶栏只负责写出来
 	m.routes = map[string]*routeRow{
 		"k": {Logical: "m", Upstream: "ustc", Model: "m1", Reqs: 3, Errs: 1, Fallbacks: 2,
 			Total: 500, Cached: 300,
@@ -190,7 +191,7 @@ func TestHeaderRealTimeAndStatsRows(t *testing.T) {
 	if len(lines) < 3 {
 		t.Fatalf("顶栏应有 3 行, 得到 %d 行", len(lines))
 	}
-	// 第 2 行 (下标 1): 实时状态 (首字节 最近一次 200ms/平均 300ms, 活跃字节 1M+).
+	// 第 2 行 (下标 1): 实时状态 (首字节 最近一次 200ms/平均 300ms, 字节速率 1 MB/s).
 	rt := lines[1]
 	for _, want := range []string{"状态 live", "进行中 2", "路由 1 条",
 		"首字节 0.2s/0.3s", "流量 1 MB/s", "窗口 03:00:00"} {

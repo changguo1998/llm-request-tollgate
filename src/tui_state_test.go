@@ -64,6 +64,38 @@ func TestNoteRows(t *testing.T) {
 	}
 }
 
+// sampleFlowBytes 把进行中请求的累计字节换算成每秒速率: 第一拍只记基线, 之后每拍只取
+// 相比上一拍的增量, 除以采样间隔; 新请求的字节算进它出现的那一拍, 请求结束不出现负数。
+func TestSampleFlowBytes(t *testing.T) {
+	m := newTUIModel("cfg")
+	t0 := time.Unix(1000, 0)
+	m.pulse.Active = []flow{{ID: 1, RecvBytes: 5000}, {ID: 2, RecvBytes: 1000}}
+	m.sampleFlowBytes(t0)
+	if m.flowRate != 0 {
+		t.Errorf("第一拍只记基线, 速率应为 0, 得到 %v", m.flowRate)
+	}
+	// 1s 后: 1 号从 5000 涨到 9000 (增量 4000), 2 号结束, 3 号这期间才开始 (500 字节全算这一拍)。
+	m.pulse.Active = []flow{{ID: 1, RecvBytes: 9000}, {ID: 3, RecvBytes: 500}}
+	m.sampleFlowBytes(t0.Add(time.Second))
+	if m.flowRate != 4500 {
+		t.Errorf("速率应为 4500 B/s, 得到 %v", m.flowRate)
+	}
+	// 2s 后全部结束: 增量 0, 速率回落到 0 (不是负数)。
+	m.pulse.Active = nil
+	m.sampleFlowBytes(t0.Add(2 * time.Second))
+	if m.flowRate != 0 {
+		t.Errorf("没有在飞请求时速率应为 0, 得到 %v", m.flowRate)
+	}
+	// 半秒的采样间隔按实际间隔折算: 1000 B / 0.5s = 2000 B/s。
+	m.pulse.Active = []flow{{ID: 4, RecvBytes: 100}}
+	m.sampleFlowBytes(t0.Add(3 * time.Second))
+	m.pulse.Active = []flow{{ID: 4, RecvBytes: 1100}}
+	m.sampleFlowBytes(t0.Add(3500 * time.Millisecond))
+	if m.flowRate != 2000 {
+		t.Errorf("速率应按实际间隔折算成 2000 B/s, 得到 %v", m.flowRate)
+	}
+}
+
 // gateReason 把日志里的 gate 值换成中文短语, 未知值原样返回。
 func TestGateReason(t *testing.T) {
 	cases := map[string]string{

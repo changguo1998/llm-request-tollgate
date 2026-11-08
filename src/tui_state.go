@@ -22,7 +22,9 @@ func (m *tuiModel) pollState(app *App, since uint64) uint64 {
 	if app != nil {
 		p := app.snapshot(since)
 		m.pulse, m.live, m.lastErr = p, true, ""
-		m.noteRows(time.Now())
+		now := time.Now()
+		m.noteRows(now)
+		m.sampleFlowBytes(now)
 		m.mergeEvents(p.Events)
 		return p.MaxSeq
 	}
@@ -47,9 +49,37 @@ func (m *tuiModel) pollState(app *App, since uint64) uint64 {
 		return since
 	}
 	m.pulse, m.live, m.lastErr = p, true, ""
-	m.noteRows(time.Now())
+	now := time.Now()
+	m.noteRows(now)
+	m.sampleFlowBytes(now)
 	m.mergeEvents(p.Events)
 	return p.MaxSeq
+}
+
+// sampleFlowBytes 把进行中请求已转发的字节换算成每秒速率: 与上一拍比, 只累加各笔请求
+// 在这一个采样间隔里新增的字节, 再除以两拍的实际间隔。第一拍只记基线不算速率; 上一拍还
+// 没有的请求说明它这期间才开始, 现在的累计字节全算这一拍; 已经结束的请求不再出现, 它的
+// 字节也就不会拉出负数。每次取到观测面后调用。
+func (m *tuiModel) sampleFlowBytes(now time.Time) {
+	cur := make(map[uint64]int64, len(m.pulse.Active))
+	var delta int64
+	for _, f := range m.pulse.Active {
+		cur[f.ID] = f.RecvBytes
+		prev, seen := m.flowBytes[f.ID]
+		switch {
+		case !seen: // 这期间才开始的请求: 累计字节都在这一拍里
+			delta += f.RecvBytes
+		case f.RecvBytes > prev:
+			delta += f.RecvBytes - prev
+		}
+	}
+	m.flowBytes = cur
+	if !m.bytesAt.IsZero() {
+		if el := now.Sub(m.bytesAt); el > 0 {
+			m.flowRate = float64(delta) / el.Seconds()
+		}
+	}
+	m.bytesAt = now
 }
 
 // mergeEvents 把服务侧事件 (锁/恢复/请求结局) 并进事件流。

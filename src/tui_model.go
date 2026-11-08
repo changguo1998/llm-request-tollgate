@@ -39,9 +39,16 @@ type tuiModel struct {
 	rows       int
 	statusRows int       // 顶栏状态区固定占行数 (=2), 内容区高度按它扣
 	refreshed  time.Time // 上次重读日志/取观测的时刻 (按键连发时别每次都重读)
-	pageTotal  int       // 第 1 页 (分块 + 两张模型表) 的总行数 (滚动用)
-	pageTop    int       // 该页当前窗口的第一行
-	pageWin    int       // 该页当前窗口的数据行数 (提示行里的 a-b 按它算)
+
+	// 顶栏「流量」的每秒速率: 每次取到观测面时, 累加各笔请求已转发字节相比上一拍的增量,
+	// 再除以采样间隔。flowBytes 是上一拍的基线 (请求编号 -> 当时已转发的累计字节),
+	// bytesAt 是上一拍的采样时刻。
+	flowBytes map[uint64]int64
+	bytesAt   time.Time
+	flowRate  float64
+	pageTotal int // 第 1 页 (分块 + 两张模型表) 的总行数 (滚动用)
+	pageTop   int // 该页当前窗口的第一行
+	pageWin   int // 该页当前窗口的数据行数 (提示行里的 a-b 按它算)
 
 	prio     *tuiEditor   // settings 页 (调度参数 + 权重编辑), runTUI 里装载
 	reloadFn func() error // 同进程模式的热加载回调; 空 = 走 deploy/tollgate.sh hup
