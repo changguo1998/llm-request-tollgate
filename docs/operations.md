@@ -154,24 +154,27 @@ mv llm-request-tollgate.bak llm-request-tollgate && ./deploy/tollgate.sh restart
 ### 6.1 由 fff 模型列表生成配置
 
 本机版 `scripts/gen_tollgate_config.py` (在 dotfiles, 不进公开仓库) 读
-`~/fff/config/llm-models.json` 与黑名单 `llm-models-droplist.json`, 生成
-`upstreams` 与 `aliases` 写回 `config.local.json` (即 `~/fff/config/tollgate.json`).
+`~/fff/config/llm-models.json` (provider -> baseUrl/models, 模型条目只带模型参数
+contextWindow / maxTokens / thinkingLevelMap / reasoning 等) 与黑名单
+`llm-models-droplist.json`; 权重从现有 `config.local.json` (即 `~/fff/config/tollgate.json`)
+的 `upstreams` / `upstreams[].models` 读 (provider 与模型的 `priority`, 模型的 `group` /
+`billing_group`), 重生成 `upstreams` 与 `aliases` 写回.
 公开仓库提供不依赖 fff 的示例: `scripts/gen_tollgate_config.example.py` +
-模型列表示例 `scripts/llm-models.example.json`. 要点:
+模型列表示例 `scripts/llm-models.example.json` (权重可用 `--cfg` 从现有配置继承). 要点:
 
-- 逻辑名取条目的 `tollgate_group`, 没有就是模型 id; 同 id 跨上游 / 显式同组归并成一个
+- 逻辑名取上游 models 条目里的 `group`, 没有就是模型 id; 同 id 跨上游 / 显式同组归并成一个
   别名.
-- 候选顺序 = `tollgate_priority` 降序 (同值看 provider 的, 再同值按 `--providers` 顺
+- 候选顺序 = 模型 `priority` 降序 (同值看 provider 的, 再同值按 `--providers` 顺
   序); 0 最小, 缺省即 0.
-- 模型 `tollgate_priority` 为负 = 该模型停用, provider 自身的为负 = 整家停用: 都
-  不进候选, 停用的 provider 连 `upstreams` 都不进; 恢复时改回非负即可.
+- 模型 `priority` 为负 = 该模型停用, provider 的为负 = 整家停用: 都只不进别名候选,
+  仍留在 `upstreams` 的 `models` (权重保留, TUI 可调回); 恢复时改回非负即可.
 - 代理对外模型列表继承候选的 `thinkingLevelMap` (取交集) 与最小的 `contextWindow` /
-  `maxTokens`; 缺等级表时 agent 汇报 `UNSUPPORTED_REASONING_EFFORT` 拒发.
+  `maxTokens` (从 store 的模型参数); 缺等级表时 agent 汇报 `UNSUPPORTED_REASONING_EFFORT` 拒发.
 - `key_env` 取 store 里 `apiKey` 的占位符名; `auth_header` 等从现有配置继承.
-- `--dry-run` 只打印; `--providers` 改上游与优先级. 不传时缺省是 store 里除 `tollgate`
+- `--dry-run` 只打印; `--providers` 改上游顺序. 不传时缺省是 store 里除 `tollgate`
   (代理自身) 与 `arkap` 外的全部 provider; arkap 要带就显式写进 `--providers`.
-- 额度组取模型的 `tollgate_billing`, 生成到上游的 `models` (字段 `billing_group`); 同家同名
-  一组, 不写归默认组, 整家都没写时不输出 `models`.
+- 额度组取模型的 `billing_group`, 生成到上游的 `models` (字段同名); 同家同名
+  一组, 不写归默认组. 上游的 `models` 现在固定写出 (权重在上面).
 - 不在 store 里的手加上游在重生成时会丢 (`build_upstreams` 只认 store 里的 provider);
   要先在 store 里补 provider, 或重生成后手工补回.
 
@@ -185,11 +188,12 @@ python3 scripts/gen_tollgate_config.example.py
 
 ### 6.2 用 TUI settings 页调权重与调度参数
 
-状态台第 3 个页签 (settings) 上半是 `gate` 的 7 项调度参数 (写回 `config.local.json` 的
-`gate` 段, 其余字段与格式原样保留), 下半是 store (`~/fff/config/llm-models.json` 里的
-`tollgate_priority`), 右栏实时预览候选顺序. `m` / `p` / `g` 聚焦模型 / provider / 调度参数,
-`+/-` 调值, `=` 输数值, `/` 过滤, `s` 保存并生成: store 有改动时自动重生成配置
-(aliases/upstreams 与 store 一致, 含停用模型与停用 provider 剔除), 再热加载一次到位; `h` 热加载, `q` 退出.
+状态台第 3 个页签 (settings) 上半是全局调度参数 (写回 `config.local.json` 的扁平顶层键,
+其余字段与格式原样保留), 下半是权重 (`config.local.json` 的 `upstreams` /
+`upstreams[].models` 上的 `priority`; store 只读模型列表), 右栏实时预览候选顺序.
+`m` / `p` / `g` 聚焦模型 / provider / 调度参数, `+/-` 调值, `=` 输数值, `/` 过滤,
+`s` 保存并生成: 权重有改动时自动重生成配置 (aliases/upstreams 与权重 + 模型列表一致,
+含停用模型与停用 provider 剔除), 再热加载一次到位; `h` 热加载, `q` 退出.
 模型与 provider 优先级减到 -1 即停用 (前者停用该模型, 后者整家停用, 面板行尾标 "停用"; 都仍显示、可调回).
 
 ```bash
