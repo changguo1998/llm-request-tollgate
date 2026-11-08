@@ -159,6 +159,7 @@ contextWindow / maxTokens / thinkingLevelMap / reasoning 等) 与黑名单
 `llm-models-droplist.json`; 权重从现有 `config.local.json` (即 `~/fff/config/tollgate.json`)
 的 `upstreams` / `upstreams[].models` 读 (provider 与模型的 `priority`, 模型的 `group` /
 `billing_group`), 重生成 `upstreams` 与 `aliases` 写回.
+本脚本只写配置, 不碰 store; 代理自身的 `tollgate` (kind=proxy) 目录条目由 `scripts/upsert_tollgate_provider.py` 维护 (fff 更新过 store 后跑一次, 让 agent 从 store 指向本代理).
 公开仓库提供不依赖 fff 的示例: `scripts/gen_tollgate_config.example.py` +
 模型列表示例 `scripts/llm-models.example.json` (权重可用 `--cfg` 从现有配置继承). 要点:
 
@@ -182,6 +183,8 @@ contextWindow / maxTokens / thinkingLevelMap / reasoning 等) 与黑名单
 # 本机版 (dotfiles 维护, 依赖本机 fff store):
 python3 scripts/gen_tollgate_config.py --dry-run
 python3 scripts/gen_tollgate_config.py
+# store 更新后同步代理自身目录条目 (agent 从 store 指向本代理):
+python3 scripts/upsert_tollgate_provider.py
 # 公开仓库示例 (不依赖 fff, 读 scripts/llm-models.example.json):
 python3 scripts/gen_tollgate_config.example.py
 ```
@@ -288,4 +291,4 @@ python3 scripts/gen_tollgate_config.example.py
 | `.ruff_cache/` | ruff 缓存 (生成脚本 lint 用) | 可删, 会重建 |
 | `scripts/__pycache__/` | Python 字节码缓存 | 可删, 会重建 |
 | `config.local.json` | 本机配置软链 -> `~/fff/config/tollgate.json` | **不可删**; 别提交进 git |
-| `deploy/tollgate.service` / `scripts/gen_tollgate_config.py` / `test/healthcheck.sh` | 本机 fff 版脚本, 公开仓库只跟踪对应 `.example` | 别提交进 git (已 ignore); 删了可从 dotfiles 恢复 |
+| `deploy/tollgate.service` / `scripts/gen_tollgate_config.py` / `scripts/upsert_tollgate_provider.py` / `test/healthcheck.sh` | 本机 fff 版脚本, 公开仓库只跟踪对应 `.example` | 别提交进 git (已 ignore); 删了可从 dotfiles 恢复 |

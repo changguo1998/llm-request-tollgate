@@ -260,6 +260,9 @@ thinkingLevelMap / reasoning) 与 `llm-models-droplist.json` (精确匹配黑名
 - 写入 `config.local.json` (即 `~/fff/config/tollgate.json`); `--dry-run` 只打印,
   `--providers` 改上游顺序; 不传时缺省是 store 里**除 tollgate 与 arkap 外**的全部 provider
   (arkap 要带就显式写进 `--providers`).
+- 只生成配置, 不再写 store: 代理自身的 `tollgate` (kind=proxy) 目录条目由
+  独立脚本 `scripts/upsert_tollgate_provider.py` 维护 (fff 更新过 store 后
+  跑一次, 让 agent 从 store 同步到本代理; `--dry-run` 先预览)。
 - 不在 store 里的手加上游在重生成时会丢 (`build_upstreams` 只认 store 里的 provider);
   要先在 store 里补 provider, 或重生成后手工补回。
 
@@ -267,6 +270,8 @@ thinkingLevelMap / reasoning) 与 `llm-models-droplist.json` (精确匹配黑名
 # 本机版 (dotfiles 维护, 依赖本机 fff store):
 python3 scripts/gen_tollgate_config.py --dry-run
 python3 scripts/gen_tollgate_config.py
+# store 更新后同步代理自身目录条目 (agent 从 store 指向本代理):
+python3 scripts/upsert_tollgate_provider.py
 # 公开仓库示例 (不依赖 fff, 读 scripts/llm-models.example.json):
 python3 scripts/gen_tollgate_config.example.py
 ```

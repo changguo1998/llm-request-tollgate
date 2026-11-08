@@ -189,7 +189,7 @@ func TestPrioOrderMatchesGenerator(t *testing.T) {
 		t.Skip("没有 python3")
 	}
 	cmd := exec.Command("python3", gen, "--dry-run", "--fff-dir", filepath.Dir(store),
-		"--out", cfg, "--providers", "ustc,group", "--no-store")
+		"--out", cfg, "--providers", "ustc,group")
 	cmd.Dir = root
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -525,7 +525,7 @@ func TestSettingsRegenerateKeepsDisabledProvider(t *testing.T) {
 		t.Skip("没有 python3")
 	}
 	cmd := exec.Command("python3", gen, "--dry-run", "--fff-dir", dir,
-		"--out", cfg, "--providers", "ustc,group", "--no-store")
+		"--out", cfg, "--providers", "ustc,group")
 	cmd.Dir = root
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
