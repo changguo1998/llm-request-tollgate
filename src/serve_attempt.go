@@ -174,7 +174,8 @@ func (a *App) classifyFailure(at attempt, kind slotKind, resp *http.Response, bo
 	switch at.up.classify(resp.StatusCode, body) {
 	case classQuota:
 		// 额度限制: 只锁该模型所属的额度组 (额度按组共享), 组内排队的请求随之迁移,
-		// 同家别的组照常发送。
+		// 同家别的组照常发送。上游响应若带额度重置时间 (响应体 / 响应头), 按解析出的
+		// 重置时刻设锁 (quotaResetDur); 解析不到才回退配置的固定时长。
 		dur := gate.quotaLock()
 		if d := quotaResetDur(body, resp.Header, time.Now()); d > 0 {
 			dur = d
