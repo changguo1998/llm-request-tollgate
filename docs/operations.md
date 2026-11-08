@@ -124,6 +124,11 @@ connect 与 stream_idle 取每次建连 / 读写时的当前值, response_header
 该阈值视为探测失败继续锁; 且低性能锁每次解锁后一个观察窗口内再次触发时, 锁持时长翻倍
 (基础 ×2/×4/×8 封顶), 免得「放行一笔又锁上」的周期抖动.
 
+额度锁的时长另有来源: 上游错误响应 (响应体 / 响应头) 若带额度重置 / 到期时间
+(如 ustc 的 `Limit resets at`、方舟的 `It will reset at`, 或 `Reset_at` /
+`x-ratelimit-reset` / `Retry-After` 头), 额度锁按该时刻设倒计时 (封顶 7 天),
+解析不到才用固定 `quota_lock_sec`。锁剩余看 `var/gate-state.json` 的到期时刻.
+
 ## 5. 升级 / 回滚
 
 ### 5.1 升级
@@ -274,7 +279,7 @@ python3 scripts/gen_tollgate_config.example.py
 | 服务起不来 / 崩了重启 | `./deploy/tollgate.sh status`; systemctl 失败原因看 `journalctl --user -u tollgate.service -e` |
 | 提示缺二进制 / 缺配置 | install 会检查; 先 `make build` 与备好 `config.local.json` |
 | 密钥没加载 (401) | `./deploy/tollgate.sh logs` 看 `Loaded xxx.ai`; `-check` 验证 key_env |
-| 一片 429 | 先分 `gate` 字段: `locked` 看 `var/gate-state.json` (锁到几点、什么原因); `sem_timeout` / `queue_timeout` 是并发 / 排队不够, 调 `gate` 参数 |
+| 一片 429 | 先分 `gate` 字段: `locked` 看 `var/gate-state.json` (锁到几点、什么原因; 额度锁的到期时间可能来自上游响应里的重置时间); `sem_timeout` / `queue_timeout` 是并发 / 排队不够, 调 `gate` 参数 |
 | 某模型持续 429 / 慢 | 熔断锁只锁 `上游/模型`, 换别的模型或等锁到期; 看 `/state` 的 `cands[].models` |
 | hup 后不生效 | 确认改的是别名 / 上游 / 扁平全局键 (gate / timeouts 的 `*_sec` 键); 只有 `listen` / `log_path` 要重启 |
 | 上游报错种类怪 | `unclassified upstream error` 会打进服务日志, 按 docs/providers-api.md 补 `errors` 规则后 hup |
