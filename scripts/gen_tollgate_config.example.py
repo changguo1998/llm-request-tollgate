@@ -26,6 +26,9 @@ scripts/gen_tollgate_config.py 与它同源, 但直接读 ~/fff/config/llm-model
     - key_env = store 里 apiKey 占位符去掉 "$" 后的名字 ($USTC_API_KEY -> USTC_API_KEY).
     - 额度组 = 条目的 billing_group, 同家同名一组, 缺省归默认组; 输出为上游
       models 里的 billing_group. 上游的 models 现在固定写出 (它带着权重字段).
+    - groups (别名的别名, 手工维护顶层键) 从已有配置原样保留; 生成后若某组成员
+      不再是对应别名 (模型被删 / 停用), 打印警告 —— 代理加载时会因「成员不是已
+      注册逻辑名」报错拦住.
 
 用法:
     python3 scripts/gen_tollgate_config.example.py                 # 读示例列表, 打印 JSON
@@ -44,6 +47,9 @@ DEFAULT_LIST = Path(__file__).with_name("llm-models.example.json")
 PRIORITY_FIELD = "priority"
 GROUP_FIELD = "group"
 BILLING_FIELD = "billing_group"
+
+# 组 (别名的别名): 组名 -> 已注册逻辑名列表. 手工维护, 从 --cfg 原样保留.
+GROUPS_FIELD = "groups"
 
 
 def weight(
@@ -72,7 +78,20 @@ def weight(
     return prov_prio, model_prio, group, billing
 
 
-def build(list_path: Path, cfg_path: Path) -> dict:
+def groups_of(cfg: dict | None) -> dict[str, list[str]]:
+    """从已有配置取 groups (组名 -> 成员逻辑名列表), 原样保留; 空 / 缺省返回空表."""
+    groups = (cfg or {}).get(GROUPS_FIELD, {})
+    if not isinstance(groups, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for g, members in groups.items():
+        if not isinstance(members, list):
+            continue
+        out[str(g)] = [str(m) for m in members]
+    return out
+
+
+def build(list_path: Path, cfg_path: Path) -> tuple[dict, list[str]]:
     data = json.loads(list_path.read_text(encoding="utf-8"))
     providers = data["providers"]
     cfg = (
@@ -122,7 +141,21 @@ def build(list_path: Path, cfg_path: Path) -> dict:
         }
         upstreams.append(entry)
 
-    return {"upstreams": upstreams, "aliases": aliases}
+    out: dict = {"upstreams": upstreams, "aliases": aliases}
+    warnings: list[str] = []
+    groups = groups_of(cfg)
+    # 组只能在生成的别名集合里引用成员: 成员被删 / 停用后不再是别名, 警告但保留原样
+    # (代理加载时会显式报错, 别在这里静默改掉手工维护的列表).
+    if groups:
+        out[GROUPS_FIELD] = groups
+        alias_ids = set(aliases)
+        for g, members in groups.items():
+            missing = [m for m in members if m not in alias_ids]
+            if missing:
+                warnings.append(
+                    f"group {g}: member(s) no longer an alias: {', '.join(missing)}"
+                )
+    return out, warnings
 
 
 def main() -> None:
@@ -134,8 +167,10 @@ def main() -> None:
     ap.add_argument("--out", default="", help="写到文件而非 stdout")
     args = ap.parse_args()
 
-    out = build(Path(args.list), Path(args.cfg))
+    out, warnings = build(Path(args.list), Path(args.cfg))
     text = json.dumps(out, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+    for w in warnings:
+        print(f"注意: {w}", file=sys.stderr)
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")
         print(f"已写入 {args.out}", file=sys.stderr)

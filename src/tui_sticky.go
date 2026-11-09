@@ -30,22 +30,24 @@ type stickyLine struct {
 	cand int
 }
 
-// stickyCands 按配置里的别名顺序展开候选链, 并标出当前偏好 (pulse.Sticky)。
-// 逻辑名按字典序排列, 同一逻辑名的候选保持配置顺序 (即 fallback 顺序)。
+// stickyCands 按配置里的候选人展开候选链 (别名 + 组, 组 = 成员候选链拼接),
+// 并标出当前偏好 (pulse.Sticky)。逻辑名按字典序排列, 同一逻辑名的候选保持配置
+// 顺序 (即 fallback 顺序)。组名对客户端与逻辑名无差别, 这里同样可置粘性偏好。
 func (m *tuiModel) stickyCands() ([]stickyCand, error) {
 	c, err := loadConfigOpt(m.cfgPath, true)
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(c.Aliases))
-	for name := range c.Aliases {
+	aliases := c.expandedAliases()
+	names := make([]string, 0, len(aliases))
+	for name := range aliases {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	out := make([]stickyCand, 0)
 	for _, name := range names {
 		p := m.pulse.Sticky[name]
-		for _, tgt := range c.Aliases[name] {
+		for _, tgt := range aliases[name] {
 			out = append(out, stickyCand{
 				logical: name, upstream: tgt[0], model: tgt[1],
 				pref: p.Upstream == tgt[0] && p.Model == tgt[1],

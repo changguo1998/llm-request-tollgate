@@ -138,7 +138,7 @@ func (a *App) applyConfig(c *Config) {
 	a.groups = groups
 	a.groupOrder = groupSeq
 	aliases := map[string][]aliasTarget{}
-	for name, list := range c.Aliases {
+	for name, list := range c.expandedAliases() {
 		for _, pair := range list {
 			aliases[name] = append(aliases[name], aliasTarget{
 				Upstream: pair[0], Model: pair[1], Group: groups[pair[0]][pair[1]],

@@ -170,6 +170,40 @@ func (e *tuiEditor) cfgUpByID() map[string]map[string]any {
 	return out
 }
 
+// groupInfo 是配置里一个组 (别名的别名) 的只读展示条目: 组名 + 成员逻辑名 (按配置顺序)。
+type groupInfo struct {
+	name    string
+	members []string
+}
+
+// groups 读配置的 groups 键 (组名 -> 成员逻辑名列表), 按组名字典序返回;
+// 键缺失或类型不对返回 ok=false。组成员在 loadConfigOpt 已校验为已注册逻辑名,
+// TUI 只展示, 不重新校验。
+func (e *tuiEditor) groups() ([]groupInfo, bool) {
+	raw, ok := e.cfg["groups"].(map[string]any)
+	if !ok || len(raw) == 0 {
+		return nil, false
+	}
+	names := make([]string, 0, len(raw))
+	for name := range raw {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]groupInfo, 0, len(names))
+	for _, name := range names {
+		members := []string{}
+		if list, ok := raw[name].([]any); ok {
+			for _, m := range list {
+				if s, ok := m.(string); ok && s != "" {
+					members = append(members, s)
+				}
+			}
+		}
+		out = append(out, groupInfo{name: name, members: members})
+	}
+	return out, true
+}
+
 // buildMerged 合并 store 模型列表与配置权重: 每个上游一条合并条目, 模型以 store 为准,
 // priority / group / billing_group 从配置同名模型继承, 缺省 0 / 模型 id / 无。
 func (e *tuiEditor) buildMerged() {

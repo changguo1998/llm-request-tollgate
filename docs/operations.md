@@ -106,9 +106,11 @@ ps -o cmd= -p "$(systemctl --user show -p MainPID --value tollgate.service)"
 
 ### 4.1 热加载 (SIGHUP)
 
-`config.local.json` 改别名 / 上游 / `gate` 参数后 `./deploy/tollgate.sh hup` 即可, 不
+`config.local.json` 改别名 / 组 (`groups`) / 上游 / `gate` 参数后
+`./deploy/tollgate.sh hup` 即可, 不
 重启. 热加载时调度状态按上游 id 保留: 队列里排着的请求、爬到的并发上限、退避与锁都不
-清.
+清. 组展开 (成员候选链拼接) 在热加载时一并重算; 组名与逻辑名重名、组成员不是已注册
+逻辑名会在热加载时报错拒绝应用, 服务继续用旧配置.
 
 注意: `connect_sec` / `response_header_sec` / `stream_idle_sec` 三项超时同样随 `SIGHUP` 热加载:
 connect 与 stream_idle 取每次建连 / 读写时的当前值, response_header 从下一笔请求起生效;

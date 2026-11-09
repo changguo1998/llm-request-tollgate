@@ -34,7 +34,8 @@ func stickyFixture(t *testing.T) string {
 	return cfg
 }
 
-// 候选按逻辑名字典序 + 配置顺序展开, 观测面的偏好候选标 pref。
+// 候选按逻辑名字典序 + 配置顺序展开 (含组: 组名与逻辑名并列, 候选 = 成员候选拼接),
+// 观测面的偏好候选标 pref。
 func TestStickyCandsAndMark(t *testing.T) {
 	m := newTUIModel(stickyFixture(t))
 	m.pulse.Sticky = map[string]stickyView{"m1": {Upstream: "u2", Model: "real-2"}}
@@ -66,6 +67,51 @@ func TestStickyCandsAndMark(t *testing.T) {
 	}
 	if !strings.Contains(frame, "m1") || !strings.Contains(frame, "m2") {
 		t.Errorf("应列出全部逻辑名")
+	}
+}
+
+// 组 (别名的别名) 在 sticky 页与逻辑名并列: 组名作逻辑名列出候选链, 也能置组偏好。
+func TestStickyCandsIncludeGroups(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "tollgate.json")
+	if err := os.WriteFile(cfg, []byte(`{
+	    "listen": "127.0.0.1:8787",
+	    "log_path": "var/requests.jsonl",
+	    "upstreams": [
+	        { "id": "u1", "base_url": "http://u1.invalid/v1" },
+	        { "id": "u2", "base_url": "http://u2.invalid/v1" }
+	    ],
+	    "aliases": {
+	        "m1": [["u1", "real-1"], ["u2", "real-2"]],
+	        "m2": [["u2", "real-2"]]
+	    },
+	    "groups": {
+	        "g1": ["m2", "m1"]
+	    }
+	}`), 0o600); err != nil {
+		t.Fatalf("写配置: %v", err)
+	}
+	m := newTUIModel(cfg)
+	m.pulse.Sticky = map[string]stickyView{"g1": {Upstream: "u2", Model: "real-2"}}
+	cands, err := m.stickyCands()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 字典序: g1 (组), m1, m2。g1 候选 = m2 + m1 拼接并跨成员去重:
+	// [u2/real-2 (m2), u1/real-1 (m1)] —— 两成员共有的 u2/real-2 只留第一次出现。
+	want := []stickyCand{
+		{"g1", "u2", "real-2", true}, // 组偏好记在组名上 (第一个候选)
+		{"g1", "u1", "real-1", false},
+		{"m1", "u1", "real-1", false},
+		{"m1", "u2", "real-2", false},
+		{"m2", "u2", "real-2", false},
+	}
+	if len(cands) != len(want) {
+		t.Fatalf("候选数应为 %d, 得到 %+v", len(want), cands)
+	}
+	for i := range want {
+		if cands[i] != want[i] {
+			t.Errorf("第 %d 个候选应为 %+v, 得到 %+v", i, want[i], cands[i])
+		}
 	}
 }
 

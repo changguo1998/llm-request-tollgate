@@ -116,6 +116,15 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 			selLine = len(lines) - 1
 		}
 	}
+	// 组 (别名的别名) 是手工维护的配置, 不进 store, 也不参与权重编辑 —— 只读列出,
+	// 让组名与成员在设置页可见。组名作为逻辑名使用, 成员按配置顺序展示。
+	if groups, ok := e.groups(); ok && len(groups) > 0 {
+		lines = append(lines, prioLine{row: -1, text: tuiBold + "组 (别名的别名, 只读)" + tuiReset})
+		for _, g := range groups {
+			lines = append(lines, prioLine{row: -1,
+				text: "  " + tuiBold + g.name + tuiReset + " <- " + strings.Join(g.members, ", ")})
+		}
+	}
 	// 滚动窗口按显示行算: 模型列表横向分两栏, 一屏 = 2*window 个显示行 (左栏 +
 	// 右栏), 选中行始终钉在这屏里 (焦点在模型面板时)。
 	window := max(1, body-2)

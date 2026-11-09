@@ -72,11 +72,41 @@ type Config struct {
 	ProbeEnabled *bool                  `json:"probe_enabled"`
 	Upstreams    []UpstreamCfg          `json:"upstreams"`
 	Aliases      map[string][][2]string `json:"aliases"`
+	// Groups 是别名的别名: 组名 -> 已注册逻辑名列表 (顺序即展开候选的优先级)。
+	// 请求写组名时, 候选链 = 组成员候选链按序拼接 (去重). 组名对客户端与逻辑名
+	// 无差别; 禁止嵌套 (组成员只能是逻辑名).
+	Groups map[string][]string `json:"groups"`
 }
 
 // probeEnabled 是否开启锁恢复探测: 缺省 true (未写即开), 显式 false 关闭。
 func (c *Config) probeEnabled() bool {
 	return c.ProbeEnabled == nil || *c.ProbeEnabled
+}
+
+// expandedAliases 返回别名表 + 组展开后的完整候选映射 (逻辑名 -> 候选链)。
+// 组名是别名的别名: 候选链 = 组成员候选链按序拼接, 跨成员去重 (同一 上游/模型
+// 只留第一次出现)。组名自身相当于一个普通逻辑名, 粘性 / fallback / 记账 / 观测
+// 全部复用逻辑名的既有路径。校验由 loadConfigOpt 完成, 这里假定成员都存在。
+func (c *Config) expandedAliases() map[string][][2]string {
+	out := make(map[string][][2]string, len(c.Aliases)+len(c.Groups))
+	for name, list := range c.Aliases {
+		out[name] = list
+	}
+	for gname, members := range c.Groups {
+		var chain [][2]string
+		seen := map[[2]string]bool{}
+		for _, m := range members {
+			for _, tgt := range out[m] {
+				if seen[tgt] {
+					continue
+				}
+				seen[tgt] = true
+				chain = append(chain, tgt)
+			}
+		}
+		out[gname] = chain
+	}
+	return out
 }
 
 // 秒 <-> 毫秒换算 (配置文件为秒可小数, 代码内部毫秒取整)。
@@ -310,6 +340,33 @@ func loadConfigOpt(path string, lenient bool) (*Config, error) {
 					name, pair[1], pair[0])
 			}
 		}
+	}
+	// 组 (别名的别名): 组名不能与逻辑名重名 (否则展开后互相覆盖无从区分);
+	// 成员必须都是已注册逻辑名 (禁止嵌套: 组成员只能是逻辑名, 不能是别的组名)。
+	// 成员带多余空白时剔除 (与逻辑名同一的 TrimSpace 口径), 免得校验过了展开时查空表。
+	for gname, members := range c.Groups {
+		gname = strings.TrimSpace(gname)
+		if gname == "" {
+			return nil, fmt.Errorf("group: empty group name")
+		}
+		if _, dup := c.Aliases[gname]; dup {
+			return nil, fmt.Errorf("group %s: name collides with an alias", gname)
+		}
+		if len(members) == 0 {
+			return nil, fmt.Errorf("group %s: no members", gname)
+		}
+		clean := members[:0]
+		for _, m := range members {
+			m = strings.TrimSpace(m)
+			if m == "" {
+				return nil, fmt.Errorf("group %s: empty member name", gname)
+			}
+			if _, ok := c.Aliases[m]; !ok {
+				return nil, fmt.Errorf("group %s: member %s is not a registered alias", gname, m)
+			}
+			clean = append(clean, m)
+		}
+		c.Groups[gname] = clean
 	}
 	// 低性能豁免名单: 按真实模型 id 匹配, 手写配置容易带多余空白, 去空白并剔除空串。
 	exempt := c.LowPerfExempt[:0]

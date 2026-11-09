@@ -95,5 +95,12 @@
         "qwen2.5-chat"
       ]
     ]
+  },
+  "groups": {
+    "worker": [
+      "deepseek-v4.1-flash",
+      "glm-5-lite",
+      "qwen2.5-chat"
+    ]
   }
 }

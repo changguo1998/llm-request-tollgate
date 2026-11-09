@@ -290,10 +290,11 @@ func (m *tuiModel) modelRows() []*modelRow {
 		}
 	}
 	// 配置归属: (上游, 真实模型) -> 引用它的逻辑名们 (候选链顺序不算顺序, 只数集合)。
+	// 组 (别名的别名) 展开后与逻辑名同属一张候选表, 组名也是引用它的逻辑名。
 	// 配置读不到 (如 -tui 时 cfgPath 缺失) 为 nil, 退回纯日志分组的老行为。
 	aliasGroups := map[string][]string{}
 	if c, err := loadConfigOpt(m.cfgPath, true); err == nil {
-		for logical, list := range c.Aliases {
+		for logical, list := range c.expandedAliases() {
 			for _, tgt := range list {
 				k := tgt[0] + "\x00" + tgt[1]
 				aliasGroups[k] = append(aliasGroups[k], logical)
