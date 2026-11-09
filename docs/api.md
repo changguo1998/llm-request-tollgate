@@ -219,11 +219,16 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
   `segs` (各阶段已结算的累计耗时, 秒, 下标 =
   `stage`)、`cur_at` (当前阶段进入时刻, Unix 毫秒, TUI 用它现算正在走的那一段) 与
   `max_stage` (到过的最远阶段, TUI 据此决定写几段).
-- `events` 每条: `seq` / `ts` / `kind` / `req` (跨重启唯一的请求编号, 省略 = 不挂某笔请求) /
-  `logical` / `upstream` / `model` / `msg`. `kind`: `stage` (请求阶段战报) / `ok` / `error`
-  (收尾) / `gate` (进入退避) / `lock` / `unlock` / `probe` / `start` / `reload`.
+"- `events` 每条: `seq` / `ts` / `kind` / `req` (跨重启唯一的请求编号, 省略 = 不挂某笔请求) /
+  `logical` / `upstream` / `model` / `msg`. `kind`: `stage` (请求阶段战报, 短词链
+  `from(参数) -> to(参数)`: 进 sem 是 `new / switch / retry(候选) -> sem(供应商)`, 之后
+  `sem -> freq -> queue(候选) -> send -> recv`) / `ok` (成功收尾 `recv -> ok(200)`) /
+  `error` (每段候选失败的结局: `send -> fail(归类词|状态码|connection)` 或
+  `sem -> reject(原因)`, 请求整体结局 = 链上最后一条) / `gate` (进入退避) / `lock` /
+  `unlock` / `probe` / `start` / `reload`.
   阶段战报与收尾带 `req` + `logical`; 锁 / 探测 / 启动没有 `req`, 消费方按 `upstream` /
-  `model` 显示. 仅仅首字节慢、没有触发锁的请求不发事件.
+  `model` 显示. 仅仅首字节慢、没有触发锁的请求不发事件. TUI 显示时把同一秒内同一请求的
+  `stage` / `ok` / `error` 事件折叠成一条链 (桥接阶段去重, 取信息量更多的表达), 跨秒拆条.
 - 其余方法返回 405.
 
 ## 7. JSONL 请求日志 (每行一笔)

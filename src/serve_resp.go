@@ -43,6 +43,7 @@ func (s *serveState) forward() {
 		ttfbMs = msCeil(time.Since(s.sentAt))
 		if rerr != nil {
 			status = http.StatusBadGateway
+			s.obs.outcome(stageRecv, "fail", "connection")
 			buf = []byte(`{"error":{"message":` + strconv.Quote(rerr.Error()) + `}}`)
 			dst.Set("Content-Type", "application/json")
 		}

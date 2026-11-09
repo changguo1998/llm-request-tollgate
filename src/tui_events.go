@@ -26,37 +26,105 @@ func (c *tuiCanvas) splitLines() []string {
 }
 
 // drawEvents: 事件流 (最新在前), 三列: 时间 / 编号/逻辑名 / 事件。
-// 标识列一套格式对应三类主体: 请求 编号/逻辑名, 模型 供应商/模型, 供应商 供应商;
-// 连续相同事件折成一行 xN, 免得刷屏。
+// 标识列一套格式对应三类主体: 请求 编号/逻辑名, 模型 供应商/模型, 供应商 供应商。
+// 同一秒内同一请求的阶段切换在显示时合成一条链; 锁 / 探测这类不挂请求的事件 (req=0)
+// 原样一行。整行颜色按链上最后一条事件的类型 (成功绿 / 失败红 / 阶段不染色)。
 func (m *tuiModel) drawEvents(c *tuiCanvas, body int) {
-	evs := make([]routeEvent, 0, len(m.events))
-	evs = append(evs, m.events...)
-	sort.Slice(evs, func(i, j int) bool { return evs[i].Ts.After(evs[j].Ts) })
-	rows := make([][]string, 0, len(evs))
-	for i := 0; i < len(evs); {
-		e := evs[i]
-		reps := 1
-		for i+reps < len(evs) && sameEvent(e, evs[i+reps]) {
-			reps++
-		}
-		msg := e.Msg
-		if reps > 1 {
-			msg += "  x" + strconv.Itoa(reps)
-		}
-		if col := eventColor(e.Kind); col != "" {
+	rows := m.mergedEventRows()
+	out := make([][]string, 0, len(rows))
+	for _, r := range rows {
+		msg := r.Msg
+		if col := eventColor(r.Kind); col != "" {
 			msg = col + msg + tuiReset
 		}
-		rows = append(rows, []string{
-			e.Ts.Format("15:04:05"),
-			m.eventWho(e),
+		out = append(out, []string{
+			r.Ts.Format("15:04:05"),
+			m.eventWho(r),
 			msg,
 		})
-		i += reps
 	}
 	drawTable(c, "事件流 (最新在前)", []tuiCol{
 		{"时间", 8, false, false, 4}, {"编号/逻辑名", 20, true, false, 2},
 		{"事件", 40, true, false, 0},
-	}, rows, m.scrollWindow(len(rows), max(1, body-4)), max(1, body-4))
+	}, out, m.scrollWindow(len(out), max(1, body-4)), max(1, body-4))
+}
+
+// eventMergeKey 是显示合并的键: 秒 + 请求编号 + 逻辑名。
+type eventMergeKey struct {
+	sec     time.Time
+	req     uint64
+	logical string
+}
+
+// mergedEventRows 把原始事件流折成显示行。规则: 同一秒内同一请求 (req>0) 的阶段切换
+// 连成一条链 (跨秒的链自然拆成多条, 下一秒从断点接着出); req=0 的事件 (锁 / 探测 /
+// 退避 / 启动) 不合并, 一行一条, 仍按时间倒序。
+func (m *tuiModel) mergedEventRows() []routeEvent {
+	var keys []eventMergeKey
+	buckets := map[eventMergeKey][]routeEvent{}
+	for _, e := range m.events {
+		k := eventMergeKey{sec: e.Ts.Truncate(time.Second), req: e.Req, logical: e.Logical}
+		if _, ok := buckets[k]; !ok {
+			keys = append(keys, k)
+		}
+		buckets[k] = append(buckets[k], e)
+	}
+	rows := make([]routeEvent, 0, len(keys))
+	for _, k := range keys {
+		b := buckets[k]
+		if k.req == 0 || len(b) == 1 {
+			rows = append(rows, b...)
+			continue
+		}
+		msgs := make([]string, len(b))
+		for i, e := range b {
+			msgs[i] = e.Msg
+		}
+		last := b[len(b)-1]
+		rows = append(rows, routeEvent{Ts: k.sec, Req: k.req, Logical: k.logical,
+			Kind: last.Kind, Msg: mergeEventChain(msgs)})
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Ts.After(rows[j].Ts) })
+	return rows
+}
+
+// mergeEventChain 把同一请求同一秒内的事件正文连成一条过渡链。相邻条目里同一个阶段
+// 既是前一条的尾也是后一条的头时只留一个; 前后写法不同 (如 sem 与 sem(u1)) 取信息量
+// 更多的那个; 真正不同的过渡词 (fail / switch / new / reject …) 直接接在后面。
+func mergeEventChain(msgs []string) string {
+	toks := make([]string, 0, 16)
+	for _, msg := range msgs {
+		for _, p := range strings.Split(msg, " -> ") {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			if n := len(toks); n > 0 && stageBase(toks[n-1]) == stageBase(p) {
+				if stageInfo(p) > stageInfo(toks[n-1]) {
+					toks[n-1] = p
+				}
+				continue
+			}
+			toks = append(toks, p)
+		}
+	}
+	return strings.Join(toks, " -> ")
+}
+
+// stageBase 取过渡词括号前的部分 (new / sem / fail …), 判断两个表达是不是同一个阶段。
+func stageBase(tok string) string {
+	if i := strings.IndexByte(tok, '('); i >= 0 {
+		return tok[:i]
+	}
+	return tok
+}
+
+// stageInfo 是过渡词的信息量: 带参数的比裸词多一层信息。
+func stageInfo(tok string) int {
+	if strings.Contains(tok, "(") {
+		return 1
+	}
+	return 0
 }
 
 // eventWho 是标识格: 请求写 编号/逻辑名, 模型写 供应商/模型, 供应商写 供应商;
@@ -125,12 +193,6 @@ func (m *tuiModel) upModel(up, model string) string {
 		return m.upName(up)
 	}
 	return m.upName(up) + "/" + model
-}
-
-// sameEvent 判断两条事件能不能折叠成一行 (同请求 + 同类 + 同路由 + 同文案)。
-func sameEvent(a, b routeEvent) bool {
-	return a.Req == b.Req && a.Kind == b.Kind && a.Logical == b.Logical &&
-		a.Upstream == b.Upstream && a.Model == b.Model && a.Msg == b.Msg
 }
 
 // routeRows 按最后使用时间降序 (最近用过的排最上面); 同一时刻的按请求数兜底。

@@ -195,11 +195,13 @@ func (s *serveState) pickAttempts() bool {
 	s.app.mu.RUnlock()
 	if !aliasOK {
 		s.finalStatus = http.StatusNotFound
+		s.obs.outcome(stageParse, "fail", "404")
 		writeError(s.w, http.StatusNotFound, "model_not_found", "unknown model: "+s.logical)
 		return false
 	}
 	if len(s.attempts) == 0 {
 		s.finalStatus = http.StatusNotFound
+		s.obs.outcome(stageParse, "fail", "404")
 		writeError(s.w, http.StatusNotFound, "model_not_found",
 			"model "+s.logical+" has no configured upstream")
 		return false

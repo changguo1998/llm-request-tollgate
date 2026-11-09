@@ -96,19 +96,19 @@ func TestSampleFlowBytes(t *testing.T) {
 	}
 }
 
-// gateReason 把日志里的 gate 值换成中文短语, 未知值原样返回。
-func TestGateReason(t *testing.T) {
+// gateWord 把日志里的 gate 值换成 reject 的原因词, 未知值原样返回。
+func TestGateWord(t *testing.T) {
 	cases := map[string]string{
-		"locked":          "候选都在锁里",
-		"sem_timeout":     "等并发槽位超时",
-		"queue_timeout":   "排队超时",
-		"backoff_timeout": "等退避结束超时",
-		"canceled":        "客户端断开",
+		"locked":          "locked",
+		"sem_timeout":     "sem-timeout",
+		"queue_timeout":   "queue-timeout",
+		"backoff_timeout": "backoff-timeout",
+		"canceled":        "cancelled",
 		"other":           "other",
 		"":                "",
 	}
 	for in, want := range cases {
-		if got := gateReason(in); got != want {
+		if got := gateWord(in); got != want {
 			t.Errorf("gate %q 应写作 %q, 得到 %q", in, want, got)
 		}
 	}

@@ -136,7 +136,7 @@ func TestFlowLive(t *testing.T) {
 		}
 	}()
 	id := a.flowStart("m1", "agent", "/v1/chat/completions", true)
-	a.flowStage(id, "up1", "real-m1", stageRecv, "", 1, "")
+	a.flowStage(id, "up1", "real-m1", stageRecv, "", 1)
 	first := time.Now().Add(-2 * time.Second)
 	a.flowLive(id, 42, 2048, first)
 

@@ -469,7 +469,7 @@ func TestFlowTablesAndEventsScroll(t *testing.T) {
 		m.events = append(m.events, routeEvent{
 			Ts: time.Now().Add(-time.Duration(i) * time.Second), Kind: "ok",
 			Logical: "m1", Upstream: "ustc", Model: "real-m1",
-			Msg: "状态码 200 #" + itoa(i), // 各不相同, 别被折成一行 xN
+			Msg: "recv -> ok(200) #" + itoa(i), // 各不相同, 每一笔请求一行
 		})
 	}
 	m.scroll[tabEvents] = 1 << 30
@@ -487,7 +487,7 @@ func TestFlowTablesAndEventsScroll(t *testing.T) {
 			t.Errorf("events 页不该再有列名 %q", gone)
 		}
 	}
-	if !strings.Contains(out, "状态码 200 #") {
+	if !strings.Contains(out, "recv -> ok(200) #") {
 		t.Error("滚动到底应显出最后几行事件, 实际画成空白")
 	}
 	if !strings.Contains(out, "200 行, 当前 ") {

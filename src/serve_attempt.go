@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -25,7 +26,7 @@ func (s *serveState) attemptLoop() {
 			if pref {
 				s.stickyBlock = true
 			}
-			s.obs.failNote("候选未启用")
+			s.obs.outcome(stageSem, "reject", "disabled")
 			s.noteFailure(fmt.Errorf("upstream %s has no scheduler", at.up.ID), at.up.ID, at.mod)
 			continue
 		}
@@ -40,7 +41,7 @@ func (s *serveState) attemptLoop() {
 					s.stickyLong = true
 				}
 			}
-			s.obs.failNote(lockNoteText(reason, left))
+			s.obs.outcome(stageSem, "reject", lockParam(reason, left))
 			s.noteFailure(fmt.Errorf("upstream %s locked for %s (%s)",
 				at.up.ID, left.Round(time.Second), reason), at.up.ID, at.mod)
 			s.noteLeft(left)
@@ -52,7 +53,7 @@ func (s *serveState) attemptLoop() {
 			if pref {
 				s.stickyBlock = true
 			}
-			s.obs.failNote("退避 " + durStr(left))
+			s.obs.outcome(stageSem, "reject", "backoff "+durStr(left))
 			s.noteFailure(fmt.Errorf("upstream %s/%s backing off for %s",
 				at.up.ID, at.mod, left.Round(time.Second)), at.up.ID, at.mod)
 			s.noteLeft(left)
@@ -103,7 +104,7 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 				}
 			}
 			s.gateReject = why
-			s.obs.failNote(acquireFailNote(at, why))
+			s.obs.outcome(stageSem, "reject", acquireFailParam(at, why))
 			s.lastUpID, s.lastMod = at.up.ID, at.mod
 			s.failed++
 			if why == "locked" {
@@ -124,6 +125,7 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 			a.recordGenericFailure(at.cd, at.mod, s.gate, s.upPath, 0)
 			s.noteFailure(rerr, at.up.ID, at.mod)
 			s.obs.mark(-1)
+			s.obs.outcome(stageSend, "fail", "connection")
 			s.logUpstreamError(at, 0, nil, nil, rerr)
 			continue
 		}
@@ -134,6 +136,7 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 			at.cd.finish(kind, false)
 			s.obs.mark(resp.StatusCode)
 			moveOn, longLock := a.classifyFailure(at, kind, resp, b, s.gate, s.upPath)
+			s.obs.outcome(stageSend, "fail", failClassParam(at, resp.StatusCode, b))
 			// 偏好候选真实报错后换走是「真实失败顶班」, 累计迁移计数; 额度类 (longLock)
 			// 是长期锁, 直接按候选失效处理。
 			if at.idx == s.prefIdx && longLock {
@@ -237,37 +240,49 @@ func (s *serveState) noteLeft(left time.Duration) {
 	}
 }
 
-// acquireFailNote 把取资格失败的原因写成阶段战报里的一句旧结果。
-func acquireFailNote(at attempt, why string) string {
+// acquireFailParam 是取资格失败的原因词 (reject 的参数)。
+func acquireFailParam(at attempt, why string) string {
 	switch why {
 	case "locked":
 		if _, left, reason := at.cd.locked(at.mod, at.group); left > 0 {
-			return lockNoteText(reason, left)
+			return lockParam(reason, left)
 		}
-		return "命中锁"
+		return "locked"
 	case "backoff_timeout":
-		return "退避超时"
+		return "backoff-timeout"
 	case "sem_timeout":
-		return "等信号量超时"
+		return "sem-timeout"
 	case "queue_timeout":
-		return "排队超时"
+		return "queue-timeout"
 	case "canceled":
-		return "客户端取消"
+		return "cancelled"
 	}
 	if why == "" {
-		return "候选失败"
+		return "candidate"
 	}
 	return why
 }
 
-// lockNoteText 是锁原因 + 剩余时间的统一写法 (阶段战报与候选预检共用)。
-func lockNoteText(reason string, left time.Duration) string {
-	name := "额度锁"
+// failClassParam 是「发出后失败」的原因词: 命中上游归类词用归类词 (quota / concurrency),
+// 没归类才写状态码数字。
+func failClassParam(at attempt, status int, body []byte) string {
+	switch at.up.classify(status, body) {
+	case classQuota:
+		return "quota"
+	case classConcurrency:
+		return "concurrency"
+	}
+	return strconv.Itoa(status)
+}
+
+// lockParam 是锁原因 + 剩余时间的短词 (reject 的参数), 时长保留 mm:ss。
+func lockParam(reason string, left time.Duration) string {
+	name := "quota"
 	switch reason {
 	case "breaker":
-		name = "熔断锁"
+		name = "breaker"
 	case lowPerfReason:
-		name = "低性能锁"
+		name = "lowperf"
 	}
-	return "命中" + name + " " + durStr(left)
+	return name + " " + durStr(left)
 }

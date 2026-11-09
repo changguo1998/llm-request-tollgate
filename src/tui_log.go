@@ -149,69 +149,54 @@ func (m *tuiModel) absorb(line []byte) {
 		row.Last = ts
 	}
 
-	// 事件: 只挑改变了程序状态的那些 (闸门挡下 / 错误 / 换候选 / 排队); 仅仅首字节慢
-	// 而没有触发任何锁的请求不留事件, 低性能锁由锁事件自己记。
-	cand := ""
-	if c := candName(r.Upstream, r.Model); c != "" {
-		cand = c + " " // 第 2 页没有单独的 上游/模型 列, 候选写进文案
-	}
+	// 事件: 只挑改变了程序状态的那些 (闸门挡下 / 错误 / 换候选 / 排队); 文案与引擎侧
+	// 结局事件同一短词表。回放只有日志里的一行, 还原不了整条链, 只写结局形态。
 	switch {
 	case r.Gate != "":
 		m.addEvent(routeEvent{Ts: ts, Req: r.Req, Kind: "gate", Logical: r.Logical, Upstream: r.Upstream,
-			Model: r.Model, Status: r.Status,
-			Msg: cand + "被挡下: " + gateReason(r.Gate) + " (排队 " + itoa64(r.QueueMs) + "ms, 等并发 " + itoa64(r.SemMs) + "ms)"})
+			Model: r.Model, Status: r.Status, Msg: "sem -> reject(" + gateWord(r.Gate) + ")"})
 	case r.Status >= 400 || r.Err != "":
-		msg := cand + "状态码 " + strconv.Itoa(r.Status)
-		if r.Err != "" {
-			msg += " " + tuiTrunc(r.Err, 60)
-		}
-		if r.LockSkips > 0 {
-			msg += " (跳过锁 " + strconv.Itoa(r.LockSkips) + " 次)"
-		}
-		if r.BackoffSkips > 0 {
-			msg += " (跳过退避 " + strconv.Itoa(r.BackoffSkips) + " 次)"
-		}
 		m.addEvent(routeEvent{Ts: ts, Req: r.Req, Kind: "error", Logical: r.Logical, Upstream: r.Upstream,
-			Model: r.Model, Status: r.Status, Msg: msg})
+			Model: r.Model, Status: r.Status, Msg: "send -> fail(" + replayFailParam(r) + ")"})
 	case r.Fallbacks > 0:
 		m.addEvent(routeEvent{Ts: ts, Req: r.Req, Kind: "fallback", Logical: r.Logical, Upstream: r.Upstream,
-			Model: r.Model, Status: r.Status,
-			Msg: cand + "换了 " + strconv.Itoa(r.Fallbacks) + " 次候选" +
-				lockNote(r.LockSkips) + backoffNote(r.BackoffSkips)})
+			Model: r.Model, Status: r.Status, Msg: "switch(" + candName(r.Upstream, r.Model) + ")"})
 	case r.Queued:
 		m.addEvent(routeEvent{Ts: ts, Req: r.Req, Kind: "queue", Logical: r.Logical, Upstream: r.Upstream,
-			Model: r.Model, Status: r.Status, Msg: cand + "排队 " + itoa64(r.QueueMs) + "ms"})
+			Model: r.Model, Status: r.Status, Msg: "sem(" + r.Upstream + ") -> freq(" + r.Upstream + ")"})
 	}
 }
 
-// lockNote 拼"跳过几个已加锁的上游"这句; 退避跳过的模型另说一句 (两种跳过原因不同)。
-func lockNote(n int) string {
-	if n == 0 {
-		return ""
-	}
-	return " (跳过 " + strconv.Itoa(n) + " 个已加锁的上游)"
-}
-
-func backoffNote(n int) string {
-	if n == 0 {
-		return ""
-	}
-	return " (跳过 " + strconv.Itoa(n) + " 个正在退避的模型)"
-}
-
-// gateReason 把日志里的 gate 值换成中文短语。
-func gateReason(g string) string {
+// gateWord 把日志里的 gate 值换成 reject 原因词 (与引擎侧同一短词表)。
+func gateWord(g string) string {
 	switch g {
 	case "locked":
-		return "候选都在锁里"
+		return "locked"
 	case "sem_timeout":
-		return "等并发槽位超时"
+		return "sem-timeout"
 	case "queue_timeout":
-		return "排队超时"
+		return "queue-timeout"
 	case "backoff_timeout":
-		return "等退避结束超时"
+		return "backoff-timeout"
 	case "canceled":
-		return "客户端断开"
+		return "cancelled"
 	}
 	return g
+}
+
+// replayFailParam 是回放错误事件的 fail 参数: 命中归类词用归类词 (传输记 connection),
+// 没归类才写状态码数字。
+func replayFailParam(r logRec) string {
+	switch r.Class {
+	case "quota":
+		return "quota"
+	case "concurrency":
+		return "concurrency"
+	case "transport":
+		return "connection"
+	}
+	if r.Status > 0 {
+		return strconv.Itoa(r.Status)
+	}
+	return "error"
 }

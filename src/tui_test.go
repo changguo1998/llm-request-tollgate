@@ -21,7 +21,7 @@ func TestViewFlowAndEvents(t *testing.T) {
 	}()
 
 	id := a.flowStart("m1", "agent-x", "/v1/chat/completions", true)
-	a.flowStage(id, "up1", "real-m1", stageSend, "退避 3s", 2, "")
+	a.flowStage(id, "up1", "real-m1", stageSend, "退避 3s", 2)
 	act := a.flowActives()
 	if len(act) != 1 {
 		t.Fatalf("进行中的请求应有一条, 得到 %d", len(act))
