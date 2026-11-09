@@ -23,11 +23,14 @@ import (
 )
 
 const (
-	prioField  = "priority"
-	groupField = "alias" // 模型条的逻辑名 (旧称 group, 随配置迁移改为 alias)
-	idField    = "id"
-	proxyKind  = "proxy"
-	proxyName  = "tg" // store 里代表本代理自己的 provider
+	prioField     = "priority"
+	groupField    = "alias" // 模型条的逻辑名 (旧称 group, 随配置迁移改为 alias)
+	billingField  = "billing"
+	idField       = "id"
+	proxyKind     = "proxy"
+	proxyName     = "tg" // store 里代表本代理自己的 provider
+	legacyGroup   = "group"
+	legacyBilling = "billing_group"
 )
 
 // prioFallbackProviders 是配置里读不到上游顺序时的兜底 (与生成器的缺省 --providers 一致)。
@@ -233,6 +236,8 @@ func (e *tuiEditor) buildMerged() {
 }
 
 // mergedModel 是某上游单模型的编辑条目: 继承配置同名模型的权重, 缺省 0 / id / 无。
+// 旧字段 group / billing_group 在新字段缺省时回落采用, 随后清掉旧键, 存盘只写
+// alias / billing (与生成器同一套规范字段)。
 func mergedModel(up map[string]any, id string) map[string]any {
 	entry := map[string]any{"id": id}
 	if up != nil {
@@ -247,11 +252,22 @@ func mergedModel(up map[string]any, id string) map[string]any {
 			}
 		}
 	}
+	if g, ok := entry[groupField].(string); !ok || strings.TrimSpace(g) == "" {
+		if legacy, ok := entry[legacyGroup].(string); ok && strings.TrimSpace(legacy) != "" {
+			entry[groupField] = strings.TrimSpace(legacy)
+		} else {
+			entry[groupField] = id
+		}
+	}
+	if b, ok := entry[billingField].(string); !ok || strings.TrimSpace(b) == "" {
+		if legacy, ok := entry[legacyBilling].(string); ok && strings.TrimSpace(legacy) != "" {
+			entry[billingField] = strings.TrimSpace(legacy)
+		}
+	}
+	delete(entry, legacyGroup)
+	delete(entry, legacyBilling)
 	if _, ok := entry[prioField]; !ok {
 		entry[prioField] = int64(0)
-	}
-	if g, ok := entry[groupField].(string); !ok || strings.TrimSpace(g) == "" {
-		entry[groupField] = id
 	}
 	return entry
 }

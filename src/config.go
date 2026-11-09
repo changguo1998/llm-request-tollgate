@@ -25,6 +25,10 @@ type ModelCfg struct {
 	Billing  string `json:"billing,omitempty"`
 	Alias    string `json:"alias,omitempty"`
 	Priority int    `json:"priority,omitempty"`
+	// 旧字段名 (group / billing_group): 读入时归一化到 Alias / Billing 后清空,
+	// 兼容尚未迁移的配置; 写回不再输出.
+	LegacyAlias   string `json:"group,omitempty"`
+	LegacyBilling string `json:"billing_group,omitempty"`
 }
 
 type UpstreamCfg struct {
@@ -377,6 +381,15 @@ func loadConfigOpt(path string, lenient bool) (*Config, error) {
 			m.ID = strings.TrimSpace(m.ID)
 			m.Billing = strings.TrimSpace(m.Billing)
 			m.Alias = strings.TrimSpace(m.Alias)
+			// 旧字段名兼容: 新字段缺省时回落到 group / billing_group, 之后清空,
+			// 让加载后的内存配置只有一套规范字段.
+			if m.Alias == "" {
+				m.Alias = strings.TrimSpace(m.LegacyAlias)
+			}
+			if m.Billing == "" {
+				m.Billing = strings.TrimSpace(m.LegacyBilling)
+			}
+			m.LegacyAlias, m.LegacyBilling = "", ""
 			if m.ID == "" {
 				return nil, fmt.Errorf("upstream %s: model entry without id", u.ID)
 			}

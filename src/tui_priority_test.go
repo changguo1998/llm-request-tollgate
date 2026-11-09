@@ -1232,3 +1232,73 @@ func TestEditorNavFocus(t *testing.T) {
 		t.Errorf("渲染后步长应为 4, 得到 %d", got)
 	}
 }
+
+// 旧字段 group / billing_group 兼容: TUI 装载旧配置时别名不能被模型 id 顶掉,
+// 存盘后统一写成 alias / billing, 旧键不再残留。
+func TestSettingsLegacyFieldsKeepAlias(t *testing.T) {
+	_, cfg := prioFixture(t)
+	legacy := `{
+	    "listen": "127.0.0.1:8787",
+	    "upstreams": [
+	        {
+	            "id": "ustc",
+	            "priority": 0,
+	            "models": [
+	                {"id": "deepseek-flash", "priority": 2, "group": "deepseek-v4.1-flash"},
+	                {"id": "deepseek-flash-2", "priority": 0, "group": "deepseek-v4.1-flash"}
+	            ]
+	        },
+	        {
+	            "id": "group",
+	            "priority": 3,
+	            "models": [
+	                {"id": "deepseek-v4.1-flash", "priority": 0, "group": "deepseek-v4.1-flash", "billing_group": "ustc"},
+	                {"id": "solo", "priority": 5, "group": "solo"}
+	            ]
+	        }
+	    ]
+	}`
+	if err := os.WriteFile(cfg, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("写旧配置: %v", err)
+	}
+	e := newTuiEditor(cfg)
+	if !e.usable() {
+		t.Fatalf("编辑器装载失败: %v", e.err)
+	}
+	want := []string{"ustc/deepseek-flash", "group/deepseek-v4.1-flash", "ustc/deepseek-flash-2"}
+	if got := candIDs(e.candsFor("deepseek-v4.1-flash")); strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("旧字段的别名应保留:\n得到 %v\n期望 %v", got, want)
+	}
+	if e.candsFor("deepseek-flash") != nil {
+		t.Errorf("别名不该被模型 id 顶掉")
+	}
+	e.saveWeights()
+	b, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatalf("读回: %v", err)
+	}
+	var got struct {
+		Upstreams []struct {
+			ID     string           `json:"id"`
+			Models []map[string]any `json:"models"`
+		} `json:"upstreams"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("存出来的不是 JSON: %v", err)
+	}
+	for _, up := range got.Upstreams {
+		for _, model := range up.Models {
+			if _, ok := model["group"]; ok {
+				t.Errorf("存盘不该再写旧字段 group: %v", model)
+			}
+			if _, ok := model["billing_group"]; ok {
+				t.Errorf("存盘不该再写旧字段 billing_group: %v", model)
+			}
+			if up.ID == "group" && model["id"] == "deepseek-v4.1-flash" {
+				if model["alias"] != "deepseek-v4.1-flash" || model["billing"] != "ustc" {
+					t.Errorf("旧字段应归一到 alias / billing: %v", model)
+				}
+			}
+		}
+	}
+}

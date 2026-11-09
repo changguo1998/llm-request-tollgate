@@ -829,3 +829,30 @@ func TestLoadConfigLowPerfExempt(t *testing.T) {
 		t.Fatalf("gate() 应透传豁免名单, 实为 %#v", got)
 	}
 }
+
+// 旧字段 group / billing_group 兼容: 新字段缺省时回落采用, 加载后归一化到
+// Alias / Billing 并清空旧字段.
+func TestLoadConfigLegacyModelFields(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "legacy-fields.json")
+	if err := os.WriteFile(p, []byte(`{
+	  "upstreams": [{"id": "u1", "base_url": "http://x", "models": [
+	    {"id": "m1", "group": "logical", "billing_group": "quota"}
+	  ]}]
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(p)
+	if err != nil {
+		t.Fatalf("旧字段配置应照常加载: %v", err)
+	}
+	m := cfg.Upstreams[0].Models[0]
+	if m.Alias != "logical" || m.Billing != "quota" {
+		t.Fatalf("旧字段应归一化为 alias / billing, 实为 %+v", m)
+	}
+	if m.LegacyAlias != "" || m.LegacyBilling != "" {
+		t.Fatalf("加载后旧字段应清空, 实为 %+v", m)
+	}
+	if got := cfg.Aliases["logical"]; len(got) != 1 || got[0] != [2]string{"u1", "m1"} {
+		t.Fatalf("候选表应按旧字段重建, 实为 %#v", cfg.Aliases)
+	}
+}
