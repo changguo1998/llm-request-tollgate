@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -16,11 +17,14 @@ type Timeouts struct {
 	StreamIdleMs     int `json:"stream_idle_ms"`
 }
 
-// ModelCfg 是上游声明的一个真实模型。BillingGroup 是它的额度组名: 同一上游里同名的
+// ModelCfg 是上游声明的一个真实模型。Billing 是它的额度组名: 同一上游里同名的
 // 模型属于同一组, 额度锁只锁组; 不写组名 = 该上游的默认组 (编译期常量 defaultGroup)。
+// Alias 是逻辑名 (别名的别名); Priority 是候选权重 (缺省 0, 负值 = 停用).
 type ModelCfg struct {
-	ID           string `json:"id"`
-	BillingGroup string `json:"billing_group,omitempty"`
+	ID       string `json:"id"`
+	Billing  string `json:"billing,omitempty"`
+	Alias    string `json:"alias,omitempty"`
+	Priority int    `json:"priority,omitempty"`
 }
 
 type UpstreamCfg struct {
@@ -32,7 +36,9 @@ type UpstreamCfg struct {
 	KeyPrefix    *string           `json:"key_prefix,omitempty"`
 	Headers      map[string]string `json:"headers"`
 	IncludeUsage bool              `json:"include_usage"`
-	// Models 声明该上游提供哪些真实模型以及各自的额度组。可选:
+	// Priority 是 provider 权重: 越大越先用, 缺省 0; 负值 = 整家停用。
+	Priority int `json:"priority,omitempty"`
+	// Models 声明该上游提供哪些真实模型以及各自的逻辑名 / 额度组。可选:
 	// 不写 = 别名引用到的模型全归默认组, 与加组之前的配置行为一致。
 	Models []ModelCfg `json:"models,omitempty"`
 	// Errors 是 的报错分类规则: 每个上游一份「状态码 + body 关键词」,
@@ -69,9 +75,11 @@ type Config struct {
 	RateWindowSec  float64 `json:"rate_window_sec"`
 	BlockWindowSec float64 `json:"block_window_sec"`
 	// 锁恢复探测: 指针区分"未写"(缺省 true) 与显式 false。
-	ProbeEnabled *bool                  `json:"probe_enabled"`
-	Upstreams    []UpstreamCfg          `json:"upstreams"`
-	Aliases      map[string][][2]string `json:"aliases"`
+	ProbeEnabled *bool         `json:"probe_enabled"`
+	Upstreams    []UpstreamCfg `json:"upstreams"`
+	// Aliases 不再从配置读取 (顶层 aliases 键废弃): loadConfigOpt 读取后由
+	// rebuildAliases 从上游 models 的 alias 字段重建, 等价于旧顶层候选表。
+	Aliases map[string][][2]string `json:"-"`
 	// Groups 是别名的别名: 组名 -> 已注册逻辑名列表 (顺序即展开候选的优先级)。
 	// 请求写组名时, 候选链 = 组成员候选链按序拼接 (去重). 组名对客户端与逻辑名
 	// 无差别; 禁止嵌套 (组成员只能是逻辑名).
@@ -81,6 +89,56 @@ type Config struct {
 // probeEnabled 是否开启锁恢复探测: 缺省 true (未写即开), 显式 false 关闭。
 func (c *Config) probeEnabled() bool {
 	return c.ProbeEnabled == nil || *c.ProbeEnabled
+}
+
+// rebuildAliases 从上游 models 重建候选表 (逻辑名 -> 候选链), 等价于旧顶层
+// aliases 键: 逻辑名 = 模型条目的 Alias (缺省 = 模型 id); 候选顺序 = 模型
+// priority 降序 -> provider priority 降序 -> 上游配置顺序 -> 模型 id,
+// 与生成器 / TUI 预期同口径; 模型或整家负优先级停用, 不进候选。
+// loadConfigOpt 读取配置后立即调用, 之后 applyConfig / 展开 / TUI 全部沿用
+// c.Aliases, 数据流程不变。
+func (c *Config) rebuildAliases() {
+	type item struct {
+		name            string
+		up, mid         string
+		modelPrio       int
+		provPrio        int
+		upOrder, midOrd int
+	}
+	items := make([]item, 0)
+	for ui, u := range c.Upstreams {
+		for mi, m := range u.Models {
+			if u.Priority < 0 || m.Priority < 0 {
+				continue // provider 或模型负优先级: 停用, 不进候选
+			}
+			items = append(items, item{m.Alias, u.ID, m.ID, m.Priority, u.Priority, ui, mi})
+		}
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		if a.modelPrio != b.modelPrio {
+			return a.modelPrio > b.modelPrio
+		}
+		if a.provPrio != b.provPrio {
+			return a.provPrio > b.provPrio
+		}
+		if a.upOrder != b.upOrder {
+			return a.upOrder < b.upOrder
+		}
+		if a.midOrd != b.midOrd {
+			return a.midOrd < b.midOrd
+		}
+		return a.mid < b.mid
+	})
+	out := make(map[string][][2]string)
+	for _, it := range items {
+		name := it.name
+		if name == "" {
+			name = it.mid // 缺省逻辑名 = 模型 id
+		}
+		out[name] = append(out[name], [2]string{it.up, it.mid})
+	}
+	c.Aliases = out
 }
 
 // expandedAliases 返回别名表 + 组展开后的完整候选映射 (逻辑名 -> 候选链)。
@@ -309,16 +367,16 @@ func loadConfigOpt(path string, lenient bool) (*Config, error) {
 	if c.StreamIdleSec <= 0 {
 		c.StreamIdleSec = 240
 	}
-	// 额度组: 同一上游里模型 id 唯一; 声明了 models 的上游, 别名引用的模型必须在表内
-	// (没列出的模型属于哪个组无从谈起, 早报错好过静默落进默认组)。
-	declared := map[string]map[string]bool{}
+	// 额度组: 同一上游里模型 id 唯一; 声明了 models 的上游, 模型条目清一下空白
+	// (id / billing / alias), 缺省逻辑名留空由 rebuildAliases 用模型 id 兜底。
 	for i := range c.Upstreams {
 		u := &c.Upstreams[i]
 		ids := make(map[string]bool, len(u.Models))
 		for j := range u.Models {
 			m := &u.Models[j]
 			m.ID = strings.TrimSpace(m.ID)
-			m.BillingGroup = strings.TrimSpace(m.BillingGroup)
+			m.Billing = strings.TrimSpace(m.Billing)
+			m.Alias = strings.TrimSpace(m.Alias)
 			if m.ID == "" {
 				return nil, fmt.Errorf("upstream %s: model entry without id", u.ID)
 			}
@@ -327,20 +385,10 @@ func loadConfigOpt(path string, lenient bool) (*Config, error) {
 			}
 			ids[m.ID] = true
 		}
-		declared[u.ID] = ids
 	}
-	for name, list := range c.Aliases {
-		for _, pair := range list {
-			ids := declared[pair[0]]
-			if len(ids) == 0 {
-				continue // 未知上游运行期本来就跳过; 不写 models 的上游不做这项校验
-			}
-			if !ids[pair[1]] {
-				return nil, fmt.Errorf("alias %s: model %s is not declared by upstream %s",
-					name, pair[1], pair[0])
-			}
-		}
-	}
+	// 候选表重建: 顶层 aliases 键已废弃, 逻辑名与候选链全部从上游 models 的
+	// alias / priority 重建, 之后 applyConfig 与组校验拿到的就是这张表。
+	c.rebuildAliases()
 	// 组 (别名的别名): 组名不能与逻辑名重名 (否则展开后互相覆盖无从区分);
 	// 成员必须都是已注册逻辑名 (禁止嵌套: 组成员只能是逻辑名, 不能是别的组名)。
 	// 成员带多余空白时剔除 (与逻辑名同一的 TrimSpace 口径), 免得校验过了展开时查空表。

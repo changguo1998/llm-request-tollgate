@@ -62,7 +62,7 @@ func TestCandViewSnapshot(t *testing.T) {
 		Listen: "127.0.0.1:0", LogPath: filepath.Join(t.TempDir(), "req.jsonl"),
 		Upstreams: []UpstreamCfg{{
 			ID: "up1", BaseURL: "http://127.0.0.1:1/v1",
-			Models: []ModelCfg{{ID: "real-m1", BillingGroup: "g1"}, {ID: "real-m2", BillingGroup: "g2"}},
+			Models: []ModelCfg{{ID: "real-m1", Billing: "g1"}, {ID: "real-m2", Billing: "g2"}},
 		}},
 	})
 	if err != nil {

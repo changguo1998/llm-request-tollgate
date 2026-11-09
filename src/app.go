@@ -111,10 +111,10 @@ func (a *App) applyConfig(c *Config) {
 		var names []string
 		seenGroup := map[string]bool{}
 		for _, m := range u.Models {
-			byModel[m.ID] = m.BillingGroup
-			if !seenGroup[m.BillingGroup] {
-				seenGroup[m.BillingGroup] = true
-				names = append(names, m.BillingGroup)
+			byModel[m.ID] = m.Billing
+			if !seenGroup[m.Billing] {
+				seenGroup[m.Billing] = true
+				names = append(names, m.Billing)
 			}
 		}
 		if len(names) == 0 {

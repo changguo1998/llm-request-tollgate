@@ -5,7 +5,7 @@
 // (scripts/gen_tollgate_config.py 的 build_aliases) 同一口径, 所以 s 保存时自动重生成
 // 配置, 预览里看到的就是落进配置的顺序。
 //
-// 权重 (priority / group / billing_group) 在 config.local.json 的 upstreams /
+// 权重 (priority / alias / billing) 在 config.local.json 的 upstreams /
 // upstreams[].models 上; store (llm-models.json) 只提供模型列表与模型参数。编辑器装载
 // 时把两者合并: 模型以 store 为准, 权重以配置为准 (缺省 0 / 模型 id / 无)。保存把
 // 编辑态的优先级写回配置的 upstreams, 其余字段原样保留 (2 空格缩进、键按字典序、写
@@ -24,7 +24,7 @@ import (
 
 const (
 	prioField  = "priority"
-	groupField = "group"
+	groupField = "alias" // 模型条的逻辑名 (旧称 group, 随配置迁移改为 alias)
 	idField    = "id"
 	proxyKind  = "proxy"
 	proxyName  = "tg" // store 里代表本代理自己的 provider
@@ -205,7 +205,7 @@ func (e *tuiEditor) groups() ([]groupInfo, bool) {
 }
 
 // buildMerged 合并 store 模型列表与配置权重: 每个上游一条合并条目, 模型以 store 为准,
-// priority / group / billing_group 从配置同名模型继承, 缺省 0 / 模型 id / 无。
+// priority / alias / billing 从配置同名模型继承, 缺省 0 / 模型 id / 无。
 func (e *tuiEditor) buildMerged() {
 	e.merged = map[string]map[string]any{}
 	cfg := e.cfgUpByID()

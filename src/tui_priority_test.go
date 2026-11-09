@@ -57,7 +57,7 @@ const prioTestStore = `{
 }
 `
 
-// 权重在配置的 upstreams / upstreams[].models 上 (priority / group / billing_group)。
+// 权重在配置的 upstreams / upstreams[].models 上 (priority / alias / billing)。
 const prioTestConfig = `{
     "listen": "127.0.0.1:8787",
     "log_path": "var/requests.jsonl",
@@ -77,12 +77,12 @@ const prioTestConfig = `{
                 {
                     "id": "deepseek-flash",
                     "priority": 2,
-                    "group": "deepseek-v4.1-flash"
+                    "alias": "deepseek-v4.1-flash"
                 },
                 {
                     "id": "deepseek-flash-2",
                     "priority": 0,
-                    "group": "deepseek-v4.1-flash"
+                    "alias": "deepseek-v4.1-flash"
                 }
             ]
         },
@@ -94,17 +94,16 @@ const prioTestConfig = `{
                 {
                     "id": "deepseek-v4.1-flash",
                     "priority": 0,
-                    "group": "deepseek-v4.1-flash"
+                    "alias": "deepseek-v4.1-flash"
                 },
                 {
                     "id": "solo",
                     "priority": 5,
-                    "group": "solo"
+                    "alias": "solo"
                 }
             ]
         }
-    ],
-    "aliases": {}
+    ]
 }
 `
 
@@ -177,7 +176,8 @@ func TestPrioCandidateOrder(t *testing.T) {
 }
 
 // 预览的顺序必须和生成器落进配置的一致 —— 这是当初手写排序最怕漂移的地方,
-// 所以直接拿真生成器跑一遍对答案 (没 python3 就跳过)。
+// 所以直接拿真生成器跑一遍对答案 (没 python3 就跳过)。生成器输出已无顶层 aliases,
+// 逻辑名在 models[].alias 上, 测试用 cfg.rebuildAliases() 重建出候选表再对照。
 func TestPrioOrderMatchesGenerator(t *testing.T) {
 	store, cfg := prioFixture(t)
 	root := repoRootFor(cfg)
@@ -197,12 +197,11 @@ func TestPrioOrderMatchesGenerator(t *testing.T) {
 	if err != nil {
 		t.Skipf("生成器跑不起来 (跳过): %v %s", err, stderr.String())
 	}
-	var generated struct {
-		Aliases map[string][][2]string `json:"aliases"`
-	}
+	var generated Config
 	if err := json.Unmarshal(out, &generated); err != nil {
-		t.Fatalf("生成器输出不是 JSON: %v", err)
+		t.Fatalf("生成器输出不是合法配置: %v", err)
 	}
+	generated.rebuildAliases()
 	e := newTuiEditor(cfg)
 	if !e.usable() {
 		t.Fatalf("编辑器装载失败: %v", e.err)
@@ -503,11 +502,10 @@ func TestSettingsRegenerateKeepsDisabledProvider(t *testing.T) {
 		"listen": "127.0.0.1:8787",
 		"upstreams": [
 			{"id": "ustc", "base_url": "https://u.invalid/v1", "priority": 0,
-			 "models": [{"id": "m1", "priority": 0, "group": "g"}]},
+			 "models": [{"id": "m1", "priority": 0, "alias": "g"}]},
 			{"id": "group", "base_url": "http://g.invalid/v1", "priority": -1,
-			 "models": [{"id": "solo", "priority": 0, "group": "solo"}]}
-		],
-		"aliases": {}
+			 "models": [{"id": "solo", "priority": 0, "alias": "solo"}]}
+		]
 	}`
 	if err := os.WriteFile(filepath.Join(dir, "llm-models.json"), []byte(store), 0o600); err != nil {
 		t.Fatalf("写 store: %v", err)
@@ -533,16 +531,11 @@ func TestSettingsRegenerateKeepsDisabledProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("生成器跑不起来: %v %s", err, stderr.String())
 	}
-	var got struct {
-		Upstreams []struct {
-			ID       string `json:"id"`
-			Priority int    `json:"priority"`
-		} `json:"upstreams"`
-		Aliases map[string][][2]string `json:"aliases"`
-	}
+	var got Config
 	if err := json.Unmarshal(out, &got); err != nil {
-		t.Fatalf("生成器输出不是 JSON: %v", err)
+		t.Fatalf("生成器输出不是合法配置: %v", err)
 	}
+	got.rebuildAliases()
 	// 停用的 provider 留在 upstreams, 带负优先级 (权重保留, TUI 可调回)。
 	seenGroup := false
 	for _, u := range got.Upstreams {
@@ -556,11 +549,11 @@ func TestSettingsRegenerateKeepsDisabledProvider(t *testing.T) {
 	if !seenGroup {
 		t.Errorf("停用的 provider 应留在 upstreams: %v", got.Upstreams)
 	}
-	// aliases 里不该有停用 provider 的候选。
+	// 重建出的候选表里不该有停用 provider 的候选。
 	for _, pairs := range got.Aliases {
 		for _, p := range pairs {
 			if p[0] == "group" {
-				t.Errorf("停用 provider 不该出现在 aliases 候选里: %v", pairs)
+				t.Errorf("停用 provider 不该出现在候选里: %v", pairs)
 			}
 		}
 	}
@@ -756,7 +749,7 @@ func TestSettingsModelColumnFillsHeight(t *testing.T) {
 	}
 	fakeCfgModels := make([]map[string]any, 0, 30)
 	for i := 0; i < 30; i++ {
-		fakeCfgModels = append(fakeCfgModels, map[string]any{"id": "m-" + strconv.Itoa(i), "priority": 0, "group": "g"})
+		fakeCfgModels = append(fakeCfgModels, map[string]any{"id": "m-" + strconv.Itoa(i), "priority": 0, "alias": "g"})
 	}
 	cfgEntry := map[string]any{
 		"id":       "ustc",
@@ -886,10 +879,13 @@ func TestSettingsGateSave(t *testing.T) {
 	if err := json.Unmarshal(raw, &top); err != nil {
 		t.Fatalf("写回的配置不是合法 JSON: %v", err)
 	}
-	for _, k := range []string{"listen", "log_path", "upstreams", "aliases"} {
+	for _, k := range []string{"listen", "log_path", "upstreams"} {
 		if _, ok := top[k]; !ok {
 			t.Errorf("写回配置丢了字段 %q", k)
 		}
+	}
+	if _, has := top["aliases"]; has {
+		t.Errorf("顶层 aliases 键已废弃, 写回配置不该再出现")
 	}
 	var got Config
 	if err := json.Unmarshal(raw, &got); err != nil {
@@ -952,20 +948,14 @@ func TestSettingsSaveRegenerateAndReload(t *testing.T) {
 	if bytes.Contains(sb, []byte("priority")) {
 		t.Errorf("store 不该带权重字段")
 	}
-	// 配置已被重生成: aliases 里不含停用模型。
-	raw, err := os.ReadFile(cfg)
+	// 配置已被重生成: 重建出的候选表里不含停用模型 (无顶层 aliases, 从 alias 重建)。
+	reloaded, err := loadConfigOpt(cfg, true)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("重生成的配置应可加载: %v", err)
 	}
-	var got struct {
-		Aliases map[string][][2]string `json:"aliases"`
-	}
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("重生成的配置不是合法 JSON: %v", err)
-	}
-	for _, pairs := range got.Aliases["deepseek-v4.1-flash"] {
+	for _, pairs := range reloaded.Aliases["deepseek-v4.1-flash"] {
 		if pairs[0] == "ustc" && pairs[1] == "deepseek-flash" {
-			t.Fatalf("停用模型不应再出现在重生成的 aliases 里")
+			t.Fatalf("停用模型不应再出现在重建出的候选里")
 		}
 	}
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""示例版配置生成器: 从模型列表文件 + 已有配置的权重生成 upstreams 与 aliases.
+"""示例版配置生成器: 从模型列表文件 + 已有配置的权重生成 upstreams.
 
 这是公开仓库里的示例版, 不依赖 fff dotfiles 生态. 本机实际用的
 scripts/gen_tollgate_config.py 与它同源, 但直接读 ~/fff/config/llm-models.json
@@ -13,22 +13,23 @@ scripts/gen_tollgate_config.py 与它同源, 但直接读 ~/fff/config/llm-model
 权重从已有配置 (--cfg, 形状见 config.example.json) 的 upstreams 读, 参数可选:
     upstreams[].priority                          = provider 权重 (负值停用整家)
     upstreams[].models[].priority                 = 模型权重 (负值停用该模型)
-    upstreams[].models[].group                    = 逻辑名 (缺省 = 模型 id)
-    upstreams[].models[].billing_group            = 额度组 (缺省 = 默认组)
+    upstreams[].models[].alias                    = 逻辑名 (缺省 = 模型 id; 旧称 group)
+    upstreams[].models[].billing                  = 额度组 (缺省 = 默认组; 旧称 billing_group)
     不给 --cfg 或条目缺失时用缺省 (0 / 0 / 模型 id / 无).
 
 规则 (与 README -配置- 一节一致):
-    - 逻辑名 = 条目的 group, 没有就是模型 id; 跨上游同名归并成一个别名.
+    - 逻辑名 = 条目的 alias, 没有就是模型 id; 跨上游同名归并成一个别名.
     - 候选顺序 = 模型 priority 降序, 同值看 provider 的 priority 降序, 再同值按
-      upstreams 顺序. 0 最小, 缺省即 0.
+      upstreams 顺序. 0 最小, 缺省即 0. 代理读取配置后按同一规则重建候选表.
     - 模型 priority 为负: 该模型停用, 不进候选 (但仍留在 upstreams 的 models, 权重不丢).
     - provider 的 priority 为负: 整家停用, 不进候选 (仍留在 upstreams).
     - key_env = store 里 apiKey 占位符去掉 "$" 后的名字 ($USTC_API_KEY -> USTC_API_KEY).
-    - 额度组 = 条目的 billing_group, 同家同名一组, 缺省归默认组; 输出为上游
-      models 里的 billing_group. 上游的 models 现在固定写出 (它带着权重字段).
+    - 额度组 = 条目的 billing, 同家同名一组, 缺省归默认组; 输出为上游
+      models 里的 billing. 上游的 models 现在固定写出 (它带着权重字段).
     - groups (别名的别名, 手工维护顶层键) 从已有配置原样保留; 生成后若某组成员
       不再是对应别名 (模型被删 / 停用), 打印警告 —— 代理加载时会因「成员不是已
       注册逻辑名」报错拦住.
+    - 顶层 aliases 键已废弃, 不再输出 (逻辑名就写在 models[].alias 上).
 
 用法:
     python3 scripts/gen_tollgate_config.example.py                 # 读示例列表, 打印 JSON
@@ -45,8 +46,12 @@ from pathlib import Path
 DEFAULT_LIST = Path(__file__).with_name("llm-models.example.json")
 
 PRIORITY_FIELD = "priority"
-GROUP_FIELD = "group"
-BILLING_FIELD = "billing_group"
+GROUP_FIELD = "alias"
+BILLING_FIELD = "billing"
+
+# 旧字段名 (group / billing_group) 读取时兼容, 写出只用新名.
+LEGACY_GROUP_FIELD = "group"
+LEGACY_BILLING_FIELD = "billing_group"
 
 # 组 (别名的别名): 组名 -> 已注册逻辑名列表. 手工维护, 从 --cfg 原样保留.
 GROUPS_FIELD = "groups"
@@ -69,10 +74,16 @@ def weight(
             if m.get("id") != model_id:
                 continue
             model_prio = int(m.get(PRIORITY_FIELD, 0) or 0)
-            if isinstance(m.get(GROUP_FIELD), str) and m.get(GROUP_FIELD).strip():
-                group = m[GROUP_FIELD].strip()
-            if isinstance(m.get(BILLING_FIELD), str) and m.get(BILLING_FIELD).strip():
-                billing = m[BILLING_FIELD].strip()
+            g = m.get(GROUP_FIELD)
+            if g is None:
+                g = m.get(LEGACY_GROUP_FIELD)
+            if isinstance(g, str) and g.strip():
+                group = g.strip()
+            b = m.get(BILLING_FIELD)
+            if b is None:
+                b = m.get(LEGACY_BILLING_FIELD)
+            if isinstance(b, str) and b.strip():
+                billing = b.strip()
             break
         break
     return prov_prio, model_prio, group, billing
@@ -91,11 +102,13 @@ def groups_of(cfg: dict | None) -> dict[str, list[str]]:
     return out
 
 
-def build(list_path: Path, cfg_path: Path) -> tuple[dict, list[str]]:
+def build(list_path: Path, cfg_path: Path | None) -> tuple[dict, list[str]]:
     data = json.loads(list_path.read_text(encoding="utf-8"))
     providers = data["providers"]
     cfg = (
-        json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else None
+        json.loads(cfg_path.read_text(encoding="utf-8"))
+        if cfg_path is not None and cfg_path.exists()
+        else None
     )
 
     # (逻辑名, 上游 id, 真实模型 id, 模型权重, provider 权重, 出现序)
@@ -141,7 +154,7 @@ def build(list_path: Path, cfg_path: Path) -> tuple[dict, list[str]]:
         }
         upstreams.append(entry)
 
-    out: dict = {"upstreams": upstreams, "aliases": aliases}
+    out: dict = {"upstreams": upstreams}  # 顶层 aliases 键已废弃, 逻辑名在 models[].alias 上
     warnings: list[str] = []
     groups = groups_of(cfg)
     # 组只能在生成的别名集合里引用成员: 成员被删 / 停用后不再是别名, 警告但保留原样
@@ -167,7 +180,9 @@ def main() -> None:
     ap.add_argument("--out", default="", help="写到文件而非 stdout")
     args = ap.parse_args()
 
-    out, warnings = build(Path(args.list), Path(args.cfg))
+    out, warnings = build(
+        Path(args.list), Path(args.cfg) if args.cfg else None
+    )
     text = json.dumps(out, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
     for w in warnings:
         print(f"注意: {w}", file=sys.stderr)

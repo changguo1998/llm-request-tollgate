@@ -320,8 +320,8 @@ func TestProxyQuotaLockStaysInGroup(t *testing.T) {
 			ID: "u1", BaseURL: up.URL, AuthHeader: "Authorization", Key: "k",
 			IncludeUsage: true, Errors: rules,
 			Models: []ModelCfg{
-				{ID: "real-1", BillingGroup: "g1"},
-				{ID: "real-2", BillingGroup: "g2"},
+				{ID: "real-1", Billing: "g1"},
+				{ID: "real-2", Billing: "g2"},
 			},
 		}},
 		Aliases: map[string][][2]string{
@@ -769,8 +769,8 @@ func TestProxyModelQueueDoesNotBlockSiblings(t *testing.T) {
 	}
 }
 
-// TestLoadConfigValidatesGroups 核对记账组的配置校验: 同一上游重复的模型 id 与别名
-// 引用未声明模型都报错; 不写 models 的旧配置照常加载 (全部归默认组)。
+// TestLoadConfigValidatesGroups 核对记账组的配置校验: 同一上游重复的模型 id 报错;
+// 不写 models 的旧配置照常加载 (全部归默认组, 重建出的候选表为空)。
 func TestLoadConfigValidatesGroups(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, body string) string {
@@ -784,27 +784,17 @@ func TestLoadConfigValidatesGroups(t *testing.T) {
 
 	dup := `{
 	  "upstreams": [{"id": "u1", "base_url": "http://x", "models": [
-	    {"id": "a", "billing_group": "g1"},
-	    {"id": "a", "billing_group": "g2"}
-	  ]}],
-	  "aliases": {"m1": [["u1", "a"]]}
+	    {"id": "a", "billing": "g1"},
+	    {"id": "a", "billing": "g2"}
+	  ]}]
 	}`
 	if _, err := loadConfig(write("dup.json", dup)); err == nil {
 		t.Fatal("同一上游重复的模型 id 应报错")
 	}
 
-	undeclared := `{
-	  "upstreams": [{"id": "u1", "base_url": "http://x", "models": [{"id": "a"}]}],
-	  "aliases": {"m1": [["u1", "b"]]}
-	}`
-	if _, err := loadConfig(write("undeclared.json", undeclared)); err == nil {
-		t.Fatal("别名引用未声明的模型应报错")
-	}
-
-	// 旧配置: 不写 models 就不做这项校验, 模型归默认组。
+	// 旧配置: 不写 models 就不做这项校验, 重建出的候选表为空 (模型全归默认组)。
 	legacy := `{
-	  "upstreams": [{"id": "u1", "base_url": "http://x"}],
-	  "aliases": {"m1": [["u1", "anything"]]}
+	  "upstreams": [{"id": "u1", "base_url": "http://x"}]
 	}`
 	cfg, err := loadConfig(write("legacy.json", legacy))
 	if err != nil {
@@ -812,6 +802,9 @@ func TestLoadConfigValidatesGroups(t *testing.T) {
 	}
 	if len(cfg.Upstreams[0].Models) != 0 {
 		t.Fatalf("旧配置不该凭空多出 models: %+v", cfg.Upstreams[0].Models)
+	}
+	if len(cfg.Aliases) != 0 {
+		t.Fatalf("无 models 时重建出的候选表应为空: %+v", cfg.Aliases)
 	}
 }
 

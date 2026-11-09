@@ -166,24 +166,24 @@ mv llm-request-tollgate.bak llm-request-tollgate && ./deploy/tollgate.sh restart
 `~/fff/config/llm-models.json` (provider -> baseUrl/models, 模型条目只带模型参数
 contextWindow / maxTokens / thinkingLevelMap / reasoning 等) 与黑名单
 `llm-models-droplist.json`; 权重从现有 `config.local.json` (即 `~/fff/config/tollgate.json`)
-的 `upstreams` / `upstreams[].models` 读 (provider 与模型的 `priority`, 模型的 `group` /
-`billing_group`), 重生成 `upstreams` 与 `aliases` 写回.
+的 `upstreams` / `upstreams[].models` 读 (provider 与模型的 `priority`, 模型的 `alias` /
+`billing`; 旧名 `group` / `billing_group` 读取时兼容), 重生成 `upstreams` 写回.
 本脚本只写配置, 不碰 store; 代理自身的 `tg` (kind=proxy) 目录条目由 `scripts/upsert_tollgate_provider.py` 维护 (fff 更新过 store 后跑一次, 让 agent 从 store 指向本代理).
 公开仓库提供不依赖 fff 的示例: `scripts/gen_tollgate_config.example.py` +
 模型列表示例 `scripts/llm-models.example.json` (权重可用 `--cfg` 从现有配置继承). 要点:
 
-- 逻辑名取上游 models 条目里的 `group`, 没有就是模型 id; 同 id 跨上游 / 显式同组归并成一个
-  别名.
+- 逻辑名取上游 models 条目里的 `alias`, 没有就是模型 id; 同 id 跨上游 / 显式同别名归并成一个
+  别名 (写进 `models[].alias`). 顶层 `aliases` 键已废弃, 代理读取配置后从 `alias` 重建候选表.
 - 候选顺序 = 模型 `priority` 降序 (同值看 provider 的, 再同值按 `--providers` 顺
   序); 0 最小, 缺省即 0.
-- 模型 `priority` 为负 = 该模型停用, provider 的为负 = 整家停用: 都只不进别名候选,
+- 模型 `priority` 为负 = 该模型停用, provider 的为负 = 整家停用: 都只不进候选,
   仍留在 `upstreams` 的 `models` (权重保留, TUI 可调回); 恢复时改回非负即可.
 - 代理对外模型列表继承候选的 `thinkingLevelMap` (取交集) 与最小的 `contextWindow` /
   `maxTokens` (从 store 的模型参数); 缺等级表时 agent 汇报 `UNSUPPORTED_REASONING_EFFORT` 拒发.
 - `key_env` 取 store 里 `apiKey` 的占位符名; `auth_header` 等从现有配置继承.
 - `--dry-run` 只打印; `--providers` 改上游顺序. 不传时缺省是 store 里除 `tg`
   (`tg`, 代理自身) 与 `arkap` 外的全部 provider; arkap 要带就显式写进 `--providers`.
-- 额度组取模型的 `billing_group`, 生成到上游的 `models` (字段同名); 同家同名
+- 额度组取模型的 `billing`, 生成到上游的 `models` (字段同名); 同家同名
   一组, 不写归默认组. 上游的 `models` 现在固定写出 (权重在上面).
 - 不在 store 里的手加上游在重生成时会丢 (`build_upstreams` 只认 store 里的 provider);
   要先在 store 里补 provider, 或重生成后手工补回.

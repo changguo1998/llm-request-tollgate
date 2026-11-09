@@ -216,12 +216,15 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
   `priority` 是 provider 权重: 越大越先用, 缺省 0 (最小); 负值 = 整家停用, 保留在
   `upstreams` 里 (只不进别名候选, 权重不丢, 可随时调回非负)。
   `models` 是该上游提供的真实模型清单, 生成器固定写出 (权重就存在这些条目上), 每条
-  `{ "id": "...", "priority": N, "group": "...", "billing_group": "..." }`:
-  `priority` 是模型权重 (负值 = 该模型停用, 同样只影响候选、权重保留), `group` 是逻辑名
-  (缺省 = 模型 id), `billing_group` 是**记账组** (同家同名一组, 额度锁只锁组; 不写组名 =
-  该上游的默认组)。手写配置不写 `models` 也兼容 (全部归默认组, 权重按 0)。声明了 `models`
-  的上游, 别名引用的模型必须在表内, 否则启动 / 热加载直接报错。
-- `aliases`: 逻辑名 -> `[[上游 id, 真实模型 id], ...]`。
+  `{ "id": "...", "priority": N, "alias": "...", "billing": "..." }`:
+  `priority` 是模型权重 (负值 = 该模型停用, 同样只影响候选、权重保留), `alias` 是逻辑名
+  (缺省 = 模型 id; 旧称 `group`, 读取时兼容), `billing` 是**记账组** (同家同名一组,
+  额度锁只锁组; 不写组名 = 该上游的默认组; 旧称 `billing_group`, 读取时兼容)。手写配置
+  不写 `models` 也兼容 (全部归默认组, 权重按 0)。
+- 候选链不再独立维护: 顶层 `aliases` 键已废弃, 代理读取配置后从 `models[].alias` 按
+  `priority` 重建候选表 (逻辑名 = alias, 缺省模型 id; 顺序 = 模型 priority 降序 →
+  provider priority 降序 → 配置顺序 → 模型 id, 与生成器 / TUI 预览同口径; 负优先级停用
+  不进候选)。`GET /v1/models`、粘性、fallback 全走重建后的这张表。
 - `groups`: 组 (别名的别名) — 组名 -> 已注册逻辑名列表 `["ds41f", "ds4f", ...]`,
   顺序即展开优先级。请求写组名时, 候选链 = 组成员候选链按序拼接 (跨成员去重),
   组名对客户端与逻辑名无差别: 同样出现在 `/v1/models`、有自己的粘性偏好、
@@ -242,24 +245,25 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
 本机版读 `~/fff/config/llm-models.json` (provider -> baseUrl/models, 由 fff 的
 `fff-update-*-llm-list.py` 维护; 模型条目只带模型参数, 如 contextWindow / maxTokens /
 thinkingLevelMap / reasoning) 与 `llm-models-droplist.json` (精确匹配黑名单); 权重从现有
-配置的 `upstreams` / `upstreams[].models` 读 (字段 `priority` / `group` / `billing_group`),
-重生成 `upstreams` 与 `aliases`:
+配置的 `upstreams` / `upstreams[].models` 读 (字段 `priority` / `alias` / `billing`;
+旧名 `group` / `billing_group` 读取时兼容), 重生成 `upstreams`:
 
-- 别名的逻辑名取上游 `models` 条目里的 `group`, 没有就是模型 id 本身; 同名 (同 id 跨上游,
-  或显式 `group`) 的归并成一个别名。
+- 别名的逻辑名取上游 `models` 条目里的 `alias`, 没有就是模型 id 本身; 同名 (同 id 跨
+  上游, 或显式 `alias`) 的归并成一个别名 (写进 `models[].alias`)。代理加载配置后按同一
+  规则重建候选表, 顶层 `aliases` 键不再输出。
 - 候选顺序 = fallback 优先级 = 模型的 `priority` 降序, 同值看 provider 的 `priority`
   (upstream 条目) 降序, 再同值按 `--providers` 顺序; 0 最小, 缺省即 0。
-- 模型的 `priority` 为负时该模型停用: 不进候选 (aliases), 但仍留在上游的 `models`
+- 模型的 `priority` 为负时该模型停用: 不进候选, 但仍留在上游的 `models`
   声明里 (权重不丢); 想临时下掉某个上游模型就把它优先级改成负数, 恢复时改回非负即可。
-- provider 自身的 `priority` 为负时整家停用: 不进 `aliases` 候选, 保留在 `upstreams`
+- provider 自身的 `priority` 为负时整家停用: 不进候选, 保留在 `upstreams`
   (权重不丢, settings 面板仍显示、可调回); 恢复时改回非负即可 (模型级与 provider 级共用
   同一个 `priority` 字段)。
-- `group` / `priority` / `billing_group` 都在 `config.local.json` (即
+- `alias` / `priority` / `billing` 都在 `config.local.json` (即
   `~/fff/config/tollgate.json`) 里维护, 与扁平全局键一样由生成器保留; store
   `llm-models.json` 不再带这些字段。跨上游同族不同名的模型 (如 ustc 的 `deepseek-flash`
-  与 ark 的 `deepseek-v4-1-flash*`) 就靠 `group` 并成一个别名。
-- 额度组取模型的 `billing_group` (同家同名一组, 缺省归默认组), 写到上游 `models` 条目;
-  上游的 `models` 固定写出 (权重在上面), 整家都没写 `billing_group` 时只有一个默认组。
+  与 ark 的 `deepseek-v4-1-flash*`) 就靠 `alias` 并成一个别名。
+- 额度组取模型的 `billing` (同家同名一组, 缺省归默认组), 写到上游 `models` 条目;
+  上游的 `models` 固定写出 (权重在上面), 整家都没写 `billing` 时只有一个默认组。
 - 代理自身的模型列表 (agent 看到的) 同时继承候选的 `thinkingLevelMap` (取交集: 某等级只有所有
   候选都支持才保留), 以及最小的 `contextWindow` / `maxTokens`; 缺等级表时 agent 会拒发
   `reasoning_effort`, 报 `UNSUPPORTED_REASONING_EFFORT` (dsh 客户端校验)。这些参数从

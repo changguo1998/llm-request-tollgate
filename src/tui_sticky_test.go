@@ -16,13 +16,13 @@ const stickyTestConfig = `{
     "listen": "127.0.0.1:8787",
     "log_path": "var/requests.jsonl",
     "upstreams": [
-        { "id": "u1", "base_url": "http://u1.invalid/v1" },
-        { "id": "u2", "base_url": "http://u2.invalid/v1" }
-    ],
-    "aliases": {
-        "m1": [["u1", "real-1"], ["u2", "real-2"]],
-        "m2": [["u2", "real-2"]]
-    }
+        { "id": "u1", "base_url": "http://u1.invalid/v1", "models": [
+            {"id": "real-1", "alias": "m1"}
+        ]},
+        { "id": "u2", "base_url": "http://u2.invalid/v1", "models": [
+            {"id": "real-2", "alias": "m1"}, {"id": "real-2b", "alias": "m2"}
+        ]}
+    ]
 }`
 
 func stickyFixture(t *testing.T) string {
@@ -46,7 +46,7 @@ func TestStickyCandsAndMark(t *testing.T) {
 	want := []stickyCand{
 		{"m1", "u1", "real-1", false},
 		{"m1", "u2", "real-2", true},
-		{"m2", "u2", "real-2", false},
+		{"m2", "u2", "real-2b", false},
 	}
 	if len(cands) != len(want) {
 		t.Fatalf("候选数应为 %d, 得到 %+v", len(want), cands)
@@ -77,13 +77,13 @@ func TestStickyCandsIncludeGroups(t *testing.T) {
 	    "listen": "127.0.0.1:8787",
 	    "log_path": "var/requests.jsonl",
 	    "upstreams": [
-	        { "id": "u1", "base_url": "http://u1.invalid/v1" },
-	        { "id": "u2", "base_url": "http://u2.invalid/v1" }
+	        { "id": "u1", "base_url": "http://u1.invalid/v1", "models": [
+	            {"id": "real-1", "alias": "m1"}
+	        ]},
+	        { "id": "u2", "base_url": "http://u2.invalid/v1", "models": [
+	            {"id": "real-2", "alias": "m1"}, {"id": "real-2b", "alias": "m2"}
+	        ]}
 	    ],
-	    "aliases": {
-	        "m1": [["u1", "real-1"], ["u2", "real-2"]],
-	        "m2": [["u2", "real-2"]]
-	    },
 	    "groups": {
 	        "g1": ["m2", "m1"]
 	    }
@@ -96,14 +96,15 @@ func TestStickyCandsIncludeGroups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 字典序: g1 (组), m1, m2。g1 候选 = m2 + m1 拼接并跨成员去重:
-	// [u2/real-2 (m2), u1/real-1 (m1)] —— 两成员共有的 u2/real-2 只留第一次出现。
+	// 字典序: g1 (组), m1, m2。g1 候选 = m2 + m1 拼接去重:
+	// [u2/real-2b (m2), u1/real-1, u2/real-2 (m1)] —— 无跨成员重复, 全部保留。
 	want := []stickyCand{
-		{"g1", "u2", "real-2", true}, // 组偏好记在组名上 (第一个候选)
+		{"g1", "u2", "real-2b", false},
 		{"g1", "u1", "real-1", false},
+		{"g1", "u2", "real-2", true}, // 组偏好记在组名上 (第三个候选)
 		{"m1", "u1", "real-1", false},
 		{"m1", "u2", "real-2", false},
-		{"m2", "u2", "real-2", false},
+		{"m2", "u2", "real-2b", false},
 	}
 	if len(cands) != len(want) {
 		t.Fatalf("候选数应为 %d, 得到 %+v", len(want), cands)

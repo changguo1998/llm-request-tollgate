@@ -37,14 +37,14 @@
         {
           "id": "deepseek-v4.1-flash",
           "priority": 10,
-          "group": "deepseek-v4.1-flash",
-          "billing_group": "deepseek"
+          "alias": "deepseek-v4.1-flash",
+          "billing": "deepseek"
         },
         {
           "id": "qwen2.5-chat",
           "priority": 0,
-          "group": "qwen2.5-chat",
-          "billing_group": "qwen"
+          "alias": "qwen2.5-chat",
+          "billing": "qwen"
         }
       ]
     },
@@ -60,42 +60,18 @@
         {
           "id": "deepseek-v4.1-flash",
           "priority": 20,
-          "group": "deepseek-v4.1-flash",
-          "billing_group": "deepseek"
+          "alias": "deepseek-v4.1-flash",
+          "billing": "deepseek"
         },
         {
           "id": "glm-5-lite",
           "priority": 0,
-          "group": "glm-5-lite",
-          "billing_group": "glm"
+          "alias": "glm-5-lite",
+          "billing": "glm"
         }
       ]
     }
   ],
-  "aliases": {
-    "deepseek-v4.1-flash": [
-      [
-        "group",
-        "deepseek-v4.1-flash"
-      ],
-      [
-        "ustc",
-        "deepseek-v4.1-flash"
-      ]
-    ],
-    "glm-5-lite": [
-      [
-        "group",
-        "glm-5-lite"
-      ]
-    ],
-    "qwen2.5-chat": [
-      [
-        "ustc",
-        "qwen2.5-chat"
-      ]
-    ]
-  },
   "groups": {
     "worker": [
       "deepseek-v4.1-flash",

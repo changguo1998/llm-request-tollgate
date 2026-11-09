@@ -108,6 +108,7 @@ ms2sec() { awk -v m="$1" 'BEGIN{printf "%g", m/1000}'; }
 #   include_usage interval_ms sem_wait_ms queue_wait_ms 逻辑模型名 [gate 里的额外字段]
 # 门控是全局的 (设计 §5.5.4): 节拍与等待都在这里给, 锁时长与退避序列取测试用的小值。
 # 时间为扁平 _sec 键 (可小数), 参数仍按毫秒传, 经 ms2sec 转秒。
+# 逻辑名写在 models[].alias 上 (顶层 aliases 键已废弃, 代理加载后自行重建候选表)。
 gen_config1() {
     local extra="${11:-}" gate
     gate="\"interval_sec\": $(ms2sec "${7}"), \"sem_wait_sec\": $(ms2sec "${8}"), \"queue_wait_sec\": $(ms2sec "${9}")"
@@ -121,9 +122,9 @@ gen_config1() {
   "connect_sec": 1.0, "response_header_sec": 5.0, "stream_idle_sec": 3.0,
   $gate,
   "upstreams": [
-    { "id": "$5", "base_url": "http://127.0.0.1:$4/v1", "auth_header": "Authorization", "key": "fake-key", "headers": {}, "include_usage": $6 }
-  ],
-  "aliases": { "${10}": [["$5", "deepseek-v4.1-flash"]] }
+    { "id": "$5", "base_url": "http://127.0.0.1:$4/v1", "auth_header": "Authorization", "key": "fake-key", "headers": {}, "include_usage": $6,
+      "models": [ { "id": "deepseek-v4.1-flash", "alias": "${10}" } ] }
+  ]
 }
 EOF
 }
@@ -184,9 +185,9 @@ case_keyenv() {
   "connect_sec": 1.0, "response_header_sec": 5.0, "stream_idle_sec": 3.0,
   "interval_sec": 0.02, "sem_wait_sec": 0.4, "queue_wait_sec": 0.4, "concurrency_lock_sec": 0.8, "quota_lock_sec": 2.0, "breaker_lock_sec": 3.0, "retry_backoff_sec": [0.01, 0.02, 0.03],
   "upstreams": [
-    { "id": "fu", "base_url": "http://127.0.0.1:19012/v1", "auth_header": "Authorization", "key_env": "TG_TEST_KEY", "headers": {}, "include_usage": true }
-  ],
-  "aliases": { "test-model": [["fu", "deepseek-v4.1-flash"]] }
+    { "id": "fu", "base_url": "http://127.0.0.1:19012/v1", "auth_header": "Authorization", "key_env": "TG_TEST_KEY", "headers": {}, "include_usage": true,
+      "models": [ { "id": "deepseek-v4.1-flash", "alias": "test-model" } ] }
+  ]
 }
 EOF
     if env -u TG_TEST_KEY "$BIN/tollgate" -config "$CFG" -check > /dev/null 2>&1; then
@@ -212,13 +213,11 @@ case_fallback() {
   "connect_sec": 1.0, "response_header_sec": 5.0, "stream_idle_sec": 3.0,
   "interval_sec": 0.02, "sem_wait_sec": 0.4, "queue_wait_sec": 0.4, "concurrency_lock_sec": 0.8, "quota_lock_sec": 2.0, "breaker_lock_sec": 5.0, "retry_backoff_sec": [0.01, 0.02, 0.03],
   "upstreams": [
-    { "id": "dead", "base_url": "http://127.0.0.1:19999/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true },
-    { "id": "fu", "base_url": "http://127.0.0.1:19013/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true }
-  ],
-  "aliases": {
-    "test-model": [["dead", "deepseek-v4.1-flash"], ["fu", "deepseek-v4.1-flash"]],
-    "onlydead-model": [["dead", "deepseek-v4.1-flash"]]
-  }
+    { "id": "dead", "base_url": "http://127.0.0.1:19999/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true,
+      "models": [ { "id": "deepseek-v4.1-flash", "alias": "test-model" }, { "id": "onlydead-real", "alias": "onlydead-model" } ] },
+    { "id": "fu", "base_url": "http://127.0.0.1:19013/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true,
+      "models": [ { "id": "deepseek-v4.1-flash", "alias": "test-model" } ] }
+  ]
 }
 EOF
     start_fake 19013 20
@@ -233,8 +232,12 @@ EOF
     [ "${fb:-0}" -ge 1 ] && pass "日志记 upstream=fu, fallbacks=$fb" || fail "fallback 日志不对"
 
     # 唯一候选在锁里 / 排队超时: 请求根本没发出去, 合成 429 说明原因 (不是 502)。
+    # 第一笔: dead 传输失败退避重试到熔断, 请求内部撞锁 -> 429 (rate_limit_error)。
     code=$(post 18813 '{"model":"onlydead-model","messages":[{"role":"user","content":"hi"}]}')
-    [ "$code" = "429" ] && pass "候选全被锁 -> 合成 429" || fail "allfail -> $code (want 429)"
+    [ "$code" = "429" ] && pass "唯一候选熔断 -> 合成 429" || fail "allfail -> $code (want 429)"
+    # 第二笔: 候选已在熔断锁里 -> 429 + upstream_locked (锁内跳过, 无传输错误可透传)。
+    code=$(post 18813 '{"model":"onlydead-model","messages":[{"role":"user","content":"hi"}]}')
+    [ "$code" = "429" ] && pass "候选全被锁 -> 合成 429" || fail "locked -> $code (want 429)"
     jq -e '.error.code == "upstream_locked"' "$TMP/resp.txt" > /dev/null 2>&1 &&
         pass "429 error.code=upstream_locked" || fail "429 error 体不对"
     jq -r 'select(.status==429) | .lock_skips' "$LOG" | tail -1 | grep -q '^[1-9]' &&
@@ -256,14 +259,13 @@ case_fallback_gate() {
   "connect_sec": 1.0, "response_header_sec": 5.0, "stream_idle_sec": 3.0,
   "interval_sec": 0.02, "sem_wait_sec": 0.15, "queue_wait_sec": 0.15, "concurrency_lock_sec": 0.8, "quota_lock_sec": 2.0, "breaker_lock_sec": 5.0, "retry_backoff_sec": [0.01, 0.02, 0.03],
   "upstreams": [
-    { "id": "dead", "base_url": "http://127.0.0.1:19999/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true },
-    { "id": "fu", "base_url": "http://127.0.0.1:19016/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true },
-    { "id": "slow", "base_url": "http://127.0.0.1:19996/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true }
-  ],
-  "aliases": {
-    "fbg-model": [["dead", "deepseek-v4.1-flash"], ["fu", "deepseek-v4.1-flash"]],
-    "slow-model": [["slow", "deepseek-v4.1-flash"]]
-  }
+    { "id": "dead", "base_url": "http://127.0.0.1:19999/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true,
+      "models": [ { "id": "deepseek-v4.1-flash", "alias": "fbg-model" } ] },
+    { "id": "fu", "base_url": "http://127.0.0.1:19016/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true,
+      "models": [ { "id": "deepseek-v4.1-flash", "alias": "fbg-model" } ] },
+    { "id": "slow", "base_url": "http://127.0.0.1:19996/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true,
+      "models": [ { "id": "deepseek-v4.1-flash", "alias": "slow-model" } ] }
+  ]
 }
 EOF
     start_fake 19016 20
@@ -405,10 +407,11 @@ PYSRV
   "interval_sec": 0.02, "sem_wait_sec": 0.4, "queue_wait_sec": 0.4, "concurrency_lock_sec": 0.8, "quota_lock_sec": 2.0, "breaker_lock_sec": 3.0, "retry_backoff_sec": [0.01, 0.02, 0.03],
   "upstreams": [
     { "id": "quota", "base_url": "http://127.0.0.1:19994/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true,
-      "errors": { "quota": [ { "status": [402, 429], "contains": ["insufficient balance"] } ] } },
-    { "id": "fu", "base_url": "http://127.0.0.1:19014/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true }
-  ],
-  "aliases": { "q-model": [["quota", "deepseek-v4.1-flash"], ["fu", "deepseek-v4.1-flash"]] }
+      "errors": { "quota": [ { "status": [402, 429], "contains": ["insufficient balance"] } ] },
+      "models": [ { "id": "deepseek-v4.1-flash", "alias": "q-model" } ] },
+    { "id": "fu", "base_url": "http://127.0.0.1:19014/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true,
+      "models": [ { "id": "deepseek-v4.1-flash", "alias": "q-model" } ] }
+  ]
 }
 EOF
     start_fake 19014 20
@@ -493,9 +496,9 @@ PYSRV
   "connect_sec": 1.0, "response_header_sec": 5.0, "stream_idle_sec": 3.0,
   "interval_sec": 0.02, "sem_wait_sec": 0.2, "queue_wait_sec": 0.2, "concurrency_lock_sec": 0.8, "quota_lock_sec": 2.0, "breaker_lock_sec": 3.0, "retry_backoff_sec": [0.01, 0.02, 0.03],
   "upstreams": [
-    { "id": "limited", "base_url": "http://127.0.0.1:19995/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true }
-  ],
-  "aliases": { "only": [["limited", "deepseek-v4.1-flash"]] }
+    { "id": "limited", "base_url": "http://127.0.0.1:19995/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true,
+      "models": [ { "id": "deepseek-v4.1-flash", "alias": "only" } ] }
+  ]
 }
 EOF
     start_proxy 18840 "$TMP/cfg-rotate.json"
@@ -581,13 +584,11 @@ case_usage() {
   "connect_sec": 1.0, "response_header_sec": 5.0, "stream_idle_sec": 3.0,
   "interval_sec": 0.02, "sem_wait_sec": 0.4, "queue_wait_sec": 0.4, "concurrency_lock_sec": 0.8, "quota_lock_sec": 2.0, "breaker_lock_sec": 3.0, "retry_backoff_sec": [0.01, 0.02, 0.03],
   "upstreams": [
-    { "id": "fu", "base_url": "http://127.0.0.1:19003/v1", "auth_header": "Authorization", "key": "k1", "headers": {}, "include_usage": true },
-    { "id": "fnu", "base_url": "http://127.0.0.1:19003/v1", "auth_header": "Authorization", "key": "k2", "headers": {}, "include_usage": false }
-  ],
-  "aliases": {
-    "test-model": [["fu", "deepseek-v4.1-flash"]],
-    "no-usage-model": [["fnu", "deepseek-v4.1-flash"]]
-  }
+    { "id": "fu", "base_url": "http://127.0.0.1:19003/v1", "auth_header": "Authorization", "key": "k1", "headers": {}, "include_usage": true,
+      "models": [ { "id": "deepseek-v4.1-flash", "alias": "test-model" } ] },
+    { "id": "fnu", "base_url": "http://127.0.0.1:19003/v1", "auth_header": "Authorization", "key": "k2", "headers": {}, "include_usage": false,
+      "models": [ { "id": "deepseek-v4.1-flash", "alias": "no-usage-model" } ] }
+  ]
 }
 EOF
     start_fake 19003 20
@@ -705,9 +706,9 @@ case_ratelimit_429() {
   "connect_sec": 1.0, "response_header_sec": 5.0, "stream_idle_sec": 3.0,
   "interval_sec": 0.02, "sem_wait_sec": 0.15, "queue_wait_sec": 0.15, "concurrency_lock_sec": 2.0, "quota_lock_sec": 2.0, "breaker_lock_sec": 3.0, "retry_backoff_sec": [0.01, 0.02, 0.03],
   "upstreams": [
-    { "id": "slow", "base_url": "http://127.0.0.1:19997/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true }
-  ],
-  "aliases": { "rl-model": [["slow", "deepseek-v4.1-flash"]] }
+    { "id": "slow", "base_url": "http://127.0.0.1:19997/v1", "auth_header": "Authorization", "key": "k", "headers": {}, "include_usage": true,
+      "models": [ { "id": "deepseek-v4.1-flash", "alias": "rl-model" } ] }
+  ]
 }
 EOF
     start_slow 19997 2 "$TMP/rl429-count.txt" || fail "慢上游未就绪"

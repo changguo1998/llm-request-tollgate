@@ -14,6 +14,7 @@ import (
 )
 
 // 配置校验: 组名利名重名 / 成员不是已注册逻辑名 / 空组 / 组嵌套引用别的组 都报错。
+// 逻辑名来自上游 models 条目的 alias 字段 (重建; 顶层 aliases 键已废弃)。
 func TestGroupConfigValidation(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, body string) string {
@@ -26,8 +27,8 @@ func TestGroupConfigValidation(t *testing.T) {
 	}
 
 	collision := `{
-	  "upstreams": [{"id": "u1", "base_url": "http://x"}],
-	  "aliases": {"m1": [["u1", "a"]]},
+	  "upstreams": [{"id": "u1", "base_url": "http://x",
+	    "models": [{"id": "a", "alias": "m1"}]}],
 	  "groups": {"m1": ["m1"]}
 	}`
 	if _, err := loadConfig(write("collision.json", collision)); err == nil {
@@ -35,8 +36,8 @@ func TestGroupConfigValidation(t *testing.T) {
 	}
 
 	missing := `{
-	  "upstreams": [{"id": "u1", "base_url": "http://x"}],
-	  "aliases": {"m1": [["u1", "a"]]},
+	  "upstreams": [{"id": "u1", "base_url": "http://x",
+	    "models": [{"id": "a", "alias": "m1"}]}],
 	  "groups": {"g1": ["m1", "ghost"]}
 	}`
 	if _, err := loadConfig(write("missing.json", missing)); err == nil {
@@ -52,8 +53,8 @@ func TestGroupConfigValidation(t *testing.T) {
 	}
 
 	nested := `{
-	  "upstreams": [{"id": "u1", "base_url": "http://x"}],
-	  "aliases": {"m1": [["u1", "a"]]},
+	  "upstreams": [{"id": "u1", "base_url": "http://x",
+	    "models": [{"id": "a", "alias": "m1"}]}],
 	  "groups": {"g1": ["m1"], "g2": ["g1"]}
 	}`
 	if _, err := loadConfig(write("nested.json", nested)); err == nil {
@@ -61,8 +62,8 @@ func TestGroupConfigValidation(t *testing.T) {
 	}
 
 	ok := `{
-	  "upstreams": [{"id": "u1", "base_url": "http://x"}],
-	  "aliases": {"m1": [["u1", "a"]], "m2": [["u1", "b"]]},
+	  "upstreams": [{"id": "u1", "base_url": "http://x",
+	    "models": [{"id": "a", "alias": "m1"}, {"id": "b", "alias": "m2"}]}],
 	  "groups": {"g1": ["m2", "m1"]}
 	}`
 	cfg, err := loadConfig(write("ok.json", ok))
@@ -71,6 +72,10 @@ func TestGroupConfigValidation(t *testing.T) {
 	}
 	if got := cfg.Groups["g1"]; len(got) != 2 || got[0] != "m2" || got[1] != "m1" {
 		t.Fatalf("组成员顺序应保留配置顺序, 实为 %#v", got)
+	}
+	chain, has := cfg.Aliases["m1"]
+	if !has || len(chain) != 1 || chain[0][0] != "u1" || chain[0][1] != "a" {
+		t.Fatalf("候选表应从 models 的 alias 重建, 实为 %#v", cfg.Aliases)
 	}
 }
 
@@ -100,6 +105,45 @@ func TestGroupExpandedAliases(t *testing.T) {
 	}
 }
 
+// 从新格式配置 (无顶层 aliases, 逻辑名在 models[].alias) 加载即重建候选表:
+// 没有显式别名时必须从模型 id 兜底, 别名跨上游归并, 负优先级 (模型 / 整家) 停用。
+func TestRebuildAliasesFromModelsConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "tollgate.json")
+	body := `{
+	  "upstreams": [
+	    {"id": "u1", "base_url": "http://x", "priority": 1,
+	     "models": [
+	       {"id": "a", "priority": 2},
+	       {"id": "b", "priority": 0, "alias": "shared"},
+	       {"id": "dead", "priority": -1, "alias": "shared"}
+	     ]},
+	    {"id": "u2", "base_url": "http://x", "priority": 2,
+	     "models": [
+	       {"id": "c", "priority": 2, "alias": "shared"}
+	     ]}
+	  ]
+	}`
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("新格式配置应照常加载: %v", err)
+	}
+	if _, has := cfg.Aliases["a"]; !has {
+		t.Fatalf("无 alias 的模型应用模型 id 兜底为逻辑名: %#v", cfg.Aliases)
+	}
+	shared := cfg.Aliases["shared"]
+	// u1/b (模型 prio 0) + u2/c (模型 prio 2): c 在前; dead 负优先级停用。
+	if len(shared) != 2 || shared[0] != [2]string{"u2", "c"} || shared[1] != [2]string{"u1", "b"} {
+		t.Fatalf("跨上游归并 + 按 priority 排序 + 停用剔除失败: %#v", shared)
+	}
+	if _, has := cfg.Aliases["dead"]; has {
+		t.Fatalf("负优先级模型不应有逻辑名条目: %#v", cfg.Aliases)
+	}
+}
+
 // 组 (别名的别名) 在 settings 页只读列出: 组名 -> 成员逻辑名, 出现在模型列表末尾。
 func TestSettingsShowsGroups(t *testing.T) {
 	dir := t.TempDir()
@@ -119,9 +163,8 @@ func TestSettingsShowsGroups(t *testing.T) {
 	  "log_path": "var/requests.jsonl",
 	  "upstreams": [
 	    {"id": "p1", "base_url": "http://p1.invalid/v1", "priority": 0,
-	     "models": [{"id": "a", "priority": 0, "group": "a"}, {"id": "b", "priority": 0, "group": "b"}]}
+	     "models": [{"id": "a", "priority": 0, "alias": "a"}, {"id": "b", "priority": 0, "alias": "b"}]}
 	  ],
-	  "aliases": {"a": [["p1", "a"]], "b": [["p1", "b"]]},
 	  "groups": {"worker": ["a", "b"]}
 	}`), 0o600); err != nil {
 		t.Fatal(err)

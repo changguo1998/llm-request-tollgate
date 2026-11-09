@@ -898,7 +898,10 @@ func TestModelsConfigOwnedRowGroups(t *testing.T) {
 		{ID: "arkcp", Models: []candModelLock{{Model: "econ", Queue: 3}}}, // 配置里属于 ds41f, 窗口内无日志
 	}
 	cfg := filepath.Join(t.TempDir(), "tollgate.json")
-	if err := os.WriteFile(cfg, []byte(`{"aliases":{"ds41f":[["ustc","m1"],["arkcp","econ"]]}}`), 0o600); err != nil {
+	if err := os.WriteFile(cfg, []byte(`{"upstreams":[
+	  {"id":"ustc","base_url":"http://x","models":[{"id":"m1","alias":"ds41f"}]},
+	  {"id":"arkcp","base_url":"http://x","models":[{"id":"econ","alias":"ds41f"}]}
+	]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	m := newTUIModel(cfg)
