@@ -89,8 +89,7 @@ func (a *App) flowStart(logical, source, path string, stream bool) uint64 {
 
 // flowStage 更新一笔进行中请求的展示状态; up/mod 为空表示不改这两列。
 // gate 由调用方先算好 (读 cand 的锁/节拍), 这里只写展示字段, 不碰调度。
-// note 是这次切换要带出的「旧阶段结果」(失败原因); 返回值 = 是否真的发了一条阶段事件,
-// 调用方据此决定要不要清空 note —— 静默过渡不发事件, 原因留给下一次切换。
+// 返回值 = 是否真的发了一条阶段事件。
 func (a *App) flowStage(id uint64, up, mod string, stage int, gate string, attempt int) bool {
 	a.flowMu.Lock()
 	f := a.flows[id]
@@ -116,7 +115,7 @@ func (a *App) flowStage(id uint64, up, mod string, stage int, gate string, attem
 		f.Model = mod
 	}
 	f.Gate, f.Attempt = gate, attempt
-	text, said := stageMoveText(oldStage, oldUp, oldMod, stage, f.Up, f.Model)
+	text, said := stageMoveText(oldStage, oldUp, oldMod, stage, f.Up, f.Model, f.Logical)
 	logical := f.Logical
 	a.flowMu.Unlock()
 	if said {
@@ -127,10 +126,10 @@ func (a *App) flowStage(id uint64, up, mod string, stage int, gate string, attem
 
 // stageMoveText 写一条阶段切换事件: 「from(参数) -> to(参数)」。
 // 参数 = 该阶段归属的实体 (provider 级写供应商, 候选级写完整候选)。
-// 进 sem 有三种来源词: 首次是 new(候选), 换候选是 switch(新候选), 同候选重试是
+// 进 sem 有三种来源词: 首次是 new(逻辑名), 换候选是 switch(新候选), 同候选重试是
 // retry(候选); 其余过渡直接写 from -> to 两个阶段词。
 // 返回 said=false 表示这次切换不单独成事件 (同阶段同候选的重复上报)。
-func stageMoveText(oldStage int, oldUp, oldMod string, stage int, up, mod string) (string, bool) {
+func stageMoveText(oldStage int, oldUp, oldMod string, stage int, up, mod, logical string) (string, bool) {
 	oldC, newC := candName(oldUp, oldMod), candName(up, mod)
 	if stage == oldStage && newC == oldC {
 		return "", false // 同阶段、同候选的重复上报 (acquire 会再报一次 sem) 不单独成事件
@@ -142,7 +141,7 @@ func stageMoveText(oldStage int, oldUp, oldMod string, stage int, up, mod string
 	case stageSem:
 		switch {
 		case oldStage == stageParse:
-			return "new(" + newC + ") -> sem(" + up + ")", true
+			return "new(" + logical + ") -> sem(" + up + ")", true
 		case newC != "" && newC != oldC:
 			return "switch(" + newC + ") -> sem(" + up + ")", true
 		}

@@ -15,11 +15,11 @@ func TestMergeEventChain(t *testing.T) {
 		msgs []string
 		want string
 	}{
-		{[]string{"new(u1/real-1) -> sem(u1)", "sem(u1) -> freq(u1)", "freq(u1) -> queue(u1/real-1)"},
-			"new(u1/real-1) -> sem(u1) -> freq(u1) -> queue(u1/real-1)"},
+		{[]string{"new(a) -> sem(u1)", "sem(u1) -> freq(u1)", "freq(u1) -> queue(u1/real-1)"},
+			"new(a) -> sem(u1) -> freq(u1) -> queue(u1/real-1)"},
 		// 桥接阶段两种写法: 取信息量更多的 (sem(u1) 优于 sem)。
-		{[]string{"new(u1/real-1) -> sem(u1)", "sem -> reject(quota 05:00)"},
-			"new(u1/real-1) -> sem(u1) -> reject(quota 05:00)"},
+		{[]string{"new(a) -> sem(u1)", "sem -> reject(quota 05:00)"},
+			"new(a) -> sem(u1) -> reject(quota 05:00)"},
 		// 不同过渡词直接相接 (fail 之后 switch)。
 		{[]string{"send -> fail(502)", "switch(u2/real-2) -> sem(u2)"},
 			"send -> fail(502) -> switch(u2/real-2) -> sem(u2)"},
@@ -43,9 +43,9 @@ func TestMergedEventRows(t *testing.T) {
 	m := newTUIModel("cfg")
 	sec := time.Now().Truncate(time.Second)
 	m.events = append(m.events,
-		routeEvent{Ts: sec, Req: 1, Logical: "a", Kind: "stage", Msg: "new(u1/real-1) -> sem(u1)"},
+		routeEvent{Ts: sec, Req: 1, Logical: "a", Kind: "stage", Msg: "new(a) -> sem(u1)"},
 		routeEvent{Ts: sec, Req: 0, Logical: "", Kind: "lock", Upstream: "ustc", Msg: "额度限制, 触发 额度锁, 05:00"},
-		routeEvent{Ts: sec, Req: 2, Logical: "b", Kind: "stage", Msg: "new(u2/real-2) -> sem(u2)"},
+		routeEvent{Ts: sec, Req: 2, Logical: "b", Kind: "stage", Msg: "new(b) -> sem(u2)"},
 		routeEvent{Ts: sec, Req: 1, Logical: "a", Kind: "stage", Msg: "sem(u1) -> freq(u1)"},
 		routeEvent{Ts: sec, Req: 2, Logical: "b", Kind: "stage", Msg: "sem(u2) -> freq(u2)"},
 		routeEvent{Ts: sec.Add(time.Second), Req: 2, Logical: "b", Kind: "stage", Msg: "freq(u2) -> queue(u2/real-2)"},
@@ -74,11 +74,11 @@ func TestMergedEventRows(t *testing.T) {
 		t.Errorf("锁事件应占 1 行, 得到 %d", lockRows)
 	}
 	// 请求 a: 同一秒两段并成一条链。
-	if want := []string{"new(u1/real-1) -> sem(u1) -> freq(u1)"}; !msgsAt(got[1], want) {
+	if want := []string{"new(a) -> sem(u1) -> freq(u1)"}; !msgsAt(got[1], want) {
 		t.Errorf("请求 a 应为 %v, 得到 %v", want, got[1])
 	}
 	// 请求 b: 同秒一条 + 跨秒一条 (从断点接着出); 显示按时间倒序, 断言先按时间排好。
-	if want := []string{"new(u2/real-2) -> sem(u2) -> freq(u2)", "freq(u2) -> queue(u2/real-2)"}; !msgsAt(got[2], want) {
+	if want := []string{"new(b) -> sem(u2) -> freq(u2)", "freq(u2) -> queue(u2/real-2)"}; !msgsAt(got[2], want) {
 		t.Errorf("请求 b 应为 %v, 得到 %v", want, got[2])
 	}
 	// 时间列按秒: 跨秒的那条带下一秒钟。

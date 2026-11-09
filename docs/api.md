@@ -221,7 +221,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
   `max_stage` (到过的最远阶段, TUI 据此决定写几段).
 "- `events` 每条: `seq` / `ts` / `kind` / `req` (跨重启唯一的请求编号, 省略 = 不挂某笔请求) /
   `logical` / `upstream` / `model` / `msg`. `kind`: `stage` (请求阶段战报, 短词链
-  `from(参数) -> to(参数)`: 进 sem 是 `new / switch / retry(候选) -> sem(供应商)`, 之后
+  `from(参数) -> to(参数)`: 进 sem 是 `new(逻辑名) / switch(新候选) / retry(候选) -> sem(供应商)`, 之后
   `sem -> freq -> queue(候选) -> send -> recv`) / `ok` (成功收尾 `recv -> ok(200)`) /
   `error` (每段候选失败的结局: `send -> fail(归类词|状态码|connection)` 或
   `sem -> reject(原因)`, 请求整体结局 = 链上最后一条) / `gate` (进入退避) / `lock` /

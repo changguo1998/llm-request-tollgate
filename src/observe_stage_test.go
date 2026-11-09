@@ -26,7 +26,7 @@ func TestFlowStageNarrative(t *testing.T) {
 	o.finish(200)
 
 	want := []string{
-		"new(u1/real-1) -> sem(u1)",
+		"new(gpt-5) -> sem(u1)",
 		"sem(u1) -> freq(u1)",
 		"freq(u1) -> queue(u1/real-1)",
 		"queue(u1/real-1) -> send",
