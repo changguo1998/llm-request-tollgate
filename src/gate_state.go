@@ -33,7 +33,7 @@ type gateState struct {
 // 响应头) 解析出的恢复倒计时, 0 = 没解析到。
 func (a *App) recordGenericFailure(c *cand, model string, g GateCfg, path string, recoverDur time.Duration) bool {
 	if !c.recordOther(model, g) {
-		a.evAdd("gate", "", c.id, model, "上游报错, 进入退避")
+		a.evAdd("gate", "", c.id, model, "backoff")
 		return false
 	}
 	dur := g.breakerLock()
@@ -48,7 +48,7 @@ func (a *App) recordGenericFailure(c *cand, model string, g GateCfg, path string
 // addLockGroup 给额度组加锁并把锁状态落盘 —— 重启后仍在锁内。
 // path 是触发锁的请求用的上游路径, 供恢复探测沿用。
 func (a *App) addLockGroup(c *cand, group, reason string, dur time.Duration, path string) {
-	a.evAdd("lock", "", c.id, "", "额度限制, 触发 额度锁 (组 "+groupLabel(group)+"), "+durStr(dur))
+	a.evAdd("lock", "", c.id, "", "lock(quota "+groupLabel(group)+" "+durStr(dur)+")")
 	c.lockGroup(group, reason, dur, path)
 	if c.recoverProbe && recoverProbeable(reason) {
 		a.armLockRecovery(recoverRef{c: c, isModel: false, group: group, reason: reason, path: path}, time.Now().Add(dur))
@@ -59,7 +59,7 @@ func (a *App) addLockGroup(c *cand, group, reason string, dur time.Duration, pat
 // addLockModel 给 upstream/model 加熔断锁并落盘 (只锁该模型, 同家别的模型照常发送)。
 // path 是触发锁的请求用的上游路径, 供恢复探测沿用。
 func (a *App) addLockModel(c *cand, model, reason string, dur time.Duration, path string) {
-	a.evAdd("lock", "", c.id, model, "连错到阈值, 触发 熔断锁, "+durStr(dur))
+	a.evAdd("lock", "", c.id, model, "lock(breaker "+durStr(dur)+")")
 	c.lockModel(model, reason, dur, path)
 	if c.recoverProbe && recoverProbeable(reason) {
 		a.armLockRecovery(recoverRef{c: c, isModel: true, model: model, reason: reason, path: path}, time.Now().Add(dur))
@@ -74,11 +74,11 @@ func (a *App) addLockLowPerf(c *cand, model string, peak, avg, latAvg float64, d
 	// 重锁时长按观察期递增 (解锁后窗口内又锁 => 翻倍, 封顶 8 倍): 持续低性能的候选
 	// 慢慢退成长期死锁, 抖动自衰减; 超过一个窗口没再锁则归零回基础时长。
 	dur = c.relockDur(model, dur, a.gate.lowPerfWindow())
-	cause := "吞吐 峰 " + ftoa(peak, 1) + " / 均 " + ftoa(avg, 1) + " t/s"
+	cause := "peak " + ftoa(peak, 1) + " / avg " + ftoa(avg, 1) + " t/s"
 	if latAvg > 0 {
-		cause = "平均首字节 " + durStr(time.Duration(latAvg*float64(time.Millisecond)))
+		cause = "ttfb " + durStr(time.Duration(latAvg*float64(time.Millisecond)))
 	}
-	a.evAdd("lock", "", c.id, model, cause+", 触发 低性能锁, "+durStr(dur))
+	a.evAdd("lock", "", c.id, model, "lock(lowperf "+cause+" "+durStr(dur)+")")
 	c.lockModel(model, lowPerfReason, dur, path)
 	if c.recoverProbe && recoverProbeable(lowPerfReason) {
 		a.armLockRecovery(recoverRef{c: c, isModel: true, model: model, reason: lowPerfReason, path: path}, time.Now().Add(dur))

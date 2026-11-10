@@ -167,8 +167,8 @@ func TestLowPerfLockEventText(t *testing.T) {
 		t.Fatalf("应记 2 条低性能锁事件, 得到 %d: %+v", len(evs), evs)
 	}
 	want := []string{
-		"吞吐 峰 2.0 / 均 1.0 t/s, 触发 低性能锁, 01:00",
-		"平均首字节 45s, 触发 低性能锁, 01:00",
+		"lock(lowperf peak 2.0 / avg 1.0 t/s 01:00)",
+		"lock(lowperf ttfb 45s 01:00)",
 	}
 	for i, w := range want {
 		if evs[i].Kind != "lock" || evs[i].Msg != w {

@@ -66,6 +66,12 @@ type tuiModel struct {
 	// 上游专属色 (每帧按上游表顺序重算), 各页的 上游/模型 单元格共用。
 	upColors map[string]string
 
+	// 逻辑名专属色 (配置里的逻辑名 + 组名, 按字典序分配; 各页共用, 名字后叠一层加粗,
+	// 与正文里的供应商名区分)。logicalNames 按配置 mtime 缓存, 变了才重读。
+	logicalColors   map[string]string
+	logicalNames    []string
+	logicalNamesMod time.Time
+
 	// 第 1 页各分块的行数统计: 每次取到观测面后记一笔样本 (各块在飞笔数), 行数的参考值
 	// 用窗口内的样本算; durSum / durN 是全部能读到的请求的耗时合计与笔数 (定权重的时间尺度)。
 	rowHist []rowSample

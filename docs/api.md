@@ -224,11 +224,16 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
   `from(参数) -> to(参数)`: 进 sem 是 `new(逻辑名) / switch(新候选) / retry(候选) -> sem(供应商)`, 之后
   `sem -> freq -> queue(候选) -> send -> recv`) / `ok` (成功收尾 `recv -> ok(200)`) /
   `error` (每段候选失败的结局: `send -> fail(归类词|状态码|connection)` 或
-  `sem -> reject(原因)`, 请求整体结局 = 链上最后一条) / `gate` (进入退避) / `lock` /
-  `unlock` / `probe` / `start` / `reload`.
+  `sem -> reject(原因)`, 请求整体结局 = 链上最后一条) / `gate` (进入退避 `backoff`) /
+  `lock` (`lock(quota 组名 05:00)` / `lock(breaker 05:00)` /
+  `lock(lowperf peak 2.0 / avg 1.0 t/s 05:00 | ttfb 45s 05:00)`) / `unlock` (到期恢复
+  `unlock`, 人工解锁 `unlock(manual N)`) / `probe` (开始 `probe`, 通过 `probe -> ok`, 失败
+  `probe -> fail(request|transport|http 502|ttfb 45s) -> lock(原因 05:00)`) / `start` / `reload`.
   阶段战报与收尾带 `req` + `logical`; 锁 / 探测 / 启动没有 `req`, 消费方按 `upstream` /
   `model` 显示. 仅仅首字节慢、没有触发锁的请求不发事件. TUI 显示时把同一秒内同一请求的
-  `stage` / `ok` / `error` 事件折叠成一条链 (桥接阶段去重, 取信息量更多的表达), 跨秒拆条.
+  `stage` / `ok` / `error` 事件折叠成一条链 (桥接阶段去重, 取信息量更多的表达), 跨秒拆条;
+  正文用终端前景色, `fail(...)` 红字, `switch` / `retry` 黄字, 收尾词 `ok(200)` 绿字, 供应商名
+  带上游专属色, `events` 标识列的逻辑名带专属色 (加粗).
 - 其余方法返回 405.
 
 ## 7. JSONL 请求日志 (每行一笔)

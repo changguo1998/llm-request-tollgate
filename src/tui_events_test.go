@@ -4,6 +4,7 @@ package main
 
 import (
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -44,7 +45,7 @@ func TestMergedEventRows(t *testing.T) {
 	sec := time.Now().Truncate(time.Second)
 	m.events = append(m.events,
 		routeEvent{Ts: sec, Req: 1, Logical: "a", Kind: "stage", Msg: "new(a) -> sem(u1)"},
-		routeEvent{Ts: sec, Req: 0, Logical: "", Kind: "lock", Upstream: "ustc", Msg: "额度限制, 触发 额度锁, 05:00"},
+		routeEvent{Ts: sec, Req: 0, Logical: "", Kind: "lock", Upstream: "ustc", Msg: "lock(quota 默认 05:00)"},
 		routeEvent{Ts: sec, Req: 2, Logical: "b", Kind: "stage", Msg: "new(b) -> sem(u2)"},
 		routeEvent{Ts: sec, Req: 1, Logical: "a", Kind: "stage", Msg: "sem(u1) -> freq(u1)"},
 		routeEvent{Ts: sec, Req: 2, Logical: "b", Kind: "stage", Msg: "sem(u2) -> freq(u2)"},
@@ -60,7 +61,7 @@ func TestMergedEventRows(t *testing.T) {
 	for _, r := range rows {
 		if r.Req == 0 {
 			lockRows++
-			if r.Msg != "额度限制, 触发 额度锁, 05:00" {
+			if r.Msg != "lock(quota 默认 05:00)" {
 				t.Errorf("锁事件应原样一行, 得到 %q", r.Msg)
 			}
 			continue
@@ -116,4 +117,101 @@ func eqSlice(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// colorEventBody: 失败结局 fail(原因) 红字, 异常过渡词 switch / retry 黄字, 收尾词
+// ok(200) 绿字; 阶段词参数里的供应商上专属色 (模型部分与 new(逻辑名) 不动),
+// 配置里没有的上游名原样保留。
+func TestColorEventBody(t *testing.T) {
+	m := newTUIModel("cfg")
+	m.upColors = map[string]string{"ustc": "\x1b[36m", "ark": "\x1b[35m"}
+	ark := m.upName("ark")
+	cases := []struct{ in, want string }{
+		{"new(gpt-5) -> sem(ustc)", "new(gpt-5) -> sem(" + m.upName("ustc") + ")"},
+		{"freq(ustc) -> queue(ustc/real-1)",
+			"freq(" + m.upName("ustc") + ") -> queue(" + m.upName("ustc") + "/real-1)"},
+		// 换候选: 整词黄字, 参数里的供应商名保持专属色 (reset 之后补回黄色)
+		{"switch(ark/real-2) -> sem(ark)",
+			tuiYell + "switch(" + ark + tuiYell + "/real-2)" + tuiReset +
+				" -> sem(" + ark + ")"},
+		// 同候选重试: 参数里没有专属色时整词黄字
+		{"retry(u1/real-1) -> sem(u1)", tuiYell + "retry(u1/real-1)" + tuiReset + " -> sem(u1)"},
+		{"send -> fail(502)", "send -> " + tuiRed + "fail(502)" + tuiReset},               // 失败结局红字
+		{"sem -> reject(quota 05:00)", "sem -> reject(quota 05:00)"},                      // 参数不是供应商
+		{"new(gpt-5) -> sem(nope)", "new(gpt-5) -> sem(nope)"},                            // 配置里没有的上游
+		{"send -> recv -> ok(200)", "send -> recv -> " + tuiGreen + "ok(200)" + tuiReset}, // 收尾词绿字
+		{"probe -> ok", "probe -> ok"},                                                    // 探测成功不是收尾词, 不上色
+	}
+	for _, c := range cases {
+		if got := m.colorEventBody(c.in); got != c.want {
+			t.Errorf("colorEventBody(%q) 应为 %q, 得到 %q", c.in, c.want, got)
+		}
+	}
+}
+
+// eventWho: 标识列的请求逻辑名带专属色 (加粗与上游名区分); 配置里没有的名字不上色。
+func TestEventWhoLogicalColor(t *testing.T) {
+	m := newTUIModel("cfg")
+	m.logicalColors = map[string]string{"gpt-5": "\x1b[36m"}
+	want := "12/" + tuiBold + "\x1b[36m" + "gpt-5" + tuiReset
+	if got := m.eventWho(routeEvent{Req: 12, Logical: "gpt-5"}); got != want {
+		t.Errorf("标识应为 %q, 得到 %q", want, got)
+	}
+	if got := m.eventWho(routeEvent{Req: 12, Logical: "gone"}); got != "12/gone" {
+		t.Errorf("配置里没有的逻辑名应原样输出, 得到 %q", got)
+	}
+}
+
+// 逻辑名名单按配置里的逻辑名 (含组名) 字典序: 每个逻辑名一种专属色, 不随帧变。
+func TestLogicalNameColors(t *testing.T) {
+	m := newTUIModel(stickyFixture(t))
+	names := m.cachedLogicalNames()
+	if !eqSlice(names, []string{"m1", "m2"}) {
+		t.Fatalf("逻辑名应为字典序的 m1 / m2, 得到 %v", names)
+	}
+	colors := make(map[string]string, len(names))
+	for i, name := range names {
+		colors[name] = logicalPalette[i%len(logicalPalette)]
+	}
+	if got := logicalPalette[0]; got != "\x1b[34m" || logicalPalette[1] != "\x1b[35m" || logicalPalette[2] != "\x1b[36m" {
+		t.Errorf("最先分配的三个颜色应是标准色 (蓝/品红/青), 得到 %v", logicalPalette[:3])
+	}
+	if colors["m1"] == colors["m2"] {
+		t.Errorf("两个逻辑名不该同色: %v", colors)
+	}
+	if colors["m1"] != logicalPalette[0] || colors["m2"] != logicalPalette[1] {
+		t.Errorf("字典序靠前的逻辑名应先用标准色, 得到 %v", colors)
+	}
+}
+
+// 第 2 页: 标识列的逻辑名与正文里的供应商名带专属色; 失败结局红字, 收尾词绿字,
+// 其余文字是前景色。
+func TestDrawEventsColors(t *testing.T) {
+	m := newTUIModel("cfg")
+	m.logicalColors = map[string]string{"gpt-5": "\x1b[36m"}
+	m.upColors = map[string]string{"ustc": "\x1b[36m"}
+	m.events = []routeEvent{
+		{Ts: time.Now(), Req: 12, Logical: "gpt-5", Kind: "stage", Msg: "new(gpt-5) -> sem(ustc)"},
+		{Ts: time.Now().Add(-time.Second), Req: 13, Logical: "gpt-5", Kind: "error",
+			Msg: "send -> fail(502)"},
+		{Ts: time.Now().Add(-2 * time.Second), Req: 14, Logical: "gpt-5", Kind: "ok",
+			Msg: "recv -> ok(200)"},
+	}
+	c := &tuiCanvas{cols: 120}
+	m.drawEvents(c, 20)
+	out := c.b.String()
+	who := "12/" + tuiBold + "\x1b[36m" + "gpt-5" + tuiReset
+	if !strings.Contains(out, who) {
+		t.Errorf("标识列的逻辑名没带专属色 %q", who)
+	}
+	body := "sem(" + "\x1b[36m" + "ustc" + tuiReset + ")"
+	if !strings.Contains(out, body) {
+		t.Errorf("正文里的供应商名没带专属色 %q", body)
+	}
+	if ok := tuiGreen + "ok(200)" + tuiReset; !strings.Contains(out, ok) {
+		t.Errorf("成功收尾词应为绿字 %q, 实际没有", ok)
+	}
+	if fail := tuiRed + "fail(502)" + tuiReset; !strings.Contains(out, fail) {
+		t.Errorf("失败结局应为红字 %q, 实际没有", fail)
+	}
 }

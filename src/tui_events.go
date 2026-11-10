@@ -4,6 +4,7 @@ package main
 
 import (
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,15 +29,14 @@ func (c *tuiCanvas) splitLines() []string {
 // drawEvents: 事件流 (最新在前), 三列: 时间 / 编号/逻辑名 / 事件。
 // 标识列一套格式对应三类主体: 请求 编号/逻辑名, 模型 供应商/模型, 供应商 供应商。
 // 同一秒内同一请求的阶段切换在显示时合成一条链; 锁 / 探测这类不挂请求的事件 (req=0)
-// 原样一行。整行颜色按链上最后一条事件的类型 (成功绿 / 失败红 / 阶段不染色)。
+// 原样一行。正文用终端的前景色, 只给语义词上色: 失败结局 fail(原因) 红字, 异常过渡词
+// switch / retry 黄字, 成功收尾词 ok(200) 绿字; 标识列的逻辑名与正文里的供应商名另带
+// 专属色 (见 logicalName / colorEventBody)。
 func (m *tuiModel) drawEvents(c *tuiCanvas, body int) {
 	rows := m.mergedEventRows()
 	out := make([][]string, 0, len(rows))
 	for _, r := range rows {
-		msg := r.Msg
-		if col := eventColor(r.Kind); col != "" {
-			msg = col + msg + tuiReset
-		}
+		msg := m.colorEventBody(r.Msg)
 		out = append(out, []string{
 			r.Ts.Format("15:04:05"),
 			m.eventWho(r),
@@ -129,35 +129,20 @@ func stageInfo(tok string) int {
 
 // eventWho 是标识格: 请求写 编号/逻辑名, 模型写 供应商/模型, 供应商写 供应商;
 // 锁 / 探测 / 启动这类不挂请求的事件没有编号, 也不再显示逻辑名。
+// 逻辑名与供应商名各自带专属色 (供应商部分由 upModel 负责)。
 func (m *tuiModel) eventWho(e routeEvent) string {
 	switch {
 	case e.Req > 0:
 		if e.Logical != "" {
-			return strconv.FormatUint(e.Req, 10) + "/" + e.Logical
+			return strconv.FormatUint(e.Req, 10) + "/" + m.logicalName(e.Logical)
 		}
 		return strconv.FormatUint(e.Req, 10)
 	case e.Logical != "":
-		return "-/" + e.Logical // 日志回放的事件: 没有请求编号
+		return "-/" + m.logicalName(e.Logical) // 日志回放的事件: 没有请求编号
 	case e.Upstream != "" || e.Model != "":
 		return m.upModel(e.Upstream, e.Model)
 	}
 	return "-"
-}
-
-// eventColor 给事件正文上色 (类型列已去掉, 靠颜色保住扫读时的层次):
-// 阶段事件不上色 (量最大, 保持素净); 锁 / 错误红, 等待类黄, 解锁 / 成功绿, 其余暗色。
-func eventColor(kind string) string {
-	switch kind {
-	case "error", "lock":
-		return tuiRed
-	case "fallback", "queue", "gate":
-		return tuiYell
-	case "ok", "unlock":
-		return tuiGreen
-	case "stage":
-		return ""
-	}
-	return tuiDim
 }
 
 // upName 给上游名上它的专属色; 空串原样返回。
@@ -193,6 +178,58 @@ func (m *tuiModel) upModel(up, model string) string {
 		return m.upName(up)
 	}
 	return m.upName(up) + "/" + model
+}
+
+// logicalName 给逻辑名上它的专属色, 再叠一层加粗: 标识列的逻辑名是粗体, 正文里的
+// 供应商名是细体, 同屏不会看混。配置里没有的名字 (如已删掉的别名) 原样返回。
+func (m *tuiModel) logicalName(name string) string {
+	if name == "" {
+		return ""
+	}
+	if c := m.logicalColors[name]; c != "" {
+		return tuiBold + c + name + tuiReset
+	}
+	return name
+}
+
+// eventCandRe 匹配正文里带候选参数的阶段词: sem(up) / freq(up) / queue(up/mod) /
+// switch(up/mod) / retry(up/mod); 参数里第一个 "/" 之前是供应商, 之后是真实模型。
+var eventCandRe = regexp.MustCompile(`(sem|freq|queue|switch|retry)\(([^)/]+)(/[^)]+)?\)`)
+
+// eventAbnRe 匹配异常过渡词 retry / switch: 换候选与同候选重试都算异常分支, 整个词上
+// 黄字 (参数里的供应商名仍带专属色, 由 paintOver 在 reset 之后补回黄色)。
+var eventAbnRe = regexp.MustCompile(`\b(retry|switch)(\([^)]*\))?`)
+
+// eventOKRe 匹配正文里的成功收尾词 ok(200): 只给这一个词上绿字。
+var eventOKRe = regexp.MustCompile(`\b(ok)(\([^)]*\))`)
+
+// eventFailRe 匹配失败结局 fail(原因): 整个词上红字。
+var eventFailRe = regexp.MustCompile(`\bfail\([^)]*\)`)
+
+// paintOver 把一层语义色叠到已经带专属色的片段上: 片段内嵌的 reset 会清掉颜色,
+// 这里在每个 reset 之后补回语义色, 末尾再收一次。
+func paintOver(color, s string) string {
+	return color + strings.ReplaceAll(s, tuiReset, tuiReset+color) + tuiReset
+}
+
+// colorEventBody 给事件正文上色: 失败结局 fail(原因) 红字, 异常过渡词 switch / retry
+// 黄字, 成功收尾词 ok(200) 绿字; 阶段词参数里的供应商名用各页同款专属色 (模型部分、
+// new(逻辑名) 与 reject 的参数不动; 逻辑名只在标识列上色), 其余文字保持终端前景色。
+func (m *tuiModel) colorEventBody(s string) string {
+	if len(m.upColors) > 0 {
+		s = eventCandRe.ReplaceAllStringFunc(s, func(tok string) string {
+			open := strings.IndexByte(tok, '(')
+			param := tok[open+1 : len(tok)-1]
+			up := param
+			if i := strings.IndexByte(param, '/'); i >= 0 {
+				up = param[:i]
+			}
+			return tok[:open+1] + m.upName(up) + param[len(up):] + ")"
+		})
+	}
+	s = eventAbnRe.ReplaceAllStringFunc(s, func(tok string) string { return paintOver(tuiYell, tok) })
+	s = eventFailRe.ReplaceAllStringFunc(s, func(tok string) string { return paintOver(tuiRed, tok) })
+	return eventOKRe.ReplaceAllString(s, tuiGreen+"$1$2"+tuiReset)
 }
 
 // routeRows 按最后使用时间降序 (最近用过的排最上面); 同一时刻的按请求数兜底。

@@ -192,7 +192,7 @@ func (a *App) startPulseLoop(path string) {
 			for _, c := range p.Cands {
 				busy := c.LockMs > 0 || c.PausedMs > 0
 				if prev, ok := seen[c.ID]; ok && prev && !busy {
-					a.evAdd("unlock", "", c.ID, "", "锁/退避到期, 恢复")
+					a.evAdd("unlock", "", c.ID, "", "unlock")
 				}
 				seen[c.ID] = busy
 			}

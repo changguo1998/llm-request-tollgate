@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -207,6 +208,40 @@ func provRank(cfgPath string) map[string][2]int {
 		}
 	}
 	return rank
+}
+
+// logicalNames 返回配置里全部逻辑名 (含组名), 按字典序; 配置读不到时返回 nil
+// (调用方拿不到名单就不上色)。口径与 sticky 页的候选表一致: 组展开后组名也算逻辑名。
+func logicalNames(cfgPath string) []string {
+	c, err := loadConfigOpt(cfgPath, true)
+	if err != nil {
+		return nil
+	}
+	aliases := c.expandedAliases()
+	out := make([]string, 0, len(aliases))
+	for name := range aliases {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// cachedLogicalNames 缓存逻辑名名单: 只有配置文件时间变了才重读, 读不到就缓存空表,
+// 免得每帧都解析配置。与 provRanks 同一套失效规则。
+func (m *tuiModel) cachedLogicalNames() []string {
+	cm, err := os.Stat(m.cfgPath)
+	if err != nil {
+		return nil
+	}
+	key := cm.ModTime()
+	if m.logicalNames == nil || key != m.logicalNamesMod {
+		names := logicalNames(m.cfgPath)
+		if names == nil {
+			names = []string{}
+		}
+		m.logicalNames, m.logicalNamesMod = names, key
+	}
+	return m.logicalNames
 }
 
 // droplist 读黑名单 (精确匹配模型 id); store 目录优先, 其次配置目录。

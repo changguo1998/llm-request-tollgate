@@ -101,7 +101,7 @@ func (a *App) runRecovery(c *cand, t recoverRef) {
 		c.settleRecovery(t, true, g)
 		return
 	}
-	a.evAdd("probe", "", c.id, modelID, "锁到期, 开始探测")
+	a.evAdd("probe", "", c.id, modelID, "probe")
 
 	// 沿用触发锁的请求路径 (chat 或 responses): 只回聊天接口的上游, 探测也去聊天;
 	// 锁记录没带路径的 (旧锁 / 单元测试) 兜底 chat/completions。
@@ -113,7 +113,7 @@ func (a *App) runRecovery(c *cand, t recoverRef) {
 		// 构造失败极罕见: 按失败重锁重挂, 下次再探。
 		until := c.settleRecovery(t, false, g)
 		a.armLockRecovery(t, until)
-		a.evAdd("probe", "", c.id, modelID, "探测失败 (请求无法构造), 重新加锁, "+durStr(recoverLockDur(t.reason, g)))
+		a.evAdd("probe", "", c.id, modelID, probeFailText(t, g, "request"))
 		return
 	}
 	req.ContentLength = int64(len(body))
@@ -125,7 +125,7 @@ func (a *App) runRecovery(c *cand, t recoverRef) {
 	if err != nil {
 		until := c.settleRecovery(t, false, g)
 		a.armLockRecovery(t, until)
-		a.evAdd("probe", "", c.id, modelID, "探测失败 (传输错误), 重新加锁, "+durStr(recoverLockDur(t.reason, g)))
+		a.evAdd("probe", "", c.id, modelID, probeFailText(t, g, "transport"))
 		return
 	}
 	ttfb := time.Since(sentAt)
@@ -135,7 +135,7 @@ func (a *App) runRecovery(c *cand, t recoverRef) {
 		until := c.settleRecovery(t, false, g)
 		a.armLockRecovery(t, until)
 		a.evAdd("probe", "", c.id, modelID,
-			"探测失败 (HTTP "+strconv.Itoa(resp.StatusCode)+"), 重新加锁, "+durStr(recoverLockDur(t.reason, g)))
+			probeFailText(t, g, "http "+strconv.Itoa(resp.StatusCode)))
 		return
 	}
 	// 低性能锁的恢复不仅看可达性: 配置了首字节时延阈值时, 探测 TTFB 超限说明性能
@@ -145,10 +145,17 @@ func (a *App) runRecovery(c *cand, t recoverRef) {
 			until := c.settleRecovery(t, false, g)
 			a.armLockRecovery(t, until)
 			a.evAdd("probe", "", c.id, modelID,
-				"探测通过但 TTFB 超限 ("+durStr(ttfb)+"), 重新加锁, "+durStr(recoverLockDur(t.reason, g)))
+				probeFailText(t, g, "ttfb "+durStr(ttfb)))
 			return
 		}
 	}
 	c.settleRecovery(t, true, g)
-	a.evAdd("probe", "", c.id, modelID, "探测通过, 解锁")
+	a.evAdd("probe", "", c.id, modelID, "probe -> ok")
+}
+
+// probeFailText 写探测失败后按原锁时长重锁的事件: `probe -> fail(原因) -> lock(锁原因 倒计时)`。
+// 归因词只取锁自己的原因 (quota / breaker / lowperf), 失败细分放 fail 参数里。
+func probeFailText(t recoverRef, g GateCfg, why string) string {
+	return "probe -> fail(" + why + ") -> lock(" + t.reason + " " +
+		durStr(recoverLockDur(t.reason, g)) + ")"
 }

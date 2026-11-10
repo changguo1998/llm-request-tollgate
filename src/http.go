@@ -204,7 +204,7 @@ func (a *App) forceUnlock(upID, model, group string) int {
 		total += c.clearLocks(model, group)
 	}
 	a.saveGateState()
-	a.evAdd("unlock", "", upID, model, "强制解锁, 清除 "+strconv.Itoa(total)+" 把锁")
+	a.evAdd("unlock", "", upID, model, "unlock(manual "+strconv.Itoa(total)+")")
 	return total
 }
 

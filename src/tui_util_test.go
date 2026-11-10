@@ -118,21 +118,6 @@ func TestHumanRate(t *testing.T) {
 	}
 }
 
-// eventColor: 锁 / 错误红, 等待类黄, 成功绿, 阶段事件不染色, 其余暗色。
-func TestEventColor(t *testing.T) {
-	cases := map[string]string{
-		"error": tuiRed, "lock": tuiRed,
-		"fallback": tuiYell, "queue": tuiYell, "gate": tuiYell,
-		"ok": tuiGreen, "unlock": tuiGreen,
-		"stage": "", "probe": tuiDim, "start": tuiDim, "自定义": tuiDim,
-	}
-	for kind, want := range cases {
-		if got := eventColor(kind); got != want {
-			t.Errorf("%q 的颜色应为 %q, 得到 %q", kind, want, got)
-		}
-	}
-}
-
 // eventWho: 请求写 编号/逻辑名, 日志回放写 -/逻辑名, 模型写 供应商/模型,
 // 供应商写 供应商, 都没有就写 -。
 func TestEventWho(t *testing.T) {
