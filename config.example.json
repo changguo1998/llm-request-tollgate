@@ -38,7 +38,15 @@
           "id": "deepseek-v4.1-flash",
           "priority": 10,
           "alias": "deepseek-v4.1-flash",
-          "billing": "deepseek"
+          "billing": "deepseek",
+          "reasoning": true,
+          "thinking_level_map": {
+            "low": "low",
+            "high": "high",
+            "off": "none"
+          },
+          "context_window": 131072,
+          "max_tokens": 65536
         },
         {
           "id": "qwen2.5-chat",
@@ -61,7 +69,15 @@
           "id": "deepseek-v4.1-flash",
           "priority": 20,
           "alias": "deepseek-v4.1-flash",
-          "billing": "deepseek"
+          "billing": "deepseek",
+          "reasoning": true,
+          "thinking_level_map": {
+            "low": "low",
+            "high": "high",
+            "off": "none"
+          },
+          "context_window": 131072,
+          "max_tokens": 65536
         },
         {
           "id": "glm-5-lite",

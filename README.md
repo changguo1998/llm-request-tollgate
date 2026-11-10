@@ -44,9 +44,9 @@
      逐次翻倍 (基础 ×2/×4/×8 封顶), 免得「放行一笔又锁上」的周期抖动.
 06. 响应整形: 非流 / 流式 chunk 里的 `model` 字段改回请求的逻辑名,
     对外隐藏真实上游 id。
-07. 运维面: `GET /v1/models` 返回逻辑名清单; 请求头 `X-Tollgate-Source`
-    记入日志 `source` 字段; `-summary` 汇总请求日志; `deploy/` + `test/healthcheck.example.sh`
-    常驻与自检。
+07. 运维面: `GET /v1/models` 返回逻辑名清单与聚合后的模型参数; 请求头
+    `X-Tollgate-Source` 记入日志 `source` 字段; `-summary` 汇总请求日志; `deploy/` +
+    `test/healthcheck.example.sh` 常驻与自检。
 08. 集中 fallback: 候选按序尝试, 只有 200 算成功; 首字节前其余状态码与传输失败都进候选
     分支 (按错误规则上锁 / 退避), 全部失败保留最近一次错误 (状态码/头/体) 原样透传。
     为保缓存热度, 每逻辑名有**粘性偏好** (D25): 记住最近成功服务的候选, 新请求优先它,
@@ -223,7 +223,10 @@ agent 侧只需把 base URL 指向 `http://127.0.0.1:8787/v1` (端口可配)。
   `priority` 是模型权重 (负值 = 该模型停用, 同样只影响候选、权重保留), `alias` 是逻辑名
   (缺省 = 模型 id; 旧称 `group`, 读取时兼容), `billing` 是**记账组** (同家同名一组,
   额度锁只锁组; 不写组名 = 该上游的默认组; 旧称 `billing_group`, 读取时兼容)。手写配置
-  不写 `models` 也兼容 (全部归默认组, 权重按 0)。
+  不写 `models` 也兼容 (全部归默认组, 权重按 0)。可选模型参数 `reasoning` /
+  `thinking_level_map` (推理等级 -> 上游 effort 名, `null` = 不支持) / `context_window` /
+  `max_tokens` 只对外展示: 代理由 `/v1/models` 按逻辑名聚合下发 (推理等级取候选交集,
+  两个上限取最小值), 不参与路由。
 - 候选链不再独立维护: 顶层 `aliases` 键已废弃, 代理读取配置后从 `models[].alias` 按
   `priority` 重建候选表 (逻辑名 = alias, 缺省模型 id; 顺序 = 模型 priority 降序 →
   provider priority 降序 → 配置顺序 → 模型 id, 与生成器 / TUI 预览同口径; 负优先级停用
@@ -267,10 +270,12 @@ thinkingLevelMap / reasoning) 与 `llm-models-droplist.json` (精确匹配黑名
   与 ark 的 `deepseek-v4-1-flash*`) 就靠 `alias` 并成一个别名。
 - 额度组取模型的 `billing` (同家同名一组, 缺省归默认组), 写到上游 `models` 条目;
   上游的 `models` 固定写出 (权重在上面), 整家都没写 `billing` 时只有一个默认组。
-- 代理自身的模型列表 (agent 看到的) 同时继承候选的 `thinkingLevelMap` (取交集: 某等级只有所有
-  候选都支持才保留), 以及最小的 `contextWindow` / `maxTokens`; 缺等级表时 agent 会拒发
-  `reasoning_effort`, 报 `UNSUPPORTED_REASONING_EFFORT` (dsh 客户端校验)。这些参数从
-  store 的模型条目继承。
+- 模型参数 `reasoning` / `thinkingLevelMap` / `contextWindow` / `maxTokens` 从 store 条目
+  搬进配置 `models[]` 的 `reasoning` / `thinking_level_map` / `context_window` /
+  `max_tokens`; 代理的 `/v1/models` 按逻辑名聚合下发 (推理等级取交集, 两个上限取最小),
+  agent 据此决定要不要发 `reasoning_effort`, 缺等级表时报
+  `UNSUPPORTED_REASONING_EFFORT` (dsh 客户端校验)。`scripts/upsert_tollgate_provider.py`
+  写 store 的 `tg` 条目时按同一口径从候选模型参数继承。
 - `key_env` 取 store 里 `apiKey` 的占位符名; `auth_header` 等设置从现有配置继承, 不会被覆盖。
 - 写入 `config.local.json` (即 `~/fff/config/tollgate.json`); `--dry-run` 只打印,
   `--providers` 改上游顺序; 不传时缺省是 store 里**除 tg 与 arkap 外**的全部 provider
@@ -319,7 +324,7 @@ token) 与 `-usage` (上游 + 模型 × 窗口的 token 分解)。
 ## 当前边界
 
 - 转发覆盖 `POST /v1/chat/completions` 与 `POST /v1/responses` (O5); `GET /v1/models`
-  返回逻辑名清单 (O5)。只读观测面: `GET /state`。调试用 `POST /unlock` 强制解锁
+  返回逻辑名清单与模型参数 (O5)。只读观测面: `GET /state`。调试用 `POST /unlock` 强制解锁
   (清掉运行中代理内存里的锁与失败计数, 可用 `?upstream=&model=&group=` 过滤);
   `POST /sticky` 人工置一次偏好 (`?logical=&upstream=&model=`, 不给 upstream 即清除,
   纯内存, 之后自动迁移规则照旧)。其余路径一律 404。

@@ -25,6 +25,14 @@ type ModelCfg struct {
 	Billing  string `json:"billing,omitempty"`
 	Alias    string `json:"alias,omitempty"`
 	Priority int    `json:"priority,omitempty"`
+	// 模型参数 (只对外展示, 不参与路由): Reasoning 是该模型是否支持思考,
+	// ThinkingLevelMap 是推理等级 -> 上游 effort 名 (nil / 空串 = 该等级不支持),
+	// ContextWindow / MaxTokens 是上下文与单次输出上限。代理由 /v1/models 按逻辑名
+	// 聚合后下发给客户端 (reasoning / thinkingLevelMap / contextWindow / maxTokens)。
+	Reasoning        bool               `json:"reasoning,omitempty"`
+	ThinkingLevelMap map[string]*string `json:"thinking_level_map,omitempty"`
+	ContextWindow    int                `json:"context_window,omitempty"`
+	MaxTokens        int                `json:"max_tokens,omitempty"`
 	// 旧字段名 (group / billing_group): 读入时归一化到 Alias / Billing 后清空,
 	// 兼容尚未迁移的配置; 写回不再输出.
 	LegacyAlias   string `json:"group,omitempty"`

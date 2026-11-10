@@ -26,6 +26,9 @@ scripts/gen_tollgate_config.py 与它同源, 但直接读 ~/fff/config/llm-model
     - key_env = store 里 apiKey 占位符去掉 "$" 后的名字 ($USTC_API_KEY -> USTC_API_KEY).
     - 额度组 = 条目的 billing, 同家同名一组, 缺省归默认组; 输出为上游
       models 里的 billing. 上游的 models 现在固定写出 (它带着权重字段).
+    - 模型参数 (reasoning / thinkingLevelMap / contextWindow / maxTokens) 原样从
+      store 条目搬到配置 models 的 snake_case 字段 (reasoning / thinking_level_map /
+      context_window / max_tokens); 代理由 /v1/models 按逻辑名聚合并下发.
     - groups (别名的别名, 手工维护顶层键) 从已有配置原样保留; 生成后若某组成员
       不再是对应别名 (模型被删 / 停用), 打印警告 —— 代理加载时会因「成员不是已
       注册逻辑名」报错拦住.
@@ -55,6 +58,16 @@ LEGACY_BILLING_FIELD = "billing_group"
 
 # 组 (别名的别名): 组名 -> 已注册逻辑名列表. 手工维护, 从 --cfg 原样保留.
 GROUPS_FIELD = "groups"
+
+# 模型参数 (只对外展示, 不参与路由): store 用 camelCase, 配置用 snake_case.
+# 代理按逻辑名聚合后经 /v1/models 下发 (reasoning / thinkingLevelMap /
+# contextWindow / maxTokens).
+MODEL_PARAM_FIELDS = {
+    "reasoning": "reasoning",
+    "thinkingLevelMap": "thinking_level_map",
+    "contextWindow": "context_window",
+    "maxTokens": "max_tokens",
+}
 
 
 def weight(
@@ -141,6 +154,9 @@ def build(list_path: Path, cfg_path: Path | None) -> tuple[dict, list[str]]:
             }
             if billing:
                 item[BILLING_FIELD] = billing
+            for src, dst in MODEL_PARAM_FIELDS.items():
+                if src in model:
+                    item[dst] = model[src]
             models.append(item)
         entry = {
             "id": up_id,

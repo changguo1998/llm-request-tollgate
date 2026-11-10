@@ -243,12 +243,12 @@ func TestGroupListedInModels(t *testing.T) {
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	var list struct {
-		Data []map[string]string `json:"data"`
+		Data []modelEntry `json:"data"`
 	}
 	_ = json.Unmarshal(b, &list)
 	got := map[string]bool{}
 	for _, d := range list.Data {
-		got[d["id"]] = true
+		got[d.ID] = true
 	}
 	if !got["m1"] || !got["m2"] || !got["g1"] {
 		t.Fatalf("/v1/models 应含逻辑名与组名, 实为 %+v", got)

@@ -104,19 +104,92 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 	})
 }
 
-// serveModels 返回别名表里的逻辑模型清单。只列对外名字, 不暴露上游真实 id。
+// modelMeta 是 /v1/models 条目里除 id 外下发的模型参数, 字段名与 fff store 一致;
+// 没有任何候选声明时整段省略。
+type modelMeta struct {
+	Reasoning        bool               `json:"reasoning,omitempty"`
+	ThinkingLevelMap map[string]*string `json:"thinkingLevelMap,omitempty"`
+	ContextWindow    int                `json:"contextWindow,omitempty"`
+	MaxTokens        int                `json:"maxTokens,omitempty"`
+}
+
+// modelEntry 是 /v1/models 的一个条目: 标准 OpenAI 的 id / object / created /
+// owned_by, 再加按候选聚合的模型参数 (非标准扩展键, 客户端通常会忽略)。
+type modelEntry struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Created int64  `json:"created"`
+	OwnedBy string `json:"owned_by"`
+	modelMeta
+}
+
+// aggregateMeta 把一个逻辑名的候选聚合成对外模型参数: reasoning 任一候选声明即 true;
+// thinkingLevelMap 取交集 (某等级只有所有声明了等级表的候选都支持才保留, 否则给 null);
+// contextWindow / maxTokens 取最小值 —— 请求可能落到任一候选, 只有保守值才不会被上游
+// 拒绝 (与 scripts/upsert_tollgate_provider.py 同一口径)。调用方须持有 a.mu。
+func (a *App) aggregateMeta(chain []aliasTarget) modelMeta {
+	var meta modelMeta
+	var maps []map[string]*string
+	for _, t := range chain {
+		up := a.upstreams[t.Upstream]
+		if up == nil {
+			continue
+		}
+		for i := range up.Models {
+			m := &up.Models[i]
+			if m.ID != t.Model {
+				continue
+			}
+			if m.Reasoning {
+				meta.Reasoning = true
+			}
+			if len(m.ThinkingLevelMap) > 0 {
+				maps = append(maps, m.ThinkingLevelMap)
+			}
+			if m.ContextWindow > 0 && (meta.ContextWindow == 0 || m.ContextWindow < meta.ContextWindow) {
+				meta.ContextWindow = m.ContextWindow
+			}
+			if m.MaxTokens > 0 && (meta.MaxTokens == 0 || m.MaxTokens < meta.MaxTokens) {
+				meta.MaxTokens = m.MaxTokens
+			}
+			break
+		}
+	}
+	if len(maps) > 0 {
+		out := make(map[string]*string, len(maps[0]))
+		for level, v := range maps[0] {
+			if v == nil || *v == "" {
+				out[level] = nil
+				continue
+			}
+			val := *v
+			out[level] = &val
+			for _, other := range maps[1:] {
+				if ov := other[level]; ov == nil || *ov == "" {
+					out[level] = nil
+					break
+				}
+			}
+		}
+		meta.ThinkingLevelMap = out
+	}
+	return meta
+}
+
+// serveModels 返回别名表里的逻辑模型清单。只列对外名字, 不暴露上游真实 id;
+// 每个名字带上按候选聚合的模型参数 (推理等级 / 上下文 / 输出上限)。
 func (a *App) serveModels(w http.ResponseWriter) {
 	a.mu.RLock()
 	names := make([]string, 0, len(a.aliases))
 	for n := range a.aliases {
 		names = append(names, n)
 	}
-	a.mu.RUnlock()
 	sort.Strings(names)
-	data := make([]map[string]string, 0, len(names))
+	data := make([]modelEntry, 0, len(names))
 	for _, n := range names {
-		data = append(data, map[string]string{"id": n, "object": "model"})
+		data = append(data, modelEntry{ID: n, Object: "model", OwnedBy: "tollgate", modelMeta: a.aggregateMeta(a.aliases[n])})
 	}
+	a.mu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
 }

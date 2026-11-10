@@ -129,13 +129,13 @@ func TestHTTPServeModelsAndState(t *testing.T) {
 		t.Fatalf("/v1/models 应返回 200, 得到 %d (%s)", resp.StatusCode, b)
 	}
 	var list struct {
-		Object string              `json:"object"`
-		Data   []map[string]string `json:"data"`
+		Object string       `json:"object"`
+		Data   []modelEntry `json:"data"`
 	}
 	if err := json.Unmarshal(b, &list); err != nil {
 		t.Fatalf("模型清单不是合法 JSON: %v", err)
 	}
-	if list.Object != "list" || len(list.Data) != 1 || list.Data[0]["id"] != "m1" {
+	if list.Object != "list" || len(list.Data) != 1 || list.Data[0].ID != "m1" {
 		t.Errorf("模型清单不对: %+v", list)
 	}
 	if strings.Contains(string(b), "real-1") {
@@ -167,6 +167,60 @@ func TestHTTPServeModelsAndState(t *testing.T) {
 	}
 	if p.Ver != viewVer || len(p.Active) != 1 {
 		t.Errorf("观测载荷不对: ver=%q active=%+v", p.Ver, p.Active)
+	}
+}
+
+// /v1/models 的模型参数按逻辑名的候选聚合: reasoning 任一候选声明即 true,
+// thinkingLevelMap 取交集 (不支持的等级给 null), contextWindow / maxTokens 取最小值。
+func TestServeModelsAggregatesMeta(t *testing.T) {
+	level := func(s string) *string { return &s }
+	cfg := &Config{
+		Upstreams: []UpstreamCfg{
+			{ID: "u1", BaseURL: "http://127.0.0.1:1/v1", Key: "k", Models: []ModelCfg{{
+				ID: "a", Alias: "m1", Priority: 10, Reasoning: true,
+				ThinkingLevelMap: map[string]*string{"low": level("low"), "high": level("high"), "medium": nil},
+				ContextWindow:    100000, MaxTokens: 8000,
+			}}},
+			{ID: "u2", BaseURL: "http://127.0.0.1:1/v1", Key: "k", Models: []ModelCfg{{
+				ID: "b", Alias: "m1", Priority: 5,
+				ThinkingLevelMap: map[string]*string{"low": level("low"), "high": nil, "medium": level("medium")},
+				ContextWindow:    200000, MaxTokens: 4000,
+			}}},
+		},
+		Aliases: map[string][][2]string{"m1": {{"u1", "a"}, {"u2", "b"}}},
+	}
+	app := newTestAppCfg(t, cfg)
+	proxy := httptest.NewServer(app)
+	defer proxy.Close()
+
+	resp, err := http.Get(proxy.URL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var list struct {
+		Data []modelEntry `json:"data"`
+	}
+	if err := json.Unmarshal(b, &list); err != nil {
+		t.Fatalf("模型清单不是合法 JSON: %v", err)
+	}
+	if len(list.Data) != 1 {
+		t.Fatalf("模型清单应只有 m1, 得到 %+v", list.Data)
+	}
+	got := list.Data[0]
+	if got.ID != "m1" || !got.Reasoning || got.ContextWindow != 100000 || got.MaxTokens != 4000 {
+		t.Errorf("聚合参数不对: %+v", got)
+	}
+	want := map[string]*string{"low": level("low"), "high": nil, "medium": nil}
+	if len(got.ThinkingLevelMap) != len(want) {
+		t.Fatalf("推理等级表应取交集, 得到 %+v", got.ThinkingLevelMap)
+	}
+	for k, v := range want {
+		gv := got.ThinkingLevelMap[k]
+		if (v == nil) != (gv == nil) || (v != nil && *v != *gv) {
+			t.Errorf("等级 %s 应为 %v, 得到 %v", k, v, gv)
+		}
 	}
 }
 

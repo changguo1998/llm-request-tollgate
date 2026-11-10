@@ -12,7 +12,7 @@
 |---|---|---|---|
 | `/v1/chat/completions` | POST | 转发 chat completions (替换凭据 / 调度 / fallback / 记账) | 客户端, 即各 agent |
 | `/v1/responses` | POST | 转发 Responses API, 同一链路 | 客户端, 即各 agent |
-| `/v1/models` | GET | 逻辑模型名清单 (不暴露真实上游 id) | 客户端与运维 |
+| `/v1/models` | GET | 逻辑模型名清单 + 聚合后的模型参数 (不暴露真实上游 id) | 客户端与运维 |
 | `/state` | GET | 只读观测面: 进行中的请求 + 候选调度状态 + 事件 | 运维 (TUI) |
 | `/unlock` | POST | 调试用强制解锁: 清掉内存里的锁与失败计数 (query 可过滤 `upstream` / `model` / `group`) | 运维 (调试) |
 | `/sticky` | POST | 人工改粘性偏好: query `logical` + `upstream` (+ `model`, 省略取该上游首个) 置一次; 不给 `upstream` 则清除 (`logical` 省略清全部) | 运维 |
@@ -54,7 +54,7 @@ key):
 - 非流式响应体与流式每个 data chunk 里的 `model` 字段改回请求的逻辑名, 对外隐藏真实
   上游 id.
 - `/v1/responses` 事件里嵌在 `response` 对象下的 `model` 同样改回逻辑名.
-- `/v1/models` 只列逻辑名, 不带任何真实 id.
+- `/v1/models` 只列逻辑名 (附聚合后的模型参数), 不带任何真实 id.
 
 ### 2.5 错误体格式
 
@@ -192,10 +192,19 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 ### 6.1 GET /v1/models
 
 返回逻辑名清单 (排序), 不暴露真实上游与凭据. 组 (别名的别名, `groups`) 展开成普通
-逻辑名, 一并列出:
+逻辑名, 一并列出. 每个条目先是 OpenAI 标准字段: `id` / `object` (`model`) /
+`created` (恒 `0`) / `owned_by` (恒 `tollgate`); 之后附按逻辑名聚合的模型参数, 来源是
+配置 `upstreams[].models[]` 的 `reasoning` / `thinking_level_map` / `context_window` /
+`max_tokens`. 官方 OpenAI 列表不含推理等级, 这些扩展键是本地约定, 客户端通常会忽略:
+
+- `reasoning`: 任一候选声明支持思考即为 `true`.
+- `thinkingLevelMap`: 推理等级 -> 上游 effort 名, 按候选取交集 —— 某等级只有所有声明了
+  等级表的候选都支持才保留, 否则给 `null`.
+- `contextWindow` / `maxTokens`: 候选里的最小值 (请求可能落到任一候选, 只有保守值才
+  不会被上游拒绝).
 
 ```json
-{ "object": "list", "data": [ { "id": "deepseek-v4.1-flash", "object": "model" }, { "id": "worker", "object": "model" } ] }
+{ "object": "list", "data": [ { "id": "deepseek-v4.1-flash", "object": "model", "created": 0, "owned_by": "tollgate", "reasoning": true, "thinkingLevelMap": { "low": "low", "high": "high", "off": "none" }, "contextWindow": 131072, "maxTokens": 65536 } ] }
 ```
 
 ### 6.2 GET /state

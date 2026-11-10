@@ -178,8 +178,10 @@ contextWindow / maxTokens / thinkingLevelMap / reasoning 等) 与黑名单
   序); 0 最小, 缺省即 0.
 - 模型 `priority` 为负 = 该模型停用, provider 的为负 = 整家停用: 都只不进候选,
   仍留在 `upstreams` 的 `models` (权重保留, TUI 可调回); 恢复时改回非负即可.
-- 代理对外模型列表继承候选的 `thinkingLevelMap` (取交集) 与最小的 `contextWindow` /
-  `maxTokens` (从 store 的模型参数); 缺等级表时 agent 汇报 `UNSUPPORTED_REASONING_EFFORT` 拒发.
+- 模型参数 (store 的 `reasoning` / `thinkingLevelMap` / `contextWindow` / `maxTokens`)
+  搬进配置 `models[]` 的 snake_case 字段; 代理的 `GET /v1/models` 按逻辑名聚合下发
+  (推理等级取交集, 两个上限取最小); 缺等级表时 agent 汇报
+  `UNSUPPORTED_REASONING_EFFORT` 拒发.
 - `key_env` 取 store 里 `apiKey` 的占位符名; `auth_header` 等从现有配置继承.
 - `--dry-run` 只打印; `--providers` 改上游顺序. 不传时缺省是 store 里除 `tg`
   (`tg`, 代理自身) 与 `arkap` 外的全部 provider; arkap 要带就显式写进 `--providers`.

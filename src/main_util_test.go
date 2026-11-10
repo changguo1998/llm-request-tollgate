@@ -196,8 +196,8 @@ func TestServeModels(t *testing.T) {
 		t.Fatalf("应返回 200, 得到 %d", rec.Code)
 	}
 	var got struct {
-		Object string              `json:"object"`
-		Data   []map[string]string `json:"data"`
+		Object string       `json:"object"`
+		Data   []modelEntry `json:"data"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("返回不是合法 JSON: %v", err)
@@ -205,12 +205,12 @@ func TestServeModels(t *testing.T) {
 	if got.Object != "list" || len(got.Data) != 2 {
 		t.Fatalf("清单不对: %+v", got)
 	}
-	if got.Data[0]["id"] != "a-model" || got.Data[1]["id"] != "m1" {
+	if got.Data[0].ID != "a-model" || got.Data[1].ID != "m1" {
 		t.Errorf("应按名字排序列出逻辑名, 得到 %+v", got.Data)
 	}
 	for _, d := range got.Data {
-		if d["object"] != "model" {
-			t.Errorf("每项 object 应为 model: %+v", d)
+		if d.Object != "model" || d.OwnedBy != "tollgate" {
+			t.Errorf("每项 object / owned_by 不对: %+v", d)
 		}
 	}
 	if strings.Contains(rec.Body.String(), "real-9") || strings.Contains(rec.Body.String(), "real-1") {
