@@ -376,7 +376,7 @@ func TestUpModelJoin(t *testing.T) {
 	}
 }
 
-// 第 1 页请求表不画标题; 并入的上游表与模型表不画标题; events 页滚动到底不再画成空白
+// 第 1 页请求表不画标题; 排在最前的上游表与模型表也不画标题; events 页滚动到底不再画成空白
 // (G 键把滚动设成很大)。
 func TestFlowTablesAndEventsScroll(t *testing.T) {
 	f, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
@@ -426,7 +426,7 @@ func TestFlowTablesAndEventsScroll(t *testing.T) {
 			t.Errorf("阶段列不该写列名 %q", gone)
 		}
 	}
-	// 第 1 页正文下半段并入了上游表与 模型/路由聚合表: 不画表标题, 列名行保留。
+	// 第 1 页页面上方是上游表与 模型/路由聚合表: 不画表标题, 列名行保留。
 	out = m.draw()
 	for _, head := range []string{"记账", "错误"} {
 		if !strings.Contains(stripANSI(out), head) {
@@ -492,7 +492,7 @@ func TestFlowRowsSortByIDDesc(t *testing.T) {
 	}
 }
 
-// 第 1 页的版式: 列名整页只画一次 (页签下方先画列名, 再画请求行), 表后不画单位说明。
+// 第 1 页的版式: 列名整页只画一次 (请求表上方空一行, 再画列名与请求行), 表后不画单位说明。
 func TestFlowSingleHeaderOrder(t *testing.T) {
 	openTestPTY(t, 60, 160)
 	m := newTUIModel("cfg")
@@ -547,44 +547,46 @@ func TestFlowHeaderAlwaysShown(t *testing.T) {
 	}
 }
 
-// 第 1 页列名固定在页签下方: 滚动表体时列名不跟着滚走。
-func TestFlowHeaderPinned(t *testing.T) {
-	openTestPTY(t, 24, 100)
+// 第 1 页三张表的次序是 上游状态 -> 模型/路由聚合 -> 请求表 (原来的 2、3、1),
+// 三张表一起滚动: 请求表的列名跟着表体走, 不再固定在页签下方。
+func TestFlowTableOrderAndScroll(t *testing.T) {
+	openTestPTY(t, 24, 120)
 	m := newTUIModel("cfg")
 	m.tab = tabActive
+	m.pulse.Cands = []candView{{ID: "ustc", SoftCap: 1,
+		Models: []candModelLock{{Model: "m1", Queue: 1}}}}
+	now := time.Now()
+	m.routes["m1\x00ustc\x00m1"] = &routeRow{Logical: "m1", Upstream: "ustc", Model: "m1",
+		Reqs: 1, First: now, Last: now}
 	for i := 1; i <= 24; i++ {
 		m.pulse.Active = append(m.pulse.Active, flow{
 			ID: uint64(i), Logical: "row-" + itoa(i), Up: "ustc", Model: "m1",
-			Stage: stageQueue, StartTime: time.Now(),
+			Stage: stageQueue, StartTime: now,
 		})
 	}
-	m.scroll[tabActive] = 5
 	out := stripANSI(m.draw())
-	lines := strings.Split(out, "\r\n")
-	headRow := -1
-	for i, ln := range lines {
-		if strings.Contains(ln, "逻辑名") {
-			headRow = i
-			break
-		}
+	up := strings.Index(out, "并发")
+	model := strings.Index(out, "Token")
+	req := strings.Index(out, "逻辑名")
+	if up < 0 || model < 0 || req < 0 {
+		t.Fatalf("三张表的列名没画全: 上游=%d 模型=%d 请求=%d", up, model, req)
 	}
-	if headRow < 0 {
-		t.Fatal("滚动后列名不见了")
+	if !(up < model && model < req) {
+		t.Errorf("表序应为 上游 -> 模型/路由 -> 请求, 实际位置 %d / %d / %d", up, model, req)
 	}
-	// 状态行在窄终端会折行: 列名位置 = 标题 + 状态折行数 + 页签 + 空行 (下标从 0 起)。
-	if want := 3 + m.statusRows; headRow != want {
-		t.Errorf("列名应固定在页签下方 (第 %d 行), 实际在第 %d 行", want+1, headRow+1)
+
+	// 滚到底: 请求表在最后, 最老的一行可见, 最新的一行已滚出窗口。
+	m.scroll[tabActive] = 1 << 30
+	out = stripANSI(m.draw())
+	if !strings.Contains(out, "row-1") {
+		t.Error("滚到底应看到请求表最老的一行")
 	}
-	// 表体上移: 最新的那几行已经滚出窗口, 最老的仍看得见。
 	if strings.Contains(out, "row-24") {
-		t.Error("滚动后表体应已上移 (最新一行不在窗口里)")
-	}
-	if !strings.Contains(out, "row-3") {
-		t.Error("滚动后最老的一行仍应在窗口里")
+		t.Error("滚到底后最新的请求行应已滚出窗口")
 	}
 }
 
-// 第 1 页正文下半段从模型视角画: 每个真实模型的队列 / 退避 / 熔断锁, 以及上游按记账组
+// 第 1 页页面上方从模型视角画: 每个真实模型的队列 / 退避 / 熔断锁, 以及上游按记账组
 // 铺开的锁列; 两张表不画标题, 列名行保留, 表与表之间空一行。
 func TestFlowModelTables(t *testing.T) {
 	openTestPTY(t, 60, 160)

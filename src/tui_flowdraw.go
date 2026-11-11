@@ -9,16 +9,18 @@ import (
 // drawFlowChainCol 是阶段链所在列 (最后列, 与事件页的事件列一样独占剩余宽度)。
 const drawFlowChainCol = 3
 
-// drawFlow 是第 1 页: 一张请求表 (每笔请求按尝试一行, 最新请求在最上面)。阶段链与事件页
-// 一样在宽度不够时折行 (断在箭头之前, 续行相对链首缩进 eventWrapGap), 表头固定在页签
-// 下方, 表体与下面的上游状态 / 模型路由聚合两张表一起滚动。
+// drawFlow 是第 1 页: 自上而下依次是 上游状态表 / 模型-路由聚合表 / 请求表 (每笔请求
+// 按尝试一行, 最新请求在最上面; 原第 2、3 张表排到最前)。三张表一起滚动, 页面上没有
+// 固定表头; 请求表的阶段链与事件页一样在宽度不够时折行 (断在箭头之前, 续行相对链首
+// 缩进 eventWrapGap)。
 func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
+	full := &tuiCanvas{cols: c.cols}
+	m.drawModelsBody(full) // 原来的第 2、3 张表: 上游状态 + 模型/路由聚合, 排在最前
 	rows := m.flowRows()
 	cols, vis := tableLayout(activeCols, rows, c.cols)
-	c.line("") // 表头上方空一行, 不顶在页签下面
-	c.line(tableHead(cols, vis))
 	cont := strings.Repeat(" ", colOffset(cols, vis, drawFlowChainCol)+eventWrapGap)
-	full := &tuiCanvas{cols: c.cols}
+	full.line("") // 与上面的模型表空一行
+	full.line(tableHead(cols, vis))
 	for _, r := range rows {
 		segs := wrapEventMsg(r[drawFlowChainCol], cols[drawFlowChainCol].w)
 		first := append(append([]string(nil), r[:drawFlowChainCol]...), segs[0])
@@ -30,8 +32,7 @@ func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 	if len(rows) == 0 {
 		full.line(tuiDim + "  (没有进行中的请求)" + tuiReset)
 	}
-	m.drawModelsBody(full) // 上游状态 + 模型/路由聚合, 接在请求表下方
-	m.drawWindow(c, full, max(1, body-2))
+	m.drawWindow(c, full, max(1, body))
 }
 
 // colKeep 标出哪些列在 rows 里至少有一个"有值"的格: 空串、0、- 都算空 ——
@@ -85,7 +86,7 @@ func dropEmptyCols(cols []tuiCol, rows [][]string) ([]tuiCol, [][]string) {
 	return pickCols(cols, keep), pickRows(keep, rows)
 }
 
-// drawWindow 把画布按滚动位置裁一屏贴到 c (第 1 页: 请求表 + 两张模型表一起滚)。
+// drawWindow 把画布按滚动位置裁一屏贴到 c (第 1 页: 三张表一起滚)。
 // 当前窗口写在键位提示行里。
 func (m *tuiModel) drawWindow(c *tuiCanvas, full *tuiCanvas, body int) {
 	lines := full.splitLines()
