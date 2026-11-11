@@ -215,3 +215,85 @@ func TestDrawEventsColors(t *testing.T) {
 		t.Errorf("失败结局应为红字 %q, 实际没有", fail)
 	}
 }
+
+// wrapEventMsg: 宽度不够时只在 "->" 之前断开, 续行以 "-> " 开头且比首行少缩进 2 列;
+// 单个阶段词超过可用宽度时才截断 (末尾 ~), 不另找断点。
+func TestWrapEventMsg(t *testing.T) {
+	cases := []struct {
+		msg   string
+		width int
+		want  []string
+	}{
+		{"new(a) -> sem(u1)", 40, []string{"new(a) -> sem(u1)"}},
+		{"new(a) -> sem(u1) -> freq(u1)", 20, []string{"new(a) -> sem(u1)", "-> freq(u1)"}},
+		{"new(a) -> sem(ustc) -> freq(ustc) -> queue(ustc/real-1) -> send", 40,
+			[]string{"new(a) -> sem(ustc) -> freq(ustc)", "-> queue(ustc/real-1) -> send"}},
+		{"abcdefghijkl", 8, []string{"abcdefg~"}}, // 没有 "->": 整词截断
+		{"abcdefghijkl -> b", 8, []string{"abcdefg~", "-> b"}},
+		{"a -> bbbbbbbbbbbbbbbbbbbb", 10, []string{"a", "-> bbbb~"}},
+	}
+	for _, c := range cases {
+		got := wrapEventMsg(c.msg, c.width)
+		if !eqSlice(got, c.want) {
+			t.Errorf("wrapEventMsg(%q, %d) 应为 %q, 得到 %q", c.msg, c.width, c.want, got)
+		}
+		if c.width > eventWrapGap+4 {
+			for i, ln := range got {
+				if i > 0 && !strings.HasPrefix(ln, "-> ") {
+					t.Errorf("续行 %q 应以 \"-> \" 开头", ln)
+				}
+				if tuiWidth(ln) > c.width {
+					t.Errorf("第 %d 行超出列宽: %q (%d > %d)", i+1, ln, tuiWidth(ln), c.width)
+				}
+				if strings.HasSuffix(strings.TrimRight(ln, " "), "->") {
+					t.Errorf("第 %d 行不该以 \"->\" 结尾: %q", i+1, ln)
+				}
+			}
+		}
+	}
+}
+
+// 第 2 页的事件条目: 终端放不下整条链时换行, 新行相对该条第一行的事件列开头缩进
+// 2 字符, 断点只落在 "->" 之前。
+func TestDrawEventsWrapsEventChain(t *testing.T) {
+	m := newTUIModel("cfg")
+	m.events = []routeEvent{{Ts: time.Now(), Req: 7, Logical: "gpt-5", Kind: "stage",
+		Msg: "new(gpt-5) -> sem(ustc) -> freq(ustc) -> queue(ustc/real-1) -> send -> recv"}}
+	c := &tuiCanvas{cols: 60}
+	m.drawEvents(c, 20)
+
+	lines := strings.Split(strings.TrimSuffix(stripANSI(c.b.String()), "\r\n"), "\r\n")
+	first := -1
+	for i, ln := range lines {
+		if strings.Contains(ln, "new(gpt-5)") {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		t.Fatalf("没画出事件条目: %q", lines)
+	}
+	evCol := strings.Index(lines[first], "new(gpt-5)")
+	if evCol < 0 {
+		t.Fatalf("首行找不到事件正文: %q", lines[first])
+	}
+	if got := strings.TrimRight(lines[first], " "); strings.HasSuffix(got, "->") {
+		t.Errorf("首行不该以 \"->\" 结尾: %q", got)
+	}
+	if len(lines[first:]) < 2 {
+		t.Fatalf("宽度不够时应折行, 实际只有一行: %q", lines[first])
+	}
+	for _, ln := range lines[first+1:] {
+		ind := len(ln) - len(strings.TrimLeft(ln, " "))
+		if ind != evCol+eventWrapGap {
+			t.Errorf("续行缩进应为 %d (事件列 %d + %d), 得到 %d: %q",
+				evCol+eventWrapGap, evCol, eventWrapGap, ind, ln)
+		}
+		if rest := ln[ind:]; !strings.HasPrefix(rest, "-> ") {
+			t.Errorf("续行应以 \"-> \" 开头: %q", rest)
+		}
+	}
+	if tuiWidth(lines[first]) > 60 {
+		t.Errorf("首行超出终端宽度: %q (%d 列)", lines[first], tuiWidth(lines[first]))
+	}
+}

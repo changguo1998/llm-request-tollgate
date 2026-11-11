@@ -36,17 +36,92 @@ func (m *tuiModel) drawEvents(c *tuiCanvas, body int) {
 	rows := m.mergedEventRows()
 	out := make([][]string, 0, len(rows))
 	for _, r := range rows {
-		msg := m.colorEventBody(r.Msg)
 		out = append(out, []string{
 			r.Ts.Format("15:04:05"),
 			m.eventWho(r),
-			msg,
+			r.Msg,
 		})
 	}
-	drawTable(c, "事件流 (最新在前)", []tuiCol{
-		{"时间", 8, false, false, 4}, {"编号/逻辑名", 20, true, false, 2},
+	cols := []tuiCol{
+		{"时间", 8, false, false, 4}, {"编号/逻辑名", 12, true, false, 2},
 		{"事件", 40, true, false, 0},
-	}, out, m.scrollWindow(len(out), max(1, body-4)), max(1, body-4))
+	}
+	cols, vis := tableLayout(cols, out, c.cols)
+	tableTop(c, "事件流 (最新在前)", cols, vis)
+	if len(rows) == 0 {
+		tableEmptyLine(c)
+		return
+	}
+	limit := max(1, body-4)
+	// 事件列放不下时折行: 续行以 "-> " 开头 (断点只在 "->" 之前), 并相对该条第一行的
+	// 事件列开头再缩进 eventWrapGap 列; 首段仍走表格对齐, 续行按正文宽度自己排版。
+	const evCol = 2
+	lines := make([][]string, len(rows))
+	cont := strings.Repeat(" ", colOffset(cols, vis, evCol)+eventWrapGap)
+	total := 0
+	for i := range rows {
+		lines[i] = wrapEventMsg(m.colorEventBody(out[i][evCol]), cols[evCol].w)
+		total += len(lines[i])
+		out[i][evCol] = lines[i][0]
+	}
+	top := m.scrollWindow(len(rows), limit)
+	// 滚动仍按条目 (一段链 = 一条), 窗口却按显示行数装: 装不下下一条就停, 至少装一条。
+	end, used := top, 0
+	for end < len(rows) {
+		n := len(lines[end])
+		if end > top && used+n > limit {
+			break
+		}
+		used += n
+		end++
+	}
+	// 折行让条目占的行数不一: 到了表尾还没占满窗口时把窗口往上撑, 别在底部留一片空白。
+	for top > 0 && end == len(rows) {
+		n := len(lines[top-1])
+		if used+n > limit {
+			break
+		}
+		top, used = top-1, used+n
+	}
+	tablePosLine(c, len(rows), top, end, total > limit)
+	for i := top; i < end; i++ {
+		c.line(tuiIndent + strings.Join(alignRow(cols, out[i], vis), tuiColSep))
+		for _, s := range lines[i][1:] {
+			c.line(cont + s)
+		}
+	}
+}
+
+// eventWrapGap 是事件条目续行相对该条第一行事件列开头的缩进 (字符)。
+const eventWrapGap = 2
+
+// wrapEventMsg 把事件正文按事件列宽 (width) 折行: 断点只能落在 "->" 之前, 于是续行都以
+// "-> " 开头, 可用的宽度比首行少 eventWrapGap 列 (续行要缩进)。贪心地往一行里接阶段词;
+// 单词本身超过可用宽度时截断 (末尾留 ~, 与同列其余截断同一写法), 不另找断点。
+func wrapEventMsg(msg string, width int) []string {
+	toks := strings.Split(msg, " -> ")
+	if len(toks) == 1 {
+		return []string{tuiTrunc(msg, width)}
+	}
+	avail := width
+	cur := toks[0]
+	if tuiWidth(cur) > avail {
+		cur = tuiTrunc(cur, avail)
+	}
+	out := make([]string, 0, 2)
+	for _, tok := range toks[1:] {
+		if cand := cur + " -> " + tok; tuiWidth(cand) <= avail {
+			cur = cand
+			continue
+		}
+		out = append(out, cur)
+		avail = max(1, width-eventWrapGap)
+		cur = "-> " + tok
+		if tuiWidth(cur) > avail {
+			cur = tuiTrunc(cur, avail)
+		}
+	}
+	return append(out, cur)
 }
 
 // eventMergeKey 是显示合并的键: 秒 + 请求编号 + 逻辑名。
