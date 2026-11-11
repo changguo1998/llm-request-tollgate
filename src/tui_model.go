@@ -25,6 +25,12 @@ type tuiModel struct {
 	routes map[string]*routeRow
 	events []routeEvent
 
+	// events 页的筛选: 文本筛 编号/逻辑名/事件; 时间范围生效时改用日志回读的
+	// 结果 (ev.rows), 不再受 256 条事件上限约束。
+	ev       evFilter
+	evPrompt *tuiPrompt // 第 2 页的行内输入态 (f 文本 / t 时间范围)
+	evMsg    string     // 时间范围写法不对时的提示
+
 	window       time.Duration     // 回看窗口 (行只算窗口内的记录)
 	rateWin      time.Duration     // 速度平均/峰值窗口 (rate_window_ms)
 	blockWin     time.Duration     // 兼容保留 (第 1 页改成平表后不再按块定行高)

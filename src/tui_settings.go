@@ -65,6 +65,26 @@ type tuiPrompt struct {
 	commit func(string)
 }
 
+// feedPrompt 把一个字节喂给行内输入框; 返回 true = 输入结束 (回车已提交 / Esc 取消)。
+// 调用方负责清掉自己持有的 prompt (提交回调里可能还要读 buffer)。settings 页与第 2 页
+// 的筛选共用这一套输入规则。
+func feedPrompt(p *tuiPrompt, b byte) bool {
+	switch {
+	case b == '\r' || b == '\n':
+		p.commit(p.buffer)
+		return true
+	case b == 0x1b || b == 0x03:
+		return true
+	case b == 0x7f || b == 0x08:
+		if len(p.buffer) > 0 {
+			p.buffer = p.buffer[:len(p.buffer)-1]
+		}
+	case b >= 0x20:
+		p.buffer += string(b)
+	}
+	return false
+}
+
 // tuiEditor 是 settings 页的全部状态: 权重 (priority, 写配置文件) + 调度参数 (gate, 写配置文件)。
 type tuiEditor struct {
 	path   string // store: llm-models.json (模型列表 + 模型参数来源)

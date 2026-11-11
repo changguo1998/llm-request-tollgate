@@ -47,9 +47,9 @@ func (m *tuiModel) drawEvents(c *tuiCanvas, body int) {
 		{"事件", 40, true, false, 0},
 	}
 	cols, vis := tableLayout(cols, out, c.cols)
-	tableTop(c, "事件流 (最新在前)", cols, vis)
+	tableTop(c, m.eventsTitle(len(rows)), cols, vis)
 	if len(rows) == 0 {
-		tableEmptyLine(c)
+		m.drawEventsEmpty(c)
 		return
 	}
 	limit := max(1, body-4)
@@ -148,10 +148,19 @@ type eventMergeKey struct {
 // mergedEventRows 把原始事件流折成显示行。规则: 同一秒内同一请求 (req>0) 的阶段切换
 // 连成一条链 (跨秒的链自然拆成多条, 下一秒从断点接着出); req=0 的事件 (锁 / 探测 /
 // 退避 / 启动) 不合并, 一行一条, 仍按时间倒序。
+// 时间范围筛选生效时数据换成日志回读的结果 (ev.rows, 不受 256 条上限约束); 文本筛选
+// 叠在合并后的链上 (链里任一段命中就保留), 编号 / 逻辑名按原值匹配。
 func (m *tuiModel) mergedEventRows() []routeEvent {
+	evs := m.events
+	if !m.ev.from.IsZero() && m.logPath != "" {
+		evs = m.ev.rows
+	}
 	var keys []eventMergeKey
 	buckets := map[eventMergeKey][]routeEvent{}
-	for _, e := range m.events {
+	for _, e := range evs {
+		if !m.ev.inRange(e.Ts) {
+			continue
+		}
 		k := eventMergeKey{sec: e.Ts.Truncate(time.Second), req: e.Req, logical: e.Logical}
 		if _, ok := buckets[k]; !ok {
 			keys = append(keys, k)
@@ -174,7 +183,16 @@ func (m *tuiModel) mergedEventRows() []routeEvent {
 			Kind: last.Kind, Msg: mergeEventChain(msgs)})
 	}
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Ts.After(rows[j].Ts) })
-	return rows
+	if m.ev.q == "" {
+		return rows
+	}
+	keep := rows[:0]
+	for _, r := range rows {
+		if m.ev.matchText(r) {
+			keep = append(keep, r)
+		}
+	}
+	return keep
 }
 
 // mergeEventChain 把同一请求同一秒内的事件正文连成一条过渡链。相邻条目里同一个阶段

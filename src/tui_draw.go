@@ -99,6 +99,9 @@ func (c *tuiCanvas) last(s string) {
 }
 
 func (m *tuiModel) hint() string {
+	if m.tab == tabEvents && m.evPrompt != nil {
+		return tuiEditBg + tuiPad(tuiIndent+m.evPrompt.label+" "+m.evPrompt.buffer+" ", m.cols-1) + tuiReset
+	}
 	if m.tab == tabSettings {
 		return "  m/p/g 换面板   j/k 移动   +/- 调值   = 输入   s 保存并生成" +
 			"   h 热加载   q 退出   (" + m.prioHint() + ")"
@@ -121,7 +124,11 @@ func (m *tuiModel) hint() string {
 				strconv.Itoa(min(m.pageTop+win, m.pageTotal)) + "/" + strconv.Itoa(m.pageTotal) + ", "
 		}
 		base += "窗口 " + durStr(m.window) + ")"
-	default:
+	case tabEvents:
+		base = "  f 筛选   t 时间范围   c 清除筛选   up/down/PgUp/PgDn 滚动   r 重读日志   q 退出"
+		if m.evMsg != "" {
+			base = tuiYell + tuiIndent + m.evMsg + tuiReset + base
+		}
 		base += "   (events: 最新的在最上面)"
 	}
 	return base

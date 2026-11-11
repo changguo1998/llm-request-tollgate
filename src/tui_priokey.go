@@ -169,19 +169,8 @@ func (e *tuiEditor) key(b byte) (quit bool, handled bool) {
 
 // promptKey 行内输入: 可打印字符进缓冲, 退格删, 回车提交, Esc / Ctrl-C 取消。
 func (e *tuiEditor) promptKey(b byte) bool {
-	p := e.prompt
-	switch {
-	case b == '\r' || b == '\n':
+	if feedPrompt(e.prompt, b) {
 		e.prompt = nil
-		p.commit(p.buffer)
-	case b == 0x1b || b == 0x03:
-		e.prompt = nil
-	case b == 0x7f || b == 0x08:
-		if len(p.buffer) > 0 {
-			p.buffer = p.buffer[:len(p.buffer)-1]
-		}
-	case b >= 0x20:
-		p.buffer += string(b)
 	}
 	return false
 }

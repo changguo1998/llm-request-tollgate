@@ -32,43 +32,44 @@ func (m *tuiModel) pollLog() {
 		}
 		m.tailFile(f, current)
 	}
+	m.pollEventFilter()
 }
 
-// tailFile 读一个文件的新增部分 (整文件读完后记下来, 归档不再重复扫)。
-func (m *tuiModel) tailFile(path string, incremental bool) {
+// tailInto 从一个文件读到末尾: pos 是上次读到哪, rest 是各文件的半行缓冲, each 逐行接收。
+// 返回是否读到了当时的文件末尾 (调用方据此判断归档是否整读完毕)。
+func tailInto(path string, pos map[string]int64, rest map[string][]byte, each func([]byte)) bool {
 	f, err := os.Open(path)
 	if err != nil {
-		return
+		return false
 	}
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
-		return
+		return false
 	}
-	pos := m.logPos[path]
-	if st.Size() < pos { // 轮转/截断: 从头读
-		pos, m.logRest[path] = 0, nil
+	p := pos[path]
+	if st.Size() < p { // 轮转/截断: 从头读
+		p, rest[path] = 0, nil
 	}
-	if st.Size() == pos {
-		return
+	if st.Size() == p {
+		return true
 	}
-	if _, err := f.Seek(pos, io.SeekStart); err != nil {
-		return
+	if _, err := f.Seek(p, io.SeekStart); err != nil {
+		return false
 	}
-	buf := make([]byte, st.Size()-pos)
+	buf := make([]byte, st.Size()-p)
 	n, _ := io.ReadFull(f, buf)
-	m.logPos[path] = pos + int64(n)
-	m.consume(buf[:n], path)
-	if !incremental && m.logPos[path] >= st.Size() {
-		m.scannedFiles[filepath.Clean(path)] = true
-	}
+	pos[path] = p + int64(n)
+	consumeLines(rest, path, buf[:n], each)
+	return true
 }
 
-func (m *tuiModel) consume(b []byte, key string) {
+// consumeLines 按行切开新增内容交给 each; 末尾的半行留在 rest[key] 等下一拍补齐。
+func consumeLines(rest map[string][]byte, key string, b []byte, each func([]byte)) {
 	data := b
-	if rest := m.logRest[key]; len(rest) > 0 {
-		data = append(rest, b...)
-		m.logRest[key] = nil
+	if prev := rest[key]; len(prev) > 0 {
+		data = append(prev, b...)
+		rest[key] = nil
 	}
 	for {
 		i := bytes.IndexByte(data, '\n')
@@ -78,14 +79,22 @@ func (m *tuiModel) consume(b []byte, key string) {
 		line := data[:i]
 		data = data[i+1:]
 		if len(bytes.TrimSpace(line)) > 0 {
-			m.absorb(line)
+			each(line)
 		}
 	}
 	if len(data) > 0 {
 		if len(data) > 1<<20 { // 异常超长行: 丢掉, 别把内存拖爆
 			return
 		}
-		m.logRest[key] = append([]byte(nil), data...)
+		rest[key] = append([]byte(nil), data...)
+	}
+}
+
+// tailFile 读一个日志文件的新增部分 (归档整读完后记下来, 不再重复扫)。
+func (m *tuiModel) tailFile(path string, incremental bool) {
+	done := tailInto(path, m.logPos, m.logRest, m.absorb)
+	if !incremental && done {
+		m.scannedFiles[filepath.Clean(path)] = true
 	}
 }
 
@@ -163,23 +172,31 @@ func eventReplayFrom(now time.Time) time.Time {
 	return time.Date(now.Year(), now.Month(), now.Day()-1, 0, 0, 0, 0, now.Location())
 }
 
-// replayEvent 从一条日志记录还原一条第 2 页事件: 只挑改变了程序状态的那些 (闸门挡下 /
+// replayEventOf 从一条日志记录还原一条第 2 页事件: 只挑改变了程序状态的那些 (闸门挡下 /
 // 错误 / 换候选 / 排队); 文案与引擎侧结局事件同一短词表。日志一请求一行, 还原不了整条链,
-// 只写结局形态。
-func (m *tuiModel) replayEvent(r logRec, ts time.Time) {
+// 只写结局形态。没有可还原的结局时 ok = false。
+func replayEventOf(r logRec, ts time.Time) (routeEvent, bool) {
 	switch {
 	case r.Gate != "":
-		m.addEvent(routeEvent{Ts: ts, Req: r.Req, Kind: "gate", Logical: r.Logical, Upstream: r.Upstream,
-			Model: r.Model, Status: r.Status, Msg: "sem" + stageSep + "reject(" + gateWord(r.Gate) + ")"})
+		return routeEvent{Ts: ts, Req: r.Req, Kind: "gate", Logical: r.Logical, Upstream: r.Upstream,
+			Model: r.Model, Status: r.Status, Msg: "sem" + stageSep + "reject(" + gateWord(r.Gate) + ")"}, true
 	case r.Status >= 400 || r.Err != "":
-		m.addEvent(routeEvent{Ts: ts, Req: r.Req, Kind: "error", Logical: r.Logical, Upstream: r.Upstream,
-			Model: r.Model, Status: r.Status, Msg: "send" + stageSep + "fail(" + replayFailParam(r) + ")"})
+		return routeEvent{Ts: ts, Req: r.Req, Kind: "error", Logical: r.Logical, Upstream: r.Upstream,
+			Model: r.Model, Status: r.Status, Msg: "send" + stageSep + "fail(" + replayFailParam(r) + ")"}, true
 	case r.Fallbacks > 0:
-		m.addEvent(routeEvent{Ts: ts, Req: r.Req, Kind: "fallback", Logical: r.Logical, Upstream: r.Upstream,
-			Model: r.Model, Status: r.Status, Msg: "switch(" + candName(r.Upstream, r.Model) + ")"})
+		return routeEvent{Ts: ts, Req: r.Req, Kind: "fallback", Logical: r.Logical, Upstream: r.Upstream,
+			Model: r.Model, Status: r.Status, Msg: "switch(" + candName(r.Upstream, r.Model) + ")"}, true
 	case r.Queued:
-		m.addEvent(routeEvent{Ts: ts, Req: r.Req, Kind: "queue", Logical: r.Logical, Upstream: r.Upstream,
-			Model: r.Model, Status: r.Status, Msg: "sem(" + r.Upstream + ")" + stageSep + "freq(" + r.Upstream + ")"})
+		return routeEvent{Ts: ts, Req: r.Req, Kind: "queue", Logical: r.Logical, Upstream: r.Upstream,
+			Model: r.Model, Status: r.Status, Msg: "sem(" + r.Upstream + ")" + stageSep + "freq(" + r.Upstream + ")"}, true
+	}
+	return routeEvent{}, false
+}
+
+// replayEvent 把一条日志记录还原成事件后并进内存事件环 (256 条上限由 addEvent 负责)。
+func (m *tuiModel) replayEvent(r logRec, ts time.Time) {
+	if e, ok := replayEventOf(r, ts); ok {
+		m.addEvent(e)
 	}
 }
 

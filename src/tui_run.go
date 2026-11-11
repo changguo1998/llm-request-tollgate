@@ -168,13 +168,19 @@ func runTUI(cfgPath, stateURL string) {
 
 // handleKey 处理一个输入字节; 返回 true = 退出。
 //
-// settings 页把编辑键留给自己 (s = 保存并重生成, h = 热加载, m/p/g = 换面板), 状态页的
-// h/l 仍是切页; 切页统一走 1-4 / 左右方向键 / l (settings 页的 h 被编辑键占了)。
+// settings 页把编辑键留给自己 (s = 保存并重生成, h = 热加载, m/p/g = 换面板), events 页
+// 把筛选键留给自己 (f / t / c), 状态页的 h/l 仍是切页; 切页统一走 1-4 / 左右方向键 /
+// l (settings 页的 h 被编辑键占了)。
 func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 	e := m.prio
 	if m.tab == tabSettings && e != nil && e.prompt != nil {
 		*pending = nil // 输入态: 整字节喂给输入框, 别把 Esc 当转义序列攒
 		e.promptKey(b)
+		return false
+	}
+	if m.tab == tabEvents && m.evPrompt != nil {
+		*pending = nil // 输入态: 整字节喂给输入框, 别把 Esc 当转义序列攒
+		m.evPromptKey(b)
 		return false
 	}
 	*pending = append(*pending, b)
@@ -259,6 +265,20 @@ func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 			return false
 		}
 	}
+	if m.tab == tabEvents {
+		// events 页把筛选键留给自己: f 文本筛选, t 时间范围, c 清除全部筛选。
+		switch b {
+		case 'f':
+			m.startEvPrompt(true)
+			return false
+		case 't':
+			m.startEvPrompt(false)
+			return false
+		case 'c':
+			m.clearEvFilter()
+			return false
+		}
+	}
 	switch b {
 	case 'q', 0x03, 0x04: // q / Ctrl-C / Ctrl-D
 		return true
@@ -283,6 +303,7 @@ func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 		m.routes = map[string]*routeRow{}
 		m.events = nil
 		m.scanned = 0
+		m.ev.resetScan()          // 时间范围回读也从头扫
 		m.refreshed = time.Time{} // 让下一拍立刻重读
 	case ' ':
 		m.move(m.rows - 6)
