@@ -1,6 +1,7 @@
 config.local.json
 .cache/
 /llm-request-tollgate
+/src/llm-request-tollgate
 /test/tmp/
 /var/
 /tmp/
