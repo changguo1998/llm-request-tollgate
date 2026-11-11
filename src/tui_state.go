@@ -10,10 +10,14 @@ import (
 	"time"
 )
 
+// tuiEventKeep 是 TUI 事件历史的上限: 只留最近的, 够翻就行。
+// 它只服务第 2 页 (翻看 / 同秒合并 / 算列宽), 不参与调度与记账。
+const tuiEventKeep = 256
+
 func (m *tuiModel) addEvent(e routeEvent) {
 	m.events = append(m.events, e)
-	if len(m.events) > 4000 { // 只留最近的, 够翻就行
-		m.events = append(m.events[:0], m.events[len(m.events)-2000:]...)
+	if len(m.events) > tuiEventKeep {
+		m.events = append(m.events[:0], m.events[len(m.events)-tuiEventKeep:]...)
 	}
 }
 
