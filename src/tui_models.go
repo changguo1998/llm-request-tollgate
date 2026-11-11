@@ -72,7 +72,7 @@ func groupCell(g candGroup, isDefault bool) string {
 	return tuiGreen + g.Name + tuiReset
 }
 
-// drawModelsBody 把模型视角的两张表接在第 1 页活动表下方, 与分块一起滚动:
+// drawModelsBody 把模型视角的两张表接在第 1 页活动表下方, 与请求表一起滚动:
 // 先上游状态 (并发 / 排队 / 错误 / 记账组锁), 再列有过请求的 上游/模型 队列与路由聚合。
 // 两张表不画标题 (列名行保留), 表与表之间空一行; 只出现实际上游/模型, 不按配置候选铺开;
 // 第二张表的行按逻辑名分组, 组与组之间空一行。
@@ -128,7 +128,7 @@ func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 	for i := 0; i < maxNamed; i++ {
 		cols = append(cols, tuiCol{"", 0, true, false, 3})
 	}
-	full.line("") // 与上面的分块空一行
+	full.line("") // 与上面的请求表空一行
 	drawTable(full, "", cols, urows, 0, len(urows))
 	full.line("") // 两张表之间空一行
 

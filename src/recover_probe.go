@@ -150,12 +150,12 @@ func (a *App) runRecovery(c *cand, t recoverRef) {
 		}
 	}
 	c.settleRecovery(t, true, g)
-	a.evAdd("probe", "", c.id, modelID, "probe -> ok")
+	a.evAdd("probe", "", c.id, modelID, "probe"+stageSep+"ok")
 }
 
-// probeFailText 写探测失败后按原锁时长重锁的事件: `probe -> fail(原因) -> lock(锁原因 倒计时)`。
+// probeFailText 写探测失败后按原锁时长重锁的事件: `probe → fail(原因) → lock(锁原因 倒计时)`。
 // 归因词只取锁自己的原因 (quota / breaker / lowperf), 失败细分放 fail 参数里。
 func probeFailText(t recoverRef, g GateCfg, why string) string {
-	return "probe -> fail(" + why + ") -> lock(" + t.reason + " " +
+	return "probe" + stageSep + "fail(" + why + ")" + stageSep + "lock(" + t.reason + " " +
 		durStr(recoverLockDur(t.reason, g)) + ")"
 }

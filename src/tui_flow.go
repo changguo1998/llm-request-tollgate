@@ -1,110 +1,169 @@
-// tui_flow.go: active 页的列定义与耗时单元格。
+// tui_flow.go: active 页的列定义与阶段链。
 
 package main
 
 import (
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// 列宽在放得下时按内容涨, 顶到终端右边界为止。上游与真实模型合成一格, 写法 "上游/模型"
-// (与 -usage 的 key 一致, 如 ustc/gpt-5-codex)。列序按流程从左到右: 编号 → 逻辑名 →
-// 流式 → 上游 → 耗时 → 状态; 路径与来源不进表 (路径太长, 又对辨认一笔请求没帮助)。
+// 第 1 页一张表: 前三列是请求标识, 最后一列是阶段链 (与事件页同形, 各阶段按调度顺序
+// 用 " → " 连起来, 看起来像分了子列, 但只是一条链)。换候选 / 同候选重试另起一行,
+// 前三列留空, 链从并发池重新开始 (与上一行的链首左对齐)。
+// 列宽下限: 编号 7 / 逻辑名 6 / 流式 1, 阶段链沿用事件列的 40; 有内容或有空间时再按内容涨。
 var activeCols = []tuiCol{
-	{"编号", 4, true, true, 1}, {"逻辑名", 10, true, false, 0},
-	{"流式", 4, false, false, 2}, {"上游/模型", 18, true, false, 0},
-	{"耗时", 14, true, true, 0}, {"状态", 10, true, false, 0},
+	{"编号", 7, true, true, 2}, {"逻辑名", 6, true, false, 0},
+	{"流式", 1, true, false, 1},
+	{"阶段", 40, true, false, 0},
 }
 
-// flowSegs 是耗时列括号里的分段: 与第 1 页分块同序, 只去掉「已失败」(它是结局不是
-// 阶段)。并发池把解析与取信号量合为一段, 与分块口径一致。
-var flowSegs = [][]int{
-	{stageParse, stageSem},
-	{stageQueue},
-	{stageModelWait},
-	{stageSend},
-	{stageRecv},
-}
-
-// segMergeMax 是合并前段 (并发池 / 频率队列 / 状态锁) 的门槛: 三段合计不超过它时,
-// 发出去之前的等待不值得逐段看, 并成一段「发送前」, 耗时列只写 发送前 / 等待中 /
-// 接收中 三段; 超过它才按 5 段摊开, 让人一眼看出时间耗在哪一步。
-const segMergeMax = 4 * time.Second
-
-// segOf 是阶段所属的分段下标 (-1 = 不在任何分段里, 如已失败)。
-func segOf(stage int) int {
-	for i, seg := range flowSegs {
-		if stageIn(stage, seg) {
-			return i
+// flowRows 把进行中的请求摊成显示行: 每笔请求的每一次尝试一行, 最新的请求在最上面,
+// 同一笔请求内按尝试先后从上到下排 (回退另起一行, 前三列留空)。
+func (m *tuiModel) flowRows() [][]string {
+	flows := append([]flow(nil), m.pulse.Active...)
+	sort.Slice(flows, func(i, j int) bool { return flows[i].ID > flows[j].ID })
+	var out [][]string
+	for _, f := range flows {
+		tries := f.Tries
+		if len(tries) == 0 { // 对端没给每尝试数据时, 按当前阶段画一行
+			tries = []flowTry{{Up: f.Up, Model: f.Model, Cur: f.Stage, Segs: make([]float64, stageCount)}}
 		}
-	}
-	return -1
-}
-
-// flowSegDurs 是耗时列括号里各段的秒数: 从第一段写到手边这一段, 没到过的阶段不补 0。
-// 已结算的段读 Segs (服务端在离开阶段时入账), 当前段用 CurAt 现算 —— 对端每秒才刷新
-// 一次, 直接读 Segs 会让正在走的这一段晚一拍。
-// 前三段 (并发池 / 频率队列 / 状态锁) 合计不超过 segMergeMax 时并成一段「发送前」,
-// 剩下的依次是「等待中」(等响应头) 与「接收中」。
-func flowSegDurs(f flow) []float64 {
-	last := segOf(f.MaxStage)
-	if last < 0 {
-		return nil
-	}
-	out := make([]float64, last+1)
-	for i := 0; i <= last && i < len(flowSegs); i++ {
-		for _, st := range flowSegs[i] {
-			if st < len(f.Segs) {
-				out[i] += f.Segs[st]
+		for i, tr := range tries {
+			cells := make([]string, 0, len(activeCols))
+			if i == 0 {
+				tag := "否"
+				if f.Stream {
+					tag = "是"
+				}
+				// 逻辑名带专属色 (加粗), 与事件页标识列同一写法。
+				cells = append(cells, strconv.FormatUint(f.ID, 10), m.logicalName(f.Logical), tag)
+			} else {
+				cells = append(cells, "", "", "") // 回退行: 标识列留空
 			}
+			cells = append(cells, m.stageChain(f, tr))
+			out = append(out, cells)
 		}
 	}
-	if cur := segOf(f.Stage); cur >= 0 && cur <= last && f.CurAt > 0 {
-		out[cur] += time.Since(time.UnixMilli(f.CurAt)).Seconds()
-	}
-	return mergePreSend(out)
-}
-
-// mergePreSend 把前三段 (并发池 / 频率队列 / 状态锁) 并进一段「发送前」: 三段合计
-// (按屏幕上的 0.1s 精度) 不超过 segMergeMax 才并, 超过就原样返回。
-func mergePreSend(segs []float64) []float64 {
-	pre := 0.0
-	for i := 0; i < len(segs) && i < 3; i++ {
-		pre += segs[i]
-	}
-	if math.Round(pre*10)/10 > segMergeMax.Seconds() {
-		return segs
-	}
-	out := append([]float64{pre}, segs[min(3, len(segs)):]...)
 	return out
 }
 
-// durCell 是耗时格: 总耗时, 括号里是各段耗时 (如 3s(0.1s+0.1s+0s+2.8s))。总耗时与分段
-// 同样按 0.1s 取整, 不然括号里的和会比总数差一截 (如 3.7s 印成 3s)。
-func (m *tuiModel) durCell(f flow) string {
-	el := time.Since(f.StartTime)
-	segs := flowSegDurs(f)
-	if len(segs) == 0 {
-		return durStr(el)
+// stageChain 把一次尝试写成一条阶段链 (与事件页同形): 到过的阶段按流程顺序用 " → " 连起,
+// 每段写「短词 耗时」; 没到过的阶段不出现在链里。当前阶段实时走, 卡住原因 / 接收中的实时
+// 吞吐 / 该段的结局词写在链尾 (链尾就是这条尝试走到的地方)。
+func (m *tuiModel) stageChain(f flow, tr flowTry) string {
+	reach := func(st int) bool {
+		return tr.Cur == st || (st < len(tr.Segs) && tr.Segs[st] > 0)
 	}
-	parts := make([]string, len(segs))
-	for i, s := range segs {
-		parts[i] = segStr(s)
+	secOf := func(st int) float64 {
+		sec := 0.0
+		if st < len(tr.Segs) {
+			sec = tr.Segs[st]
+		}
+		if tr.Cur == st && tr.CurAt > 0 {
+			sec += time.Since(time.UnixMilli(tr.CurAt)).Seconds()
+		}
+		return sec
 	}
-	return segStr(el.Seconds()) + "(" + strings.Join(parts, "+") + ")"
+	// 耗时: 当前这段实时走 (不满 1s 也写), 已经结束的一段不满 1s 就不写时间。
+	dur := func(st int) string {
+		sec := secOf(st)
+		if tr.Cur != st && sec < 1 {
+			return ""
+		}
+		return " " + segStr(sec)
+	}
+	var toks []string
+	// 解析段只在还没取信号量时单独出现: 取了信号量就由 sem 那一段代表。
+	if reach(stageParse) && !reach(stageSem) {
+		toks = append(toks, "new("+f.Logical+")"+dur(stageParse))
+	}
+	if reach(stageSem) {
+		toks = append(toks, "sem("+m.upName(tr.Up)+")"+dur(stageSem))
+	}
+	if reach(stageQueue) { // 频率队列不带参数 (哪个上游由 sem 那一段说明)
+		toks = append(toks, "freq"+dur(stageQueue))
+	}
+	if reach(stageModelWait) { // 状态锁只写模型, 不写供应商
+		w := "queue"
+		if tr.Model != "" {
+			w += "(" + tr.Model + ")"
+		}
+		toks = append(toks, w+dur(stageModelWait))
+	}
+	if reach(stageSend) {
+		toks = append(toks, "send"+dur(stageSend))
+	}
+	if reach(stageRecv) {
+		toks = append(toks, "recv"+dur(stageRecv))
+	}
+	chain := strings.Join(toks, stageSep)
+	var tail []string
+	if tr.Cur >= 0 && isGateDetail(f.Gate) {
+		tail = append(tail, f.Gate)
+	}
+	if tr.Cur == stageRecv {
+		if s := liveTps(f); s != "" {
+			tail = append(tail, s)
+		}
+	}
+	if tr.Fail != "" {
+		tail = append(tail, colorTryFail(tr.Fail))
+	}
+	if len(tail) > 0 {
+		if chain != "" {
+			chain += " "
+		}
+		chain += strings.Join(tail, " ")
+	}
+	return chain
 }
 
-// segStr 写一段耗时: 按 0.1s 四舍五入 (整秒不写小数点, 如 2.8s / 3s / 0s), 超过一分钟
-// 走 durStr 的 mm:ss 写法。
+// liveTps 是接收中这一笔的实时吞吐, 只写一个: 优先解码 (已收到的输出 token / 首字节
+// 到达至今), 其次总 (同一份输出 token / 请求总耗时), 最后下载 (已转发的响应字节 /
+// 首字节到达至今), 都不加前缀。还没收到东西时为空。
+func liveTps(f flow) string {
+	if f.Stage != stageRecv || f.RecvStart <= 0 || (f.RecvTok <= 0 && f.RecvBytes <= 0) {
+		return ""
+	}
+	el := time.Since(time.UnixMilli(f.RecvStart)).Seconds()
+	// 解码: 接收窗口够长才算 (窗口刚开始时速率会虚高, 也无法除)。
+	if f.RecvTok > 0 && el > 0 {
+		return strings.TrimLeft(humanTPS(float64(f.RecvTok)/el), " ") + " t/s"
+	}
+	// 总: 解码不可用时退回按请求总耗时算。
+	if tot := time.Since(f.StartTime).Seconds(); f.RecvTok > 0 && tot > 0 {
+		return strings.TrimLeft(humanTPS(float64(f.RecvTok)/tot), " ") + " t/s"
+	}
+	// 下载: 没有 token 可计时 (非流式 / 只有思考块以外的字节) 时写字节速率。
+	if f.RecvBytes > 0 && el > 0 {
+		return humanRate(float64(f.RecvBytes) / el)
+	}
+	return ""
+}
+
+// colorTryFail 给链尾的结局词上色: fail(...) 红字 (失败), reject(...) 黄字 (被挡)。
+func colorTryFail(s string) string {
+	if strings.HasPrefix(s, "fail") {
+		return tuiRed + s + tuiReset
+	}
+	return tuiYell + s + tuiReset
+}
+
+// segStr 只决定耗时怎么显示 (内部仍按秒的小数算): 不足 1s 精确到 0.1s (整 0 写 0s),
+// 1s 及以上精确到 1s (四舍五入), 超过一分钟走 durStr 的 mm:ss 写法。
 func segStr(sec float64) string {
 	if sec < 60 {
-		v := math.Round(max(0, sec)*10) / 10
-		if v == math.Trunc(v) {
-			return strconv.Itoa(int(v)) + "s"
+		if sec < 1 {
+			v := math.Round(max(0, sec)*10) / 10
+			if v == math.Trunc(v) {
+				return strconv.Itoa(int(v)) + "s"
+			}
+			return strconv.FormatFloat(v, 'f', 1, 64) + "s"
 		}
-		return strconv.FormatFloat(v, 'f', 1, 64) + "s"
+		return strconv.Itoa(int(math.Round(sec))) + "s"
 	}
 	return durStr(time.Duration(sec * float64(time.Second)))
 }

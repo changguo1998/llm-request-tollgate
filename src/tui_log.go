@@ -100,11 +100,6 @@ func (m *tuiModel) absorb(line []byte) {
 	if ts.IsZero() {
 		ts = time.Now()
 	}
-	// 平均停留时长按全部能读到的请求算 (不按回看窗口), 只用于第 1 页分块行数的权重。
-	if r.DurationMs > 0 {
-		m.durSum += r.DurationMs
-		m.durN++
-	}
 	// 第 2 页的事件回放覆盖当日 + 前一日 (按本地日历日, 跨天也能看到昨天的结局);
 	// 第 1 页的聚合统计仍只算回看窗口 (m.window), 与是否跨天无关。
 	if ts.Before(eventReplayFrom(time.Now())) {
@@ -175,16 +170,16 @@ func (m *tuiModel) replayEvent(r logRec, ts time.Time) {
 	switch {
 	case r.Gate != "":
 		m.addEvent(routeEvent{Ts: ts, Req: r.Req, Kind: "gate", Logical: r.Logical, Upstream: r.Upstream,
-			Model: r.Model, Status: r.Status, Msg: "sem -> reject(" + gateWord(r.Gate) + ")"})
+			Model: r.Model, Status: r.Status, Msg: "sem" + stageSep + "reject(" + gateWord(r.Gate) + ")"})
 	case r.Status >= 400 || r.Err != "":
 		m.addEvent(routeEvent{Ts: ts, Req: r.Req, Kind: "error", Logical: r.Logical, Upstream: r.Upstream,
-			Model: r.Model, Status: r.Status, Msg: "send -> fail(" + replayFailParam(r) + ")"})
+			Model: r.Model, Status: r.Status, Msg: "send" + stageSep + "fail(" + replayFailParam(r) + ")"})
 	case r.Fallbacks > 0:
 		m.addEvent(routeEvent{Ts: ts, Req: r.Req, Kind: "fallback", Logical: r.Logical, Upstream: r.Upstream,
 			Model: r.Model, Status: r.Status, Msg: "switch(" + candName(r.Upstream, r.Model) + ")"})
 	case r.Queued:
 		m.addEvent(routeEvent{Ts: ts, Req: r.Req, Kind: "queue", Logical: r.Logical, Upstream: r.Upstream,
-			Model: r.Model, Status: r.Status, Msg: "sem(" + r.Upstream + ") -> freq(" + r.Upstream + ")"})
+			Model: r.Model, Status: r.Status, Msg: "sem(" + r.Upstream + ")" + stageSep + "freq(" + r.Upstream + ")"})
 	}
 }
 

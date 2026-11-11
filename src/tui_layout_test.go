@@ -110,7 +110,7 @@ func ioctlCall(fd uintptr, req uintptr, arg unsafe.Pointer) {
 }
 
 // openTestPTY 把 stdout 指到一块 rows x cols 的 pty, 让 draw() 量到指定行列
-// (测试结束复原)。第 1 页的分块撑到 30 行以上, 要断言整页就得给高一点的窗口。
+// (测试结束复原)。第 1 页的请求表撑到 30 行以上, 要断言整页就得给高一点的窗口。
 func openTestPTY(t *testing.T, rows, cols int) {
 	t.Helper()
 	f, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
@@ -274,11 +274,12 @@ func TestAutoColsFillsToBoundary(t *testing.T) {
 	}
 }
 
-// active 页主表在 120 列终端上不该再丢列: 用截断次要列换全部 6 列可见。
+// active 页主表在 120 列终端上不该丢列: 8 列 (编号 / 逻辑名 / 流式 + 5 个阶段) 都可见。
 func TestActiveTableKeepsAllColsAt120(t *testing.T) {
 	rows := [][]string{{
 		"12345", "claude-3-5-sonnet", "是",
-		"group/claude-sonnet-4-5-20250929", "3s(0.1s+0.1s+0s+2.8s)", "额度锁 09:12",
+		"sem(group) 0.2s", "freq(group) 0.1s", "queue(group/claude-sonnet-4-5-20250929) 0.5s",
+		"send 0.5s", "recv 2.8s",
 	}}
 	cols := autoCols(activeCols, rows, 120)
 	if w := tableWidth(cols); w > 120 {
@@ -291,82 +292,51 @@ func TestActiveTableKeepsAllColsAt120(t *testing.T) {
 	}
 }
 
-// 回归: 中间列整列为空被 colKeep 丢掉 (如这批请求都还没选中上游) 之后, 后面的
-// 状态列不能再按错位的 cell 算宽 —— 曾经列宽停在基准值, 长内容被提前截断,
-// 终端明明够宽也打出 ~。现在行列按同一份 keep 对齐, 宽终端下状态应完整显示。
-func TestFlowDroppedColKeepsLaterColWidth(t *testing.T) {
-	openTestPTY(t, 40, 160)
-	m := newTUIModel("cfg")
-	m.tab = tabActive
-	now := time.Now()
-	long := "额度锁 " + strings.Repeat("x", 60)
-	m.pulse.Active = []flow{{
-		ID: 7, Logical: "claude-3-5-sonnet", Stage: stageQueue,
-		Gate: long, StartTime: now,
-	}}
-	out := stripANSI(m.draw())
-	if strings.Contains(out, "~") {
-		t.Errorf("宽终端下第 1 页不该出现截断符 ~:\n%v", out)
-	}
-	if !strings.Contains(out, long) {
-		t.Errorf("长状态应完整显示, 实际被截断:\n%v", out)
-	}
-}
-
-// 耗时列: 总耗时, 括号里是从第一段写到手边这一段的分段耗时 (以 + 相连), 没到过的阶段
-// 不补 0, 当前段按 CurAt 现算; 前三段 (并发池 / 频率队列 / 状态锁) 合计不超过 4s 时并成
-// 一段「发送前」, 只写 发送前 / 等待中 / 接收中; 超过 4s 才按 5 段摊开。
-func TestFlowDurCellSegments(t *testing.T) {
+// 第 1 页的阶段链: 一次尝试一行, 到过的阶段按流程顺序用 " → " 连起 (每段带耗时),
+// 结局词写在链尾; 换候选另起一行时标识列留空、链从并发池重新开始。
+func TestFlowTryCells(t *testing.T) {
 	m := newTUIModel("cfg")
 	now := time.Now()
-	// 发送前 0.5s (并成一段) + 等响应头 2.5s。
-	send := flow{
-		ID: 1, Logical: "m", Stage: stageSend, MaxStage: stageSend,
-		StartTime: now.Add(-3 * time.Second),
-		CurAt:     now.Add(-2500 * time.Millisecond).UnixMilli(),
-		Segs:      []float64{0.3, 0.1, 0.1, 0, 0, 0},
+	f := flow{
+		ID: 101, Logical: "m1", Up: "u2", Model: "real2", Stage: stageQueue,
+		Tries: []flowTry{
+			{Up: "u1", Model: "real1", Cur: -1, Stop: stageSend,
+				Segs: []float64{0.2, 0.1, 0.1, 0.1, 0.5, 0}, Fail: "fail(502)"},
+			{Up: "u2", Model: "real2", Cur: stageQueue,
+				Segs: []float64{0, 0.3, 0, 0, 0, 0}, CurAt: now.Add(-2 * time.Second).UnixMilli()},
+		},
 	}
-	if got := m.durCell(send); got != "3s(0.5s+2.5s)" {
-		t.Errorf("已发送 (发送前 <= 4s): 期望 3s(0.5s+2.5s), 得到 %q", got)
+	m.pulse.Active = []flow{f}
+	rows := m.flowRows()
+	if len(rows) != 2 {
+		t.Fatalf("一次回退应占两行, 得到 %d", len(rows))
 	}
-	// 发送前 0.5s + 等响应头 1s + 接收 1.5s: 短等待并段后正好三段。
-	recv := flow{
-		ID: 2, Logical: "m", Stage: stageRecv, MaxStage: stageRecv,
-		StartTime: now.Add(-3 * time.Second),
-		CurAt:     now.Add(-1500 * time.Millisecond).UnixMilli(),
-		Segs:      []float64{0.3, 0.1, 0.1, 0, 1, 0},
+	if rows[0][0] != "101" || rows[0][1] != "m1" {
+		t.Errorf("首行标识列不对: %v", rows[0][:3])
 	}
-	if got := m.durCell(recv); got != "3s(0.5s+1s+1.5s)" {
-		t.Errorf("接收中 (发送前 <= 4s): 期望 3s(0.5s+1s+1.5s), 得到 %q", got)
+	if rows[1][0] != "" || rows[1][1] != "" || rows[1][2] != "" {
+		t.Errorf("回退行标识列应留空: %v", rows[1][:3])
 	}
-	// 发送前合计 4s: 正好在门槛上, 仍然并段。
-	edge := flow{
-		ID: 3, Logical: "m", Stage: stageSend, MaxStage: stageSend,
-		StartTime: now.Add(-4200 * time.Millisecond),
-		CurAt:     now.Add(-200 * time.Millisecond).UnixMilli(),
-		Segs:      []float64{0.1, 0.1, 0, 3.8, 0, 0},
+	// 逻辑名带专属色 + 加粗 (与事件页标识列同一写法); 没有配色的名字原样输出。
+	m.logicalColors = map[string]string{"m1": tuiGreen}
+	if got := m.flowRows()[0][1]; got != tuiBold+tuiGreen+"m1"+tuiReset {
+		t.Errorf("逻辑名应带专属色与加粗, 得到 %q", got)
 	}
-	if got := m.durCell(edge); got != "4.2s(4s+0.2s)" {
-		t.Errorf("已发送 (发送前 = 4s): 期望 4.2s(4s+0.2s), 得到 %q", got)
+	if got := m.flowRows()[0][0]; got != "101" {
+		t.Errorf("编号列不上色, 得到 %q", got)
 	}
-	// 发送前合计 4.5s: 超过门槛, 三段不并, 按 5 段摊开。
-	slow := flow{
-		ID: 4, Logical: "m", Stage: stageSend, MaxStage: stageSend,
-		StartTime: now.Add(-4700 * time.Millisecond),
-		CurAt:     now.UnixMilli(),
-		Segs:      []float64{0.1, 0.1, 0, 4.3, 0, 0},
+	// 首行: 一条链写到发送 (含结局词), 接收还没到, 不出现在链里。
+	want := "sem(u1) → freq → queue(real1) → send " +
+		tuiRed + "fail(502)" + tuiReset
+	if got := rows[0][3]; got != want {
+		t.Errorf("首行的阶段链应为 %q, 得到 %q", want, got)
 	}
-	if got := m.durCell(slow); got != "4.7s(0.2s+0s+4.3s+0s)" {
-		t.Errorf("已发送 (发送前 > 4s): 期望 4.7s(0.2s+0s+4.3s+0s), 得到 %q", got)
+	// 回退行: 从并发池重新开始, 当前在频率队列 (实时走)。
+	if got := rows[1][3]; !strings.HasPrefix(got, "sem(u2) → freq 2s") {
+		t.Errorf("回退行应从并发池重新开始: %q", got)
 	}
-	// 并发池里只有「发送前」一段, 合并前后写法一致。
-	pool := flow{
-		ID: 5, Logical: "m", Stage: stageSem, MaxStage: stageSem,
-		StartTime: now.Add(-time.Second), CurAt: now.UnixMilli(),
-		Segs: []float64{0.1, 0, 0, 0, 0, 0},
-	}
-	if got := m.durCell(pool); got != "1s(0.1s)" {
-		t.Errorf("并发池: 期望 1s(0.1s), 得到 %q", got)
+	if !strings.Contains(rows[1][3], "2s") {
+		t.Errorf("当前阶段应实时走: %q", rows[1][3])
 	}
 }
 
@@ -406,7 +376,7 @@ func TestUpModelJoin(t *testing.T) {
 	}
 }
 
-// 第 1 页分块都有标题行; 并入的上游表与模型表不画标题; events 页滚动到底不再画成空白
+// 第 1 页请求表不画标题; 并入的上游表与模型表不画标题; events 页滚动到底不再画成空白
 // (G 键把滚动设成很大)。
 func TestFlowTablesAndEventsScroll(t *testing.T) {
 	f, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
@@ -445,9 +415,15 @@ func TestFlowTablesAndEventsScroll(t *testing.T) {
 		Models: []candModelLock{{Model: "m1", Queue: 1}}}}
 	m.tab = tabActive
 	out := m.draw()
-	for _, title := range []string{"并发池", "频率队列", "状态锁", "已发送", "接收中", "已失败"} {
+	// 第 1 页一张请求表: 表头只写前三列, 阶段列不写列名 (阶段由格首短词说明)。
+	for _, title := range []string{"编号", "逻辑名", "流式"} {
 		if !strings.Contains(stripANSI(out), title) {
-			t.Errorf("active 页缺少分块 %q", title)
+			t.Errorf("active 页缺少列名 %q", title)
+		}
+	}
+	for _, gone := range []string{"并发池", "频率队列", "状态锁", "发送", "接收"} {
+		if strings.Contains(stripANSI(out), gone) {
+			t.Errorf("阶段列不该写列名 %q", gone)
 		}
 	}
 	// 第 1 页正文下半段并入了上游表与 模型/路由聚合表: 不画表标题, 列名行保留。
@@ -469,7 +445,7 @@ func TestFlowTablesAndEventsScroll(t *testing.T) {
 		m.events = append(m.events, routeEvent{
 			Ts: time.Now().Add(-time.Duration(i) * time.Second), Kind: "ok",
 			Logical: "m1", Upstream: "ustc", Model: "real-m1",
-			Msg: "recv -> ok(200) #" + itoa(i), // 各不相同, 每一笔请求一行
+			Msg: "recv → ok(200) #" + itoa(i), // 各不相同, 每一笔请求一行
 		})
 	}
 	m.scroll[tabEvents] = 1 << 30
@@ -487,48 +463,11 @@ func TestFlowTablesAndEventsScroll(t *testing.T) {
 			t.Errorf("events 页不该再有列名 %q", gone)
 		}
 	}
-	if !strings.Contains(out, "recv -> ok(200) #") {
+	if !strings.Contains(out, "recv → ok(200) #") {
 		t.Error("滚动到底应显出最后几行事件, 实际画成空白")
 	}
 	if !strings.Contains(out, "200 行, 当前 ") {
 		t.Error("事件多于窗口时应显示当前窗口位置")
-	}
-}
-
-// 第 1 页按流程阶段分块: 顺序与调度器的真实步骤一致, 每笔请求落在自己的块里。
-func TestFlowBlocksByStage(t *testing.T) {
-	openTestPTY(t, 50, 140)
-	m := newTUIModel("cfg")
-	now := time.Now()
-	m.pulse.Active = []flow{
-		{ID: 1, Logical: "parse-me", Up: "ustc", Model: "m1", Stage: stageParse, StartTime: now},
-		{ID: 2, Logical: "sem-me", Up: "ustc", Model: "m1", Stage: stageSem, StartTime: now},
-		{ID: 3, Logical: "queue-me", Up: "ustc", Model: "m2", Stage: stageQueue, StartTime: now},
-		{ID: 4, Logical: "model-me", Up: "group", Model: "m3", Stage: stageModelWait, StartTime: now},
-		{ID: 5, Logical: "header-me", Up: "group", Model: "m3", Stage: stageSend, StartTime: now},
-		{ID: 6, Logical: "recv-me", Up: "group", Model: "m3", Stage: stageRecv, StartTime: now},
-	}
-	out := stripANSI(m.draw())
-	for _, s := range []string{"并发池 (2)", "频率队列 (1)",
-		"状态锁 (1)", "已发送 (1)", "接收中 (1)", "已失败 (0)"} {
-		if !strings.Contains(out, s) {
-			t.Errorf("缺少分块 %q", s)
-		}
-	}
-	for _, s := range []string{"parse-me", "sem-me", "queue-me", "model-me", "header-me", "recv-me"} {
-		if !strings.Contains(out, s) {
-			t.Errorf("活动连接 %q 没画出来", s)
-		}
-	}
-	// 块序 = 流程顺序。
-	order := []string{"并发池", "频率队列", "状态锁", "已发送", "接收中", "已失败"}
-	last := -1
-	for _, s := range order {
-		i := strings.Index(out, s)
-		if i < last {
-			t.Errorf("分块顺序不对: %q 出现在前一阶段之前", s)
-		}
-		last = i
 	}
 }
 
@@ -553,63 +492,7 @@ func TestFlowRowsSortByIDDesc(t *testing.T) {
 	}
 }
 
-// flowTitleRows 找出第 1 页各分块标题所在的行号 (下标对应 flowBlocks 的顺序)。
-func flowTitleRows(t *testing.T, out string) []int {
-	t.Helper()
-	lines := strings.Split(stripANSI(out), "\r\n")
-	rows := make([]int, len(flowBlocks))
-	for i := range rows {
-		rows[i] = -1
-	}
-	for n, ln := range lines {
-		text := strings.TrimPrefix(ln, tuiIndent)
-		for i, b := range flowBlocks {
-			// 只认行首的标题, 别把「状态」列里同名的阶段 (如 接收中) 当成标题。
-			if strings.HasPrefix(text, b.title) {
-				rows[i] = n
-			}
-		}
-	}
-	for i, row := range rows {
-		if row < 0 {
-			t.Fatalf("分块 %q 没画出来", flowBlocks[i].title)
-		}
-	}
-	return rows
-}
-
-// 分块之间不加额外空行: 上一块标题后面正好是它的数据行区 (还没有样本时按 defaultMinRows),
-// 空块与有请求的块都一样。
-func TestFlowBlockTitleSpacing(t *testing.T) {
-	openTestPTY(t, 50, 140)
-	now := time.Now()
-	cases := []struct {
-		name   string
-		active []flow
-	}{
-		{"空表", nil},
-		{"有请求", []flow{
-			{ID: 1, Logical: "queue-me", Up: "ustc", Model: "m1", Stage: stageQueue, StartTime: now},
-			{ID: 2, Logical: "recv-me", Up: "ustc", Model: "m1", Stage: stageRecv, StartTime: now},
-		}},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			m := newTUIModel("cfg")
-			m.tab = tabActive
-			m.pulse.Active = c.active
-			rows := flowTitleRows(t, m.draw())
-			for i := 1; i < len(rows); i++ {
-				if gap := rows[i] - rows[i-1] - 1; gap != defaultMinRows[i-1] {
-					t.Errorf("分块 %q 与 %q 之间应正好 %d 行 (不留额外空行), 实际 %d 行",
-						flowBlocks[i-1].title, flowBlocks[i].title, defaultMinRows[i-1], gap)
-				}
-			}
-		})
-	}
-}
-
-// 第 1 页的版式: 列名整页只画一次 (页签下方空一行再画), 排在第一块标题之前, 表后不画单位说明。
+// 第 1 页的版式: 列名整页只画一次 (页签下方先画列名, 再画请求行), 表后不画单位说明。
 func TestFlowSingleHeaderOrder(t *testing.T) {
 	openTestPTY(t, 60, 160)
 	m := newTUIModel("cfg")
@@ -622,11 +505,17 @@ func TestFlowSingleHeaderOrder(t *testing.T) {
 	if n := strings.Count(out, "编号"); n != 1 {
 		t.Errorf("活动表列名应整页只画一次, 实际 %d 次", n)
 	}
-	if strings.Index(out, "上游/模型") > strings.Index(out, "并发池") {
-		t.Error("列名应排在第一块标题之前 (页首)")
-	}
 	if strings.Contains(out, "单位:") {
 		t.Error("表格后面不该再画单位说明")
+	}
+	// 阶段列不写列名: 阶段由格首短词说明 (这笔在频率队列, 格首就是 freq)。
+	for _, gone := range []string{"并发池", "频率队列", "状态锁", "发送", "接收"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("阶段列不该写列名 %q", gone)
+		}
+	}
+	if !strings.Contains(out, "freq") {
+		t.Error("阶段状态应写在格首")
 	}
 
 	lines := strings.Split(out, "\r\n")
@@ -651,21 +540,21 @@ func TestFlowHeaderAlwaysShown(t *testing.T) {
 	m := newTUIModel("cfg")
 	m.tab = tabActive
 	out := stripANSI(m.draw())
-	for _, name := range []string{"编号", "逻辑名", "流式", "耗时", "上游/模型", "状态"} {
+	for _, name := range []string{"编号", "逻辑名", "流式"} {
 		if !strings.Contains(out, name) {
 			t.Errorf("空表也应显示列名 %q", name)
 		}
 	}
 }
 
-// 第 1 页列名固定在页签下方: 滚动分块时列名不跟着滚走。
+// 第 1 页列名固定在页签下方: 滚动表体时列名不跟着滚走。
 func TestFlowHeaderPinned(t *testing.T) {
 	openTestPTY(t, 24, 100)
 	m := newTUIModel("cfg")
 	m.tab = tabActive
-	for i := 1; i <= 6; i++ {
+	for i := 1; i <= 24; i++ {
 		m.pulse.Active = append(m.pulse.Active, flow{
-			ID: uint64(i), Logical: "m", Up: "ustc", Model: "m1",
+			ID: uint64(i), Logical: "row-" + itoa(i), Up: "ustc", Model: "m1",
 			Stage: stageQueue, StartTime: time.Now(),
 		})
 	}
@@ -674,7 +563,7 @@ func TestFlowHeaderPinned(t *testing.T) {
 	lines := strings.Split(out, "\r\n")
 	headRow := -1
 	for i, ln := range lines {
-		if strings.Contains(ln, "编号") {
+		if strings.Contains(ln, "逻辑名") {
 			headRow = i
 			break
 		}
@@ -686,8 +575,12 @@ func TestFlowHeaderPinned(t *testing.T) {
 	if want := 3 + m.statusRows; headRow != want {
 		t.Errorf("列名应固定在页签下方 (第 %d 行), 实际在第 %d 行", want+1, headRow+1)
 	}
-	if strings.Contains(out, "并发池") {
-		t.Error("滚动后分块内容应已上移 (第一块不在窗口里)")
+	// 表体上移: 最新的那几行已经滚出窗口, 最老的仍看得见。
+	if strings.Contains(out, "row-24") {
+		t.Error("滚动后表体应已上移 (最新一行不在窗口里)")
+	}
+	if !strings.Contains(out, "row-3") {
+		t.Error("滚动后最老的一行仍应在窗口里")
 	}
 }
 

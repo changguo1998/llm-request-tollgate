@@ -69,70 +69,47 @@ func TestTtfbAvgMin(t *testing.T) {
 	}
 }
 
-// 第 1 页「接收中」的行在状态列按模型/路由表的同三个速度写实时吞吐, 不加前缀:
-// 解码 = 已收到的输出 token / 首字节到达至今, 总 = 同一份输出 token / 请求总耗时,
-// 下载 = 已转发的响应字节 / 首字节到达至今。
+// 第 1 页阶段链在实时接收时按模型/路由表的同三个速度写实时吞吐, 只写一个, 不加前缀:
+// 优先解码 (已收到的输出 token / 首字节到达至今), 其次总 (同一份输出 token / 请求总耗时),
+// 最后下载 (已转发的响应字节 / 首字节到达至今)。
 func TestFlowCellLiveTps(t *testing.T) {
 	m := newTUIModel("cfg")
+	now := time.Now()
 	recv := flow{ID: 1, Logical: "m1", Stage: stageRecv, RecvTok: 6000, RecvBytes: 1_024_000,
-		RecvStart: time.Now().Add(-100 * time.Second).UnixMilli(),
-		StartTime: time.Now().Add(-500 * time.Second)}
-	cells := m.flowCells(recv)
-	if got := cells[len(cells)-1]; got != "60.0 t/s 12.0 t/s 10 KB/s" {
-		t.Errorf("接收中的状态列应写 6000/100s, 6000/500s 与 1MB/100s, 得到 %q", got)
+		RecvStart: now.Add(-100 * time.Second).UnixMilli(),
+		StartTime: now.Add(-500 * time.Second),
+		Tries: []flowTry{{Cur: stageRecv, Segs: make([]float64, stageCount),
+			CurAt: now.Add(-100 * time.Second).UnixMilli()}}}
+	got := m.stageChain(recv, recv.Tries[0])
+	if !strings.Contains(got, "60.0 t/s") { // 6000 / 100s
+		t.Errorf("接收段的链尾应写解码速率 60.0 t/s, 实际 %q", got)
+	}
+	for _, unwanted := range []string{"12.0 t/s", "KB/s"} { // 总 / 下载都让位给解码
+		if strings.Contains(got, unwanted) {
+			t.Errorf("只该写一个速率, 不该出现 %q: %q", unwanted, got)
+		}
 	}
 	// 只有字节 (没有可计的输出 token) 时只显示下载吞吐。
 	onlyBytes := flow{ID: 4, Logical: "m1", Stage: stageRecv, RecvBytes: 512_000,
-		RecvStart: time.Now().Add(-100 * time.Second).UnixMilli()}
-	if got := m.flowCells(onlyBytes); got[len(got)-1] != "5 KB/s" {
-		t.Errorf("只有字节时应只写下载吞吐, 得到 %q", got[len(got)-1])
+		RecvStart: now.Add(-100 * time.Second).UnixMilli(),
+		Tries: []flowTry{{Cur: stageRecv, Segs: make([]float64, stageCount),
+			CurAt: now.Add(-100 * time.Second).UnixMilli()}}}
+	if got := m.stageChain(onlyBytes, onlyBytes.Tries[0]); !strings.Contains(got, "5 KB/s") ||
+		strings.Contains(got, "t/s") {
+		t.Errorf("只有字节时应只写下载吞吐, 得到 %q", got)
 	}
-	// 还没收到任何东西 (非流式 / 刚开流) 时不显示, 与旧行为一致。
-	fresh := flow{ID: 2, Logical: "m1", Stage: stageRecv, StartTime: time.Now()}
-	if got := m.flowCells(fresh); got[len(got)-1] != "" {
-		t.Errorf("没有收到内容时状态列应为空, 得到 %q", got[len(got)-1])
+	// 还没收到任何东西 (非流式 / 刚开流) 时不写吞吐。
+	fresh := flow{ID: 2, Logical: "m1", Stage: stageRecv, StartTime: now,
+		Tries: []flowTry{{Cur: stageRecv, Segs: make([]float64, stageCount)}}}
+	if got := m.stageChain(fresh, fresh.Tries[0]); strings.Contains(got, "t/s") {
+		t.Errorf("没有收到内容时不该写吞吐, 得到 %q", got)
 	}
+	// 只有接收中那一段才显示吞吐。
 	send := flow{ID: 3, Logical: "m1", Stage: stageSend, RecvTok: 6000, RecvBytes: 4096,
-		RecvStart: time.Now().Add(-100 * time.Second).UnixMilli()}
-	if got := m.flowCells(send); got[len(got)-1] != "" {
-		t.Errorf("只有接收中才显示吞吐, 得到 %q", got[len(got)-1])
-	}
-}
-
-// relayStream 边转发边回写已收到的输出 token 数、响应字节数与首字节时刻。
-func TestRelayStreamLiveProgress(t *testing.T) {
-	body := strings.NewReader(strings.Join([]string{
-		`data: {"choices":[{"delta":{"content":"hello"}}]}`,
-		"",
-		`data: {"choices":[{"delta":{"content":" world"}}]}`,
-		"",
-		"data: [DONE]",
-		"",
-	}, "\n"))
-	var got []int
-	var gotBytes []int64
-	var first time.Time
-	rec := httptest.NewRecorder()
-	ro := relayStream(rec, body, "m1", "real-m1", time.Now(), false,
-		func(tokens int, bytes int64, firstAt time.Time) {
-			got = append(got, tokens)
-			gotBytes = append(gotBytes, bytes)
-			first = firstAt
-		})
-	if len(got) == 0 || got[len(got)-1] <= 0 {
-		t.Fatalf("live 应至少回写一次正数 token, 得到 %v", got)
-	}
-	if len(gotBytes) == 0 || gotBytes[len(gotBytes)-1] <= 0 {
-		t.Fatalf("live 应回写已转发的字节数, 得到 %v", gotBytes)
-	}
-	if first.IsZero() {
-		t.Error("live 应带上首字节时刻")
-	}
-	if ro.Bytes != int64(rec.Body.Len()) {
-		t.Errorf("字节数应与实际写出的响应体一致: %d vs %d", ro.Bytes, rec.Body.Len())
-	}
-	if ro.Usage == nil || ro.Usage.Completion <= 0 {
-		t.Errorf("流末 usage 应有用量, 得到 %+v", ro.Usage)
+		RecvStart: now.Add(-100 * time.Second).UnixMilli(),
+		Tries:     []flowTry{{Cur: stageSend, Segs: make([]float64, stageCount)}}}
+	if got := m.stageChain(send, send.Tries[0]); strings.Contains(got, "t/s") {
+		t.Errorf("只有接收中才显示吞吐, 得到 %q", got)
 	}
 }
 

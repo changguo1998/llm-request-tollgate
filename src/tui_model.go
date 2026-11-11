@@ -27,7 +27,7 @@ type tuiModel struct {
 
 	window       time.Duration     // 回看窗口 (行只算窗口内的记录)
 	rateWin      time.Duration     // 速度平均/峰值窗口 (rate_window_ms)
-	blockWin     time.Duration     // active 分块采样时间尺度 (block_window_ms)
+	blockWin     time.Duration     // 兼容保留 (第 1 页改成平表后不再按块定行高)
 	logPos       map[string]int64  // 每个日志文件读到哪
 	logRest      map[string][]byte // 每文件各自的半行缓冲 (读到一半的行)
 	scannedFiles map[string]bool   // 归档已整读, 不再重复扫
@@ -46,7 +46,7 @@ type tuiModel struct {
 	flowBytes map[uint64]int64
 	bytesAt   time.Time
 	flowRate  float64
-	pageTotal int // 第 1 页 (分块 + 两张模型表) 的总行数 (滚动用)
+	pageTotal int // 第 1 页 (请求表 + 两张模型表) 的总行数 (滚动用)
 	pageTop   int // 该页当前窗口的第一行
 	pageWin   int // 该页当前窗口的数据行数 (提示行里的 a-b 按它算)
 
@@ -71,12 +71,6 @@ type tuiModel struct {
 	logicalColors   map[string]string
 	logicalNames    []string
 	logicalNamesMod time.Time
-
-	// 第 1 页各分块的行数统计: 每次取到观测面后记一笔样本 (各块在飞笔数), 行数的参考值
-	// 用窗口内的样本算; durSum / durN 是全部能读到的请求的耗时合计与笔数 (定权重的时间尺度)。
-	rowHist []rowSample
-	durSum  int64
-	durN    int64
 }
 
 // errf 记下最近一次取数失败 (可能来自别的 goroutine, 加锁)。
@@ -105,7 +99,7 @@ func newTUIModel(cfgPath string) *tuiModel {
 }
 
 // tuiWindowConfig 从配置文件的扁平顶层键读 TUI 窗口 (不依赖 key_env, TUI 只读 display 参数)。
-// 读不到或非正数时用缺省: 速度窗 1h, 分块采样时间尺度 35s。
+// 读不到或非正数时用缺省: 速度窗 1h, 分块采样时间尺度 35s (后者只为兼容保留)。
 func tuiWindowConfig(cfgPath string) (rateWin, blockWin time.Duration) {
 	rateWin, blockWin = time.Hour, 35*time.Second
 	b, err := os.ReadFile(cfgPath)

@@ -53,7 +53,7 @@ func (m *tuiModel) drawEvents(c *tuiCanvas, body int) {
 		return
 	}
 	limit := max(1, body-4)
-	// 事件列放不下时折行: 续行以 "-> " 开头 (断点只在 "->" 之前), 并相对该条第一行的
+	// 事件列放不下时折行: 续行以 "→ " 开头 (断点只在箭头之前), 并相对该条第一行的
 	// 事件列开头再缩进 eventWrapGap 列; 首段仍走表格对齐, 续行按正文宽度自己排版。
 	const evCol = 2
 	lines := make([][]string, len(rows))
@@ -95,14 +95,17 @@ func (m *tuiModel) drawEvents(c *tuiCanvas, body int) {
 // eventWrapGap 是事件条目续行相对该条第一行事件列开头的缩进 (字符)。
 const eventWrapGap = 2
 
-// wrapEventMsg 把事件正文按事件列宽 (width) 折行: 断点只能落在 "->" 之前, 于是续行都以
-// "-> " 开头, 可用的宽度比首行少 eventWrapGap 列 (续行要缩进)。贪心地往一行里接阶段词;
+// wrapEventMsg 把事件正文按列宽 (width) 折行: 宽度不够时断在箭头之前 (续行以 "→ "
+// 开头), 但换候选 / 同候选重试的转折词 (switch / retry) 放在箭头之后另起一行,
+// 让回退的那一步自成一行。续行比首行少 eventWrapGap 列 (缩进); 贪心地往一行里接阶段词,
 // 单词本身超过可用宽度时截断 (末尾留 ~, 与同列其余截断同一写法), 不另找断点。
 func wrapEventMsg(msg string, width int) []string {
-	toks := strings.Split(msg, " -> ")
+	toks := strings.Split(msg, stageSep)
 	if len(toks) == 1 {
 		return []string{tuiTrunc(msg, width)}
 	}
+	// 断在箭头前: 上一行以 " →" 收尾; 断在箭头后: 续行以 "→ " 开头 (两者都是 2 列)。
+	trail, lead := stageSep[:len(stageSep)-1], stageSep[1:]
 	avail := width
 	cur := toks[0]
 	if tuiWidth(cur) > avail {
@@ -110,18 +113,29 @@ func wrapEventMsg(msg string, width int) []string {
 	}
 	out := make([]string, 0, 2)
 	for _, tok := range toks[1:] {
-		if cand := cur + " -> " + tok; tuiWidth(cand) <= avail {
+		if cand := cur + stageSep + tok; tuiWidth(cand) <= avail {
 			cur = cand
 			continue
 		}
-		out = append(out, cur)
+		prev := avail
 		avail = max(1, width-eventWrapGap)
-		cur = "-> " + tok
+		if isTurnWord(tok) && tuiWidth(cur+trail) <= prev {
+			out = append(out, cur+trail)
+			cur = tok
+		} else {
+			out = append(out, cur)
+			cur = lead + tok
+		}
 		if tuiWidth(cur) > avail {
 			cur = tuiTrunc(cur, avail)
 		}
 	}
 	return append(out, cur)
+}
+
+// isTurnWord 判断阶段词是不是回退的转折词 (换候选 switch / 同候选重试 retry)。
+func isTurnWord(tok string) bool {
+	return strings.HasPrefix(tok, "switch") || strings.HasPrefix(tok, "retry")
 }
 
 // eventMergeKey 是显示合并的键: 秒 + 请求编号 + 逻辑名。
@@ -169,7 +183,7 @@ func (m *tuiModel) mergedEventRows() []routeEvent {
 func mergeEventChain(msgs []string) string {
 	toks := make([]string, 0, 16)
 	for _, msg := range msgs {
-		for _, p := range strings.Split(msg, " -> ") {
+		for _, p := range strings.Split(msg, stageSep) {
 			p = strings.TrimSpace(p)
 			if p == "" {
 				continue
@@ -183,7 +197,7 @@ func mergeEventChain(msgs []string) string {
 			toks = append(toks, p)
 		}
 	}
-	return strings.Join(toks, " -> ")
+	return strings.Join(toks, stageSep)
 }
 
 // stageBase 取过渡词括号前的部分 (new / sem / fail …), 判断两个表达是不是同一个阶段。

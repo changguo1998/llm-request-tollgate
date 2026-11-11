@@ -10,60 +10,6 @@ import (
 	"time"
 )
 
-// blockOfStage 把阶段归到分块: 解析与信号量同属并发池, 已失败自成一块, 未知阶段返回 -1。
-func TestBlockOfStage(t *testing.T) {
-	cases := []struct {
-		stage int
-		want  int
-	}{
-		{stageParse, 0},
-		{stageSem, 0},
-		{stageQueue, 1},
-		{stageModelWait, 2},
-		{stageSend, 3},
-		{stageRecv, 4},
-		{stageFailed, 5},
-		{-1, -1},
-		{stageCount + 10, -1},
-	}
-	for _, c := range cases {
-		if got := blockOfStage(c.stage); got != c.want {
-			t.Errorf("阶段 %d 应属于第 %d 块, 得到 %d", c.stage, c.want, got)
-		}
-	}
-}
-
-// noteRows 每次采样记下各块的在飞笔数; blockCounts 用同一口径算此刻的笔数。
-func TestNoteRows(t *testing.T) {
-	m := newTUIModel("cfg")
-	m.pulse.Active = []flow{
-		{ID: 1, Stage: stageParse},     // 并发池
-		{ID: 2, Stage: stageSem},       // 并发池
-		{ID: 3, Stage: stageQueue},     // 频率队列
-		{ID: 4, Stage: stageModelWait}, // 状态锁
-		{ID: 5, Stage: stageSend},      // 已发送
-		{ID: 6, Stage: stageRecv},      // 接收中
-		{ID: 7, Stage: stageFailed},    // 已失败
-	}
-	want := []int{2, 1, 1, 1, 1, 1}
-	m.noteRows(time.Now())
-	if len(m.rowHist) != 1 {
-		t.Fatalf("应记下 1 个样本, 得到 %d", len(m.rowHist))
-	}
-	if got := m.rowHist[0].cnt; !sameInts(got, want) {
-		t.Errorf("样本里的块笔数应为 %v, 得到 %v", want, got)
-	}
-	if got := m.blockCounts(); !sameInts(got, want) {
-		t.Errorf("此刻笔数应为 %v, 得到 %v", want, got)
-	}
-	// 没有进行中的请求时记下全零样本 (可以拿来判空窗口)。
-	m.pulse.Active = nil
-	m.noteRows(time.Now())
-	if len(m.rowHist) != 2 || !sameInts(m.rowHist[1].cnt, make([]int, len(flowBlocks))) {
-		t.Errorf("空表样本应全是 0, 得到 %v", m.rowHist)
-	}
-}
-
 // sampleFlowBytes 把进行中请求的累计字节换算成每秒速率: 第一拍只记基线, 之后每拍只取
 // 相比上一拍的增量, 除以采样间隔; 新请求的字节算进它出现的那一拍, 请求结束不出现负数。
 func TestSampleFlowBytes(t *testing.T) {
@@ -159,9 +105,6 @@ func TestPollStateSameProcess(t *testing.T) {
 	}
 	if since != 1 || len(m.events) != 1 || m.events[0].Kind != "lock" {
 		t.Errorf("事件应并入且游标为 1: since=%d events=%+v", since, m.events)
-	}
-	if len(m.rowHist) != 1 || m.rowHist[0].cnt[0] != 1 {
-		t.Errorf("取数后应记一笔采样, 得到 %+v", m.rowHist)
 	}
 	// 游标传回去: 没有新事件时 events 为空。
 	if n := m.pollState(a, since); n != since || len(m.pulse.Events) != 0 {

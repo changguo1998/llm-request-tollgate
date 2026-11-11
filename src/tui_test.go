@@ -30,8 +30,14 @@ func TestViewFlowAndEvents(t *testing.T) {
 	if f.ID != id || f.Logical != "m1" || f.Source != "agent-x" || !f.Stream {
 		t.Errorf("进行中请求的字段不对: %+v", f)
 	}
-	if f.Up != "up1" || f.Model != "real-m1" || f.Attempt != 2 || stageName(f) != "退避 3s" {
-		t.Errorf("候选状态不对: %+v (stage=%q)", f, stageName(f))
+	if f.Up != "up1" || f.Model != "real-m1" || f.Attempt != 2 {
+		t.Errorf("候选状态不对: %+v", f)
+	}
+	if len(f.Tries) != 1 || f.Tries[0].Up != "up1" || f.Tries[0].Cur != stageSend {
+		t.Errorf("每尝试的阶段数据不对: %+v", f.Tries)
+	}
+	if f.Tries[0].CurAt == 0 {
+		t.Errorf("当前阶段的进入时刻应填进 CurAt: %+v", f.Tries[0])
 	}
 
 	// 事件游标: 只取增量, 且序号单调。

@@ -361,7 +361,7 @@ func loadConfigOpt(path string, lenient bool) (*Config, error) {
 	if c.LogPath == "" {
 		c.LogPath = "var/requests.jsonl"
 	}
-	// TUI 显示窗口缺省: 速度窗 1h, active 分块采样时间尺度 35s (rowStatTau0)。
+	// TUI 显示窗口缺省: 速度窗 1h, active 分块采样时间尺度 35s (兼容保留)。
 	if c.RateWindowSec <= 0 {
 		c.RateWindowSec = 3600 // 1h
 	}

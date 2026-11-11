@@ -27,7 +27,6 @@ func (m *tuiModel) pollState(app *App, since uint64) uint64 {
 		p := app.snapshot(since)
 		m.pulse, m.live, m.lastErr = p, true, ""
 		now := time.Now()
-		m.noteRows(now)
 		m.sampleFlowBytes(now)
 		m.mergeEvents(p.Events)
 		return p.MaxSeq
@@ -54,7 +53,6 @@ func (m *tuiModel) pollState(app *App, since uint64) uint64 {
 	}
 	m.pulse, m.live, m.lastErr = p, true, ""
 	now := time.Now()
-	m.noteRows(now)
 	m.sampleFlowBytes(now)
 	m.mergeEvents(p.Events)
 	return p.MaxSeq
@@ -97,7 +95,7 @@ func (m *tuiModel) mergeEvents(evs []viewEvent) {
 
 // 页号与页签一一对应 (tuiTabs 的次序); 比较 m.tab 时用这几个名字, 别写裸数字。
 const (
-	tabActive   = 0 // 活动连接, 按流程阶段分块; 下方接上游状态与模型/路由聚合
+	tabActive   = 0 // 活动连接, 每笔请求按尝试一行、阶段成列; 下方接上游状态与模型/路由聚合
 	tabEvents   = 1
 	tabSettings = 2 // 设置: gate 参数 + 优先级
 	tabSticky   = 3 // 粘性偏好: 按逻辑名选候选, Enter 置一次, c 清除
