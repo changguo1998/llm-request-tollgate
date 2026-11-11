@@ -212,116 +212,116 @@ func (e *tuiEditor) adjustGate(delta int) {
 		e.message = "退避序列用 = 按逗号输入"
 		return
 	}
-	v := e.gateField(i) + delta*step
-	switch i {
-	case 0:
-		v = clampInt(v, 100, 60000)
-		e.gate.IntervalMs = v
-	case 1:
-		v = clampInt(v, 100, 600000)
-		e.gate.SemWaitMs = v
-	case 2:
-		v = clampInt(v, 100, 600000)
-		e.gate.QueueWaitMs = v
-	case 4:
-		v = clampInt(v, 1000, 86400000)
-		e.gate.ConcurrencyLockMs = v
-	case 5:
-		v = clampInt(v, 1000, 86400000)
-		e.gate.QuotaLockMs = v
-	case 6:
-		v = clampInt(v, 1000, 86400000)
-		e.gate.BreakerLockMs = v
-	case 7:
-		v = clampInt(v, 1000, 86400000)
-		e.gate.LowPerfLockMs = v
-	case 8:
-		v = clampInt(v, 1000, 86400000)
-		e.gate.LowPerfWindowMs = v
-	case 9:
-		v = clampInt(v, 1, 100000)
-		e.gate.LowPerfPeakMax = v
-	case 10:
-		v = clampInt(v, 1, 100000)
-		e.gate.LowPerfAvgMax = v
-	case 11:
-		v = clampInt(v, 0, 86400000)
-		e.gate.LowPerfTtfbMaxMs = v
-	case 12:
-		v = clampInt(v, 60000, 86400000)
-		e.rateWinMs = v
-	case 13:
-		v = clampInt(v, 1000, 86400000)
-		e.blockWinMs = v
-	case 14:
-		v = clampInt(v, 1000, 86400000)
-		e.gate.StickyTTLMs = v
-	case 15:
-		v = clampInt(v, 0, 1)
+	lo, hi := gateBounds(i)
+	v := clampInt(e.gateField(i)+delta*step, lo, hi)
+	switch {
+	case isSecField(i):
+		e.setSecField(i, v)
+	case i == gateIdxProbe:
 		e.probeOn = v == 1
+	case i == gateIdxPeak:
+		e.gate.LowPerfPeakMax = v
+	case i == gateIdxAvg:
+		e.gate.LowPerfAvgMax = v
 	}
 	e.gateDirty = true
 	e.message = gateCN[i] + " = " + e.gateText(i)
 }
 
+// gateBounds 是 +/- 调整时的取值范围 (毫秒 / t/s / 0-1 开关)。
+func gateBounds(i int) (lo, hi int) {
+	switch i {
+	case 0:
+		return 100, 60000
+	case 1, 2:
+		return 100, 600000
+	case 4, 5, 6, 7, 8, 13, 14:
+		return 1000, 86400000
+	case 9, 10:
+		return 1, 100000
+	case 11:
+		return 0, 86400000
+	case 12:
+		return 60000, 86400000
+	case 15:
+		return 0, 1
+	}
+	return 0, 0
+}
+
 // setGatePrompt 处理 = 输入: 时间字段与退避序列都用秒 (可小数, 与配置文件一致),
 // 两个门槛是整数 t/s, 开关用 0/1 / on/off / 开/关。
 func (e *tuiEditor) setGatePrompt(i int, text string) {
-	if i == gateIdxRetry {
-		// retry_backoff: 逗号分隔的正秒数 (可小数)。
-		parts := strings.Split(text, ",")
-		seq := make([]int, 0, len(parts))
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if p == "" {
-				continue
-			}
-			ms, err := parseSec(p)
-			if err != nil || ms <= 0 {
-				e.message = "退避序列要逗号分隔的正秒数 (可小数)"
-				return
-			}
-			seq = append(seq, ms)
+	switch {
+	case i == gateIdxRetry:
+		e.setRetrySeq(text)
+	case i == gateIdxProbe:
+		e.setProbeSwitch(text)
+	case isSecField(i):
+		e.setSecInput(i, text)
+	default:
+		e.setRateLimit(i, text)
+	}
+}
+
+// setRetrySeq 解析退避序列: 逗号分隔的正秒数 (可小数)。
+func (e *tuiEditor) setRetrySeq(text string) {
+	parts := strings.Split(text, ",")
+	seq := make([]int, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
 		}
-		if len(seq) == 0 {
-			e.message = "退避序列不能为空"
+		ms, err := parseSec(p)
+		if err != nil || ms <= 0 {
+			e.message = "退避序列要逗号分隔的正秒数 (可小数)"
 			return
 		}
-		e.gate.RetryBackoffMs = seq
-		e.gateDirty = true
-		e.message = "retry_backoff_sec = " + text
+		seq = append(seq, ms)
+	}
+	if len(seq) == 0 {
+		e.message = "退避序列不能为空"
 		return
 	}
-	if i == gateIdxProbe {
-		switch strings.ToLower(strings.TrimSpace(text)) {
-		case "0", "false", "off", "关":
-			e.probeOn = false
-		case "1", "true", "on", "开":
-			e.probeOn = true
-		default:
-			e.message = "probe_enabled 要用 0/1 / on/off / 开/关"
-			return
-		}
-		e.gateDirty = true
-		if e.probeOn {
-			e.message = "probe_enabled = 开"
-		} else {
-			e.message = "probe_enabled = 关"
-		}
+	e.gate.RetryBackoffMs = seq
+	e.gateDirty = true
+	e.message = "retry_backoff_sec = " + text
+}
+
+// setProbeSwitch 解析恢复探测开关。
+func (e *tuiEditor) setProbeSwitch(text string) {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "0", "false", "off", "关":
+		e.probeOn = false
+	case "1", "true", "on", "开":
+		e.probeOn = true
+	default:
+		e.message = "probe_enabled 要用 0/1 / on/off / 开/关"
 		return
 	}
-	if isSecField(i) {
-		ms, err := parseSec(text)
-		if err != nil || (ms == 0 && i != gateIdxTtfb) {
-			e.message = gateCN[i] + " 要非负秒数 (可小数)"
-			return
-		}
-		e.setSecField(i, ms)
-		e.gateDirty = true
-		e.message = gateCN[i] + " = " + fsec(ms)
+	e.gateDirty = true
+	if e.probeOn {
+		e.message = "probe_enabled = 开"
+	} else {
+		e.message = "probe_enabled = 关"
+	}
+}
+
+// setSecInput 解析时间字段 (非负秒数, 可小数); 高延迟阈值允许 0 (= 关闭判定)。
+func (e *tuiEditor) setSecInput(i int, text string) {
+	ms, err := parseSec(text)
+	if err != nil || (ms == 0 && i != gateIdxTtfb) {
+		e.message = gateCN[i] + " 要非负秒数 (可小数)"
 		return
 	}
-	// lowperf_peak_max / lowperf_avg_max: 整数 t/s。
+	e.setSecField(i, ms)
+	e.gateDirty = true
+	e.message = gateCN[i] + " = " + fsec(ms)
+}
+
+// setRateLimit 解析低吞吐门槛 (正整数 t/s)。
+func (e *tuiEditor) setRateLimit(i int, text string) {
 	n, err := strconv.Atoi(strings.TrimSpace(text))
 	if err != nil || n < 1 {
 		e.message = gateCN[i] + " 要正整数 (t/s)"
@@ -409,8 +409,25 @@ func (e *tuiEditor) saveGate() error {
 	if err := json.Unmarshal(b, &top); err != nil {
 		return err
 	}
-	g := normGate(e.gate)
-	flat := map[string]any{
+	for k, v := range e.gateFlat(normGate(e.gate)) {
+		if w, err := json.Marshal(v); err == nil {
+			top[k] = w
+		}
+	}
+	out, err := marshalConfig(top)
+	if err != nil {
+		return err
+	}
+	if err := writeConfigAtomic(target, out); err != nil {
+		return err
+	}
+	e.gateDirty = false
+	return nil
+}
+
+// gateFlat 是写回配置的调度参数扁平键 (顶层, 秒; 开关写 bool)。
+func (e *tuiEditor) gateFlat(g GateCfg) map[string]any {
+	return map[string]any{
 		"interval_sec":         msToSec(g.IntervalMs),
 		"sem_wait_sec":         msToSec(g.SemWaitMs),
 		"queue_wait_sec":       msToSec(g.QueueWaitMs),
@@ -428,15 +445,10 @@ func (e *tuiEditor) saveGate() error {
 		"sticky_ttl_sec":       msToSec(g.StickyTTLMs),
 		"probe_enabled":        e.probeOn,
 	}
-	for k, v := range flat {
-		if w, err := json.Marshal(v); err == nil {
-			top[k] = w
-		}
-	}
-	out, err := marshalConfig(top)
-	if err != nil {
-		return err
-	}
+}
+
+// writeConfigAtomic 按目标现有权限原子写回 (临时文件 + rename)。
+func writeConfigAtomic(target string, out []byte) error {
 	mode := os.FileMode(0o644)
 	if st, err := os.Stat(target); err == nil {
 		mode = st.Mode().Perm()
@@ -445,11 +457,7 @@ func (e *tuiEditor) saveGate() error {
 	if err := os.WriteFile(tmp, out, mode); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, target); err != nil {
-		return err
-	}
-	e.gateDirty = false
-	return nil
+	return os.Rename(tmp, target)
 }
 
 // saveSettings 一条龙保存: 调度参数写配置文件, 权重有改动时重生成配置

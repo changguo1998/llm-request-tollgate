@@ -43,59 +43,13 @@ func runTUI(cfgPath, stateURL string) {
 	if stateURL != "" {
 		m.stateURL = strings.TrimSuffix(strings.TrimRight(stateURL, "/"), "/")
 	} else {
-		// 同进程: 起代理 (日志写文件) + 状态台读内存。标准 logger 关掉, 否则会踩画面。
-		log.SetOutput(io.Discard)
-		cfg, err := loadConfig(cfgPath)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "config invalid:", err)
-			os.Exit(1)
-		}
-		app, err = newApp(cfg)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "init:", err)
-			os.Exit(1)
-		}
-		if app.logPath() != "" {
-			app.startPulseLoop(pulsePathFor(app.logPath()))
-		}
-		// 先显式 bind: 端口被占要立刻说清楚, 不能画着一个没起来的服务的状态。
-		ln, lerr := net.Listen("tcp", cfg.Listen)
-		if lerr != nil {
-			fmt.Fprintln(os.Stderr, "监听失败:", lerr)
-			os.Exit(1)
-		}
-		go func() {
-			if err := http.Serve(ln, app); err != nil {
-				m.errf("服务退出: %v", err)
-			}
-		}()
-		app.evAdd("start", "", "", "", "tollgate 启动, 监听 "+cfg.Listen)
-		// 热加载: settings 页的 h 键与 SIGHUP 走同一条路 (同进程不需要 systemd)。
-		m.reloadFn = func() error {
-			c, err := loadConfig(cfgPath)
-			if err != nil {
-				app.evAdd("reload", "", "", "", "热加载失败: "+err.Error())
-				return err
-			}
-			app.applyConfig(c)
-			app.evAdd("reload", "", "", "", "热加载成功: "+cfgPath)
-			return nil
-		}
-		// SIGHUP 热加载别名与上游 (与常驻模式同一语义)。
-		go func() {
-			ch := make(chan os.Signal, 1)
-			signal.Notify(ch, syscall.SIGHUP)
-			for range ch {
-				_ = m.reloadFn()
-			}
-		}()
+		app = startTUIProxy(cfgPath, m)
 	}
 
 	// 日志 (含跨天归档) 在主循环里读: 单 goroutine 独占 routes/events, 不用加锁。
 	// 终端: 原始模式 + 备用屏 + 藏光标; 退出时逐条还原 (含 panic)。
-	old, err := tuiRaw(os.Stdin.Fd())
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "TUI 需要交互式终端:", err)
+	leave, ok := enterTUI()
+	if !ok {
 		if app == nil {
 			return
 		}
@@ -103,26 +57,82 @@ func runTUI(cfgPath, stateURL string) {
 		fmt.Fprintln(os.Stderr, "已退回普通模式 (Ctrl-C 退出)")
 		select {}
 	}
+	defer leave()
+	runTUILoop(m, app)
+}
+
+// startTUIProxy 是同进程模式: 起代理 (日志写文件) + 观测推送 + 热加载钩子
+// (settings 页的 h 键与 SIGHUP 同一条路), 返回 App 供主循环轮询。
+func startTUIProxy(cfgPath string, m *tuiModel) *App {
+	log.SetOutput(io.Discard) // 标准 logger 会踩画面
+	cfg, err := loadConfig(cfgPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config invalid:", err)
+		os.Exit(1)
+	}
+	app, err := newApp(cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "init:", err)
+		os.Exit(1)
+	}
+	if app.logPath() != "" {
+		app.startPulseLoop(pulsePathFor(app.logPath()))
+	}
+	// 先显式 bind: 端口被占要立刻说清楚, 不能画着一个没起来的服务的状态。
+	ln, lerr := net.Listen("tcp", cfg.Listen)
+	if lerr != nil {
+		fmt.Fprintln(os.Stderr, "监听失败:", lerr)
+		os.Exit(1)
+	}
+	go func() {
+		if err := http.Serve(ln, app); err != nil {
+			m.errf("服务退出: %v", err)
+		}
+	}()
+	app.evAdd("start", "", "", "", "tollgate 启动, 监听 "+cfg.Listen)
+	// 热加载: settings 页的 h 键与 SIGHUP 走同一条路 (同进程不需要 systemd)。
+	m.reloadFn = func() error {
+		c, err := loadConfig(cfgPath)
+		if err != nil {
+			app.evAdd("reload", "", "", "", "热加载失败: "+err.Error())
+			return err
+		}
+		app.applyConfig(c)
+		app.evAdd("reload", "", "", "", "热加载成功: "+cfgPath)
+		return nil
+	}
+	// SIGHUP 热加载别名与上游 (与常驻模式同一语义)。
+	go func() {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGHUP)
+		for range ch {
+			_ = m.reloadFn()
+		}
+	}()
+	return app
+}
+
+// enterTUI 进原始模式 + 备用屏 + 藏光标, 返回退出时的还原函数。
+// 非交互终端返回 ok=false (已打印原因), 由调用方决定是否退回普通常驻。
+func enterTUI() (leave func(), ok bool) {
+	old, err := tuiRaw(os.Stdin.Fd())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "TUI 需要交互式终端:", err)
+		return nil, false
+	}
 	os.Stdout.WriteString("\x1b[?1049h\x1b[?25l\x1b[2J")
-	defer func() {
+	return func() {
 		os.Stdout.WriteString(tuiReset + "\x1b[?25h\x1b[?1049l")
 		tuiRestore(os.Stdin.Fd(), old)
-	}()
+	}, true
+}
 
+// runTUILoop 是主循环: 每秒刷新 + 按键处理 + 窗口变化重绘, 直到 q / EOF。
+func runTUILoop(m *tuiModel, app *App) {
 	resize := make(chan os.Signal, 1)
 	signal.Notify(resize, syscall.SIGWINCH)
 	keys := make(chan byte, 64)
-	go func() {
-		r := bufio.NewReader(os.Stdin)
-		for {
-			b, err := r.ReadByte()
-			if err != nil {
-				close(keys)
-				return
-			}
-			keys <- b
-		}
-	}()
+	go readKeys(keys)
 
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
@@ -166,6 +176,19 @@ func runTUI(cfgPath, stateURL string) {
 	}
 }
 
+// readKeys 把标准输入的字节逐个送进 keys; 读到 EOF 就关闭通道。
+func readKeys(keys chan<- byte) {
+	r := bufio.NewReader(os.Stdin)
+	for {
+		b, err := r.ReadByte()
+		if err != nil {
+			close(keys)
+			return
+		}
+		keys <- b
+	}
+}
+
 // handleKey 处理一个输入字节; 返回 true = 退出。
 //
 // settings 页把编辑键留给自己 (s = 保存并重生成, h = 热加载, m/p/g = 换面板), events 页
@@ -184,101 +207,129 @@ func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 		return false
 	}
 	*pending = append(*pending, b)
-	p := *pending
-	if p[0] == 0x1b {
-		if len(p) < 3 {
-			return false // 方向键是 3 字节, 等收全
+	if p := *pending; p[0] == 0x1b {
+		quit, complete := m.escapeKey(p)
+		if complete {
+			*pending = nil
 		}
-		code := p[2]
-		if code == '5' || code == '6' { // PgUp / PgDn 是 4 字节
-			if len(p) < 4 {
-				return false
-			}
-			code += 32 // '5'->'U'(上翻页), '6'->'V'(下翻页); 下面按语义处理
-		}
-		*pending = nil
-		var d int
-		switch code {
-		case 'A', 'U':
-			d = -1
-		case 'B', 'V':
-			d = 1
-		case 'C':
-			m.switchTab(1)
-			return false
-		case 'D':
-			m.switchTab(-1)
-			return false
-		}
-		if code == 'U' {
-			d -= 10
-		}
-		if code == 'V' {
-			d += 10
-		}
-		if m.tab == tabSettings && e != nil {
-			e.moveFocus(d)
-		} else if m.tab == tabSticky {
-			m.stickyMove(d)
-		} else {
-			m.move(d)
-		}
-		return false
+		return quit
 	}
 	*pending = nil
-	if m.tab == tabSettings && e != nil {
-		if quit, handled := e.key(b); handled {
+	switch {
+	case m.tab == tabSettings && e != nil:
+		return m.settingsKey(b, e)
+	case m.tab == tabSticky:
+		if quit, handled := m.stickyKey(b); handled {
 			return quit
 		}
-		switch b {
-		case 's':
-			m.saveSettings()
-		case 'h':
-			m.prioHup()
-		case 'l', '\t':
-			m.switchTab(1)
-		case '1', '2', '3', '4':
-			m.switchTabTo(int(b - '1'))
-		}
-		return false
-	}
-	if m.tab == tabSticky {
-		// sticky 页把选择键留给自己: Enter 置偏好, c 清除, j/k/g/G 移动光标。
-		switch b {
-		case 'j':
-			m.stickyMove(1)
-			return false
-		case 'k':
-			m.stickyMove(-1)
-			return false
-		case 'g':
-			m.stickyJump(false)
-			return false
-		case 'G':
-			m.stickyJump(true)
-			return false
-		case '\r', '\n':
-			m.stickyApply()
-			return false
-		case 'c':
-			m.stickyClear()
-			return false
+	case m.tab == tabEvents:
+		if quit, handled := m.eventsKey(b); handled {
+			return quit
 		}
 	}
-	if m.tab == tabEvents {
-		// events 页把筛选键留给自己: f 文本筛选, t 时间范围, c 清除全部筛选。
-		switch b {
-		case 'f':
-			m.startEvPrompt(true)
-			return false
-		case 't':
-			m.startEvPrompt(false)
-			return false
-		case 'c':
-			m.clearEvFilter()
-			return false
-		}
+	return m.commonKey(b)
+}
+
+// escapeKey 处理转义序列 (方向键 / PgUp / PgDn): 字节没收全时 complete=false,
+// 继续留在 pending 里等下一拍。转义键从不退出。
+func (m *tuiModel) escapeKey(p []byte) (quit, complete bool) {
+	if len(p) < 3 {
+		return false, false // 方向键是 3 字节, 等收全
 	}
+	code := p[2]
+	if code == '5' || code == '6' { // PgUp / PgDn 是 4 字节
+		if len(p) < 4 {
+			return false, false
+		}
+		code += 32 // '5'->'U'(上翻页), '6'->'V'(下翻页); 下面按语义处理
+	}
+	var d int
+	switch code {
+	case 'A', 'U':
+		d = -1
+	case 'B', 'V':
+		d = 1
+	case 'C':
+		m.switchTab(1)
+		return false, true
+	case 'D':
+		m.switchTab(-1)
+		return false, true
+	}
+	if code == 'U' {
+		d -= 10
+	}
+	if code == 'V' {
+		d += 10
+	}
+	switch {
+	case m.tab == tabSettings && m.prio != nil:
+		m.prio.moveFocus(d)
+	case m.tab == tabSticky:
+		m.stickyMove(d)
+	default:
+		m.move(d)
+	}
+	return false, true
+}
+
+// settingsKey 是 settings 页的按键: 先给编辑器, 没接住再处理本页专属键
+// (s 保存 / h 热加载 / l 切页 / 数字跳页)。
+func (m *tuiModel) settingsKey(b byte, e *tuiEditor) bool {
+	if quit, handled := e.key(b); handled {
+		return quit
+	}
+	switch b {
+	case 's':
+		m.saveSettings()
+	case 'h':
+		m.prioHup()
+	case 'l', '\t':
+		m.switchTab(1)
+	case '1', '2', '3', '4':
+		m.switchTabTo(int(b - '1'))
+	}
+	return false
+}
+
+// stickyKey 是偏好页的专属键: Enter 置偏好, c 清除, j/k/g/G 移动光标。
+func (m *tuiModel) stickyKey(b byte) (quit, handled bool) {
+	switch b {
+	case 'j':
+		m.stickyMove(1)
+	case 'k':
+		m.stickyMove(-1)
+	case 'g':
+		m.stickyJump(false)
+	case 'G':
+		m.stickyJump(true)
+	case '\r', '\n':
+		m.stickyApply()
+	case 'c':
+		m.stickyClear()
+	default:
+		return false, false
+	}
+	return false, true
+}
+
+// eventsKey 是事件页的筛选键: f 文本筛选, t 时间范围, c 清除全部筛选。
+func (m *tuiModel) eventsKey(b byte) (quit, handled bool) {
+	switch b {
+	case 'f':
+		m.startEvPrompt(true)
+	case 't':
+		m.startEvPrompt(false)
+	case 'c':
+		m.clearEvFilter()
+	default:
+		return false, false
+	}
+	return false, true
+}
+
+// commonKey 是各页共用的按键: 退出 / 切页 / 滚动 / 重读日志。
+func (m *tuiModel) commonKey(b byte) bool {
 	switch b {
 	case 'q', 0x03, 0x04: // q / Ctrl-C / Ctrl-D
 		return true
@@ -286,9 +337,7 @@ func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 		m.switchTabTo(int(b - '1'))
 	case 'h', 0x1b:
 		m.switchTab(-1)
-	case 'l':
-		m.switchTab(1)
-	case '\t':
+	case 'l', '\t':
 		m.switchTab(1)
 	case 'j':
 		m.move(1)

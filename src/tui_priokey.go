@@ -113,29 +113,39 @@ func (e *tuiEditor) key(b byte) (quit bool, handled bool) {
 		return false, true
 	}
 	if e.focus == 2 {
-		switch b {
-		case 'j':
-			e.moveFocus(1)
-		case 'k':
-			e.moveFocus(-1)
-		case 'G':
-			e.jump(1 << 30)
-		case ' ':
-			e.moveFocus(1 << 20)
-		case '+':
-			e.adjust(1)
-		case '-':
-			e.adjust(-1)
-		case '=':
-			i := e.gateSel
-			e.prompt = &tuiPrompt{label: "新的 " + gateCN[i] + ":", commit: func(v string) {
-				e.setGatePrompt(i, v)
-			}}
-		default:
-			return false, false
-		}
-		return false, true
+		return false, e.gateKey(b)
 	}
+	return false, e.panelKey(b)
+}
+
+// gateKey 是调度参数面板的导航与编辑键 (= 打开行内输入)。
+func (e *tuiEditor) gateKey(b byte) bool {
+	switch b {
+	case 'j':
+		e.moveFocus(1)
+	case 'k':
+		e.moveFocus(-1)
+	case 'G':
+		e.jump(1 << 30)
+	case ' ':
+		e.moveFocus(1 << 20)
+	case '+':
+		e.adjust(1)
+	case '-':
+		e.adjust(-1)
+	case '=':
+		i := e.gateSel
+		e.prompt = &tuiPrompt{label: "新的 " + gateCN[i] + ":", commit: func(v string) {
+			e.setGatePrompt(i, v)
+		}}
+	default:
+		return false
+	}
+	return true
+}
+
+// panelKey 是模型 / provider 面板的导航与编辑键 (/ 过滤, = 改优先级)。
+func (e *tuiEditor) panelKey(b byte) bool {
 	switch b {
 	case 'j':
 		e.moveFocus(1)
@@ -162,9 +172,9 @@ func (e *tuiEditor) key(b byte) (quit bool, handled bool) {
 			e.rebuild()
 		}}
 	default:
-		return false, false
+		return false
 	}
-	return false, true
+	return true
 }
 
 // promptKey 行内输入: 可打印字符进缓冲, 退格删, 回车提交, Esc / Ctrl-C 取消。
