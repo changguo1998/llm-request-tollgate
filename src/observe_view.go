@@ -132,6 +132,8 @@ func (a *App) listenAddr() string {
 
 // stickySnapshot 返回各逻辑名当前的粘性偏好候选 (观测面展示用, TUI 第 1 页标记
 // 每组的 *)。aliases 取引用后在锁外读 (applyConfig 整体换新 map), 与 candViews 同口径。
+// 有请求进行中的逻辑名倒计时按设定值满显 (窗口从请求结束才起算); 锁序: flowMu 与
+// a.mu 先后各自取用不嵌套, 再进 sticky 的锁, 与 applyConfig 的 a.mu -> sticky.mu 一致。
 func (a *App) stickySnapshot() map[string]stickyView {
 	a.mu.RLock()
 	aliases := a.aliases
@@ -139,7 +141,19 @@ func (a *App) stickySnapshot() map[string]stickyView {
 	if a.sticky == nil {
 		return nil
 	}
-	return a.sticky.pairs(aliases)
+	return a.sticky.pairs(aliases, a.gate.stickyTTL(), time.Now(), a.inflightLogicals())
+}
+
+// inflightLogicals 返回当前有进行中请求的逻辑名集合: 这些逻辑名的粘性失效窗口还没开始
+// (最近一次请求尚未结束), pairs 里它们的倒计时按设定值 (TTL) 满显, 不动也不递减。
+func (a *App) inflightLogicals() map[string]bool {
+	a.flowMu.Lock()
+	defer a.flowMu.Unlock()
+	out := make(map[string]bool, len(a.flows))
+	for _, f := range a.flows {
+		out[f.Logical] = true
+	}
+	return out
 }
 
 // snapshot 组装一份观测载荷 (since = TUI 上次拿到的 MaxSeq)。

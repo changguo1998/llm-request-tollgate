@@ -23,9 +23,6 @@ func (s *serveState) attemptLoop() {
 		// pref: 正在处理的是不是本笔的偏好候选 (排位首位那个)。
 		pref := at.idx == s.prefIdx
 		if at.cd == nil {
-			if pref {
-				s.stickyBlock = true
-			}
 			s.obs.outcome(stageSem, "reject", "disabled")
 			s.noteFailure(fmt.Errorf("upstream %s has no scheduler", at.up.ID), at.up.ID, at.mod)
 			continue
@@ -35,11 +32,9 @@ func (s *serveState) attemptLoop() {
 			// 若这是恢复态 (锁已到期待探测通过): 后台顺手发起一笔恢复探测, 请求本身
 			// 仍照锁定规则进下一个候选, 不等待结果。
 			s.app.kickRecovery(at.cd, at.mod, at.group)
-			if pref {
-				s.stickyBlock = true
-				if stickyLongLock(reason) {
-					s.stickyLong = true
-				}
+			// 偏好候选被长期锁 (额度 / 低性能 / 熔断) 顶班: 成功后直接迁移偏好。
+			if pref && stickyLongLock(reason) {
+				s.stickyLong = true
 			}
 			s.obs.outcome(stageSem, "reject", lockParam(reason, left))
 			s.noteFailure(fmt.Errorf("upstream %s locked for %s (%s)",
@@ -50,9 +45,6 @@ func (s *serveState) attemptLoop() {
 		}
 		if paused, left := at.cd.paused(at.mod); paused {
 			// 该模型正在退避: 不进它的队列白等 (退避比排队预算长), 直接换候选。
-			if pref {
-				s.stickyBlock = true
-			}
 			s.obs.outcome(stageSem, "reject", "backoff "+durStr(left))
 			s.noteFailure(fmt.Errorf("upstream %s/%s backing off for %s",
 				at.up.ID, at.mod, left.Round(time.Second)), at.up.ID, at.mod)
@@ -94,13 +86,10 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 		s.queueMs += qms
 		if !ok {
 			// 偏好候选取资格失败 (锁 / 信号量超时 / 排队超时): 是临时不可用, 顶班
-			// 不算迁移; 锁且是长期锁 (低性能 / 额度) 则按候选失效直接迁移。
-			if at.idx == s.prefIdx {
-				s.stickyBlock = true
-				if why == "locked" {
-					if _, _, reason := at.cd.locked(at.mod, at.group); stickyLongLock(reason) {
-						s.stickyLong = true
-					}
+			// 不算迁移; 锁且是长期锁 (额度 / 低性能 / 熔断) 则按候选失效直接迁移。
+			if at.idx == s.prefIdx && why == "locked" {
+				if _, _, reason := at.cd.locked(at.mod, at.group); stickyLongLock(reason) {
+					s.stickyLong = true
 				}
 			}
 			s.gateReject = why
@@ -137,10 +126,13 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 			s.obs.mark(resp.StatusCode)
 			moveOn, longLock := a.classifyFailure(at, kind, resp, b, s.gate, s.upPath)
 			s.obs.outcome(stageSend, "fail", failClassParam(at, resp.StatusCode, b))
-			// 偏好候选真实报错后换走是「真实失败顶班」, 累计迁移计数; 额度类 (longLock)
-			// 是长期锁, 直接按候选失效处理。
-			if at.idx == s.prefIdx && longLock {
-				s.stickyBlock, s.stickyLong = true, true
+			// 偏好候选真实报错后换走: 命中长期锁 (额度 / 低性能 / 熔断) 才迁移 —— 熔断是
+			// 连续失败到阈值才上锁, 一上锁即把偏好迁走; 没落锁的单次波动不动偏好, 下笔
+			// 照常先试它 (锁查询在 classifyFailure 之后, 拿到的是本笔失败刚上的锁)。
+			if at.idx == s.prefIdx {
+				if _, _, reason := at.cd.locked(at.mod, at.group); longLock || stickyLongLock(reason) {
+					s.stickyLong = true
+				}
 			}
 			s.lastErr = fmt.Errorf("upstream %s returned %d", at.up.ID, resp.StatusCode)
 			s.lastStatus, s.lastHdr, s.lastBody = resp.StatusCode, resp.Header.Clone(), b

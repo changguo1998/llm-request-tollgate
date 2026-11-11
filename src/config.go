@@ -83,6 +83,9 @@ type Config struct {
 	// LowPerfExempt 是低性能锁豁免名单: 名单内的真实模型 id 禁止触发低性能锁。
 	LowPerfExempt   []string  `json:"lowperf_exempt,omitempty"`
 	RetryBackoffSec []float64 `json:"retry_backoff_sec"`
+	// StickyTtlSec 是粘性失效窗口 (秒, 可小数): 逻辑名空闲 (最后一次请求结束) 超过它,
+	// 粘性偏好作废, 下笔按优先级重选。缺省 5min (0 = 取缺省)。
+	StickyTtlSec float64 `json:"sticky_ttl_sec"`
 	// TUI 显示窗口 (秒, 可小数)
 	RateWindowSec  float64 `json:"rate_window_sec"`
 	BlockWindowSec float64 `json:"block_window_sec"`
@@ -223,6 +226,7 @@ func (c *Config) gate() GateCfg {
 		LowPerfLockMs: secToMs(c.LowPerfLockSec), LowPerfTtfbMaxMs: secToMs(c.LowPerfTtfbMaxSec),
 		LowPerfExempt:  c.LowPerfExempt,
 		RetryBackoffMs: secListToMs(c.RetryBackoffSec),
+		StickyTTLMs:    secToMs(c.StickyTtlSec),
 	}
 }
 
@@ -235,6 +239,7 @@ func (c *Config) setGate(g GateCfg) {
 	c.LowPerfLockSec, c.LowPerfTtfbMaxSec = msToSec(g.LowPerfLockMs), msToSec(g.LowPerfTtfbMaxMs)
 	c.LowPerfExempt = g.LowPerfExempt
 	c.RetryBackoffSec = msListToSec(g.RetryBackoffMs)
+	c.StickyTtlSec = msToSec(g.StickyTTLMs)
 }
 
 // GateCfg 是所有上游共用的门控参数。
@@ -255,6 +260,8 @@ type GateCfg struct {
 	// LowPerfExempt 是低性能锁豁免名单: 名单内的模型禁止触发低性能锁 (按真实模型 id 匹配)。
 	LowPerfExempt  []string `json:"lowperf_exempt,omitempty"`
 	RetryBackoffMs []int    `json:"retry_backoff_ms"`
+	// StickyTTLMs 是粘性失效窗口: 逻辑名空闲超过它, 偏好作废重选。缺省 5min。
+	StickyTTLMs int `json:"sticky_ttl_ms"`
 }
 
 // gateIntervalMs 是出队节拍的缺省值。
@@ -292,6 +299,9 @@ func normGate(g GateCfg) GateCfg {
 	if g.LowPerfLockMs <= 0 {
 		g.LowPerfLockMs = 300000
 	}
+	if g.StickyTTLMs <= 0 {
+		g.StickyTTLMs = 300000 // 5min
+	}
 	// LowPerfTtfbMaxMs 缺省 0 = 高延迟判定关闭, 只保留低吞吐逻辑。
 	if len(g.RetryBackoffMs) == 0 {
 		g.RetryBackoffMs = []int{10000, 20000, 30000}
@@ -326,6 +336,11 @@ func (g GateCfg) lowPerfLock() time.Duration {
 // lowPerfTtfbMax 是高延迟阈值; 0 = 关闭该项。
 func (g GateCfg) lowPerfTtfbMax() time.Duration {
 	return time.Duration(g.LowPerfTtfbMaxMs) * time.Millisecond
+}
+
+// stickyTTL 是粘性失效窗口 (0 = 关闭, 但 normGate 缺省补 5min, 实际恒开启)。
+func (g GateCfg) stickyTTL() time.Duration {
+	return time.Duration(g.StickyTTLMs) * time.Millisecond
 }
 
 // backoff 返回第 n 次连续失败该暂停多久; 超出序列长度返回 0 (那一次该进熔断)。

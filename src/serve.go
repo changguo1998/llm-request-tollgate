@@ -98,11 +98,11 @@ type serveState struct {
 	lastMod    string
 
 	// 粘性偏好 (本笔请求): prefIdx 是本笔开头排到首位的偏好候选 (alias 下标);
-	// 若该候选被换走, stickyBlock / stickyLong 记录换走原因 (成功服务后按它更新偏好)。
-	prefIdx     int
-	stickyBlock bool // 偏好候选被锁 / 退避预检 / 排队超时顶班 (临时不可用)
-	stickyLong  bool // 偏好候选被长期锁 (低性能 / 额度) 顶班
-	servedIdx   int  // 成功候选的 alias 下标 (仅成功时有意义)
+	// 若该候选被换走, stickyLong 记录是否为长期锁顶班 (成功服务后按它更新偏好)。
+	prefIdx    int
+	stickyLong bool // 偏好候选被长期锁 (额度 / 低性能 / 熔断) 顶班
+	stickyExp  bool // 本笔开头偏好已过失效窗口 (按优先级选, 成功后重置)
+	servedIdx  int  // 成功候选的 alias 下标 (仅成功时有意义)
 
 	finalStatus int
 }
@@ -157,6 +157,9 @@ func (s *serveState) run() {
 		// 退出顺序: 先按实际结局刷新展示状态, 再把这笔从"进行中"表里摘掉。
 		s.obs.finish(s.finalStatus)
 		s.app.flowEnd(s.flowID)
+		if s.app.sticky != nil {
+			s.app.sticky.finish(s.logical, s.servedUp != nil, s.stickyExp)
+		}
 	}()
 	if !s.pickAttempts() {
 		return
@@ -174,7 +177,7 @@ func (s *serveState) run() {
 	}
 	// 请求成功服务后更新粘性偏好; 失败请求不动偏好。
 	if s.app.sticky != nil {
-		s.app.sticky.served(s.logical, s.servedIdx, s.prefIdx, s.stickyBlock, s.stickyLong)
+		s.app.sticky.served(s.logical, s.servedIdx, s.prefIdx, s.stickyLong, s.stickyExp)
 	}
 	s.forward()
 }
@@ -208,10 +211,10 @@ func (s *serveState) pickAttempts() bool {
 	}
 	// 粘性偏好: 把最近成功服务的候选提到候选链首位, 它可用就走它, 不可用才 fallback
 	// 其他候选; 这样同一逻辑名的正常流量粘在同一上游, 缓存不会因每笔都从配置首候选
-	// 开始而被打散。偏好候选不在候选链里 (其上游未配置) 时本笔按顶班处理, 不算真实失败。
-	s.prefIdx = 0
+	// 开始而被打散。
+	s.prefIdx, s.stickyExp = 0, false
 	if s.app.sticky != nil {
-		s.prefIdx = s.app.sticky.prefIdx(s.logical, len(alias))
+		s.prefIdx, s.stickyExp = s.app.sticky.prefIdx(s.logical, len(alias), s.gate.stickyTTL(), time.Now())
 	}
 	prefAt := -1
 	for i := range s.attempts {
@@ -220,9 +223,8 @@ func (s *serveState) pickAttempts() bool {
 			break
 		}
 	}
-	if prefAt == -1 {
-		s.stickyBlock = true // 偏好候选不在链里 (上游未配置): 顶班, 不累计迁移
-	} else if prefAt > 0 {
+	// 偏好候选不在链里 (上游未配置): 本笔按顶班处理, 偏好不动。
+	if prefAt > 0 {
 		at := s.attempts[prefAt]
 		copy(s.attempts[1:prefAt+1], s.attempts[:prefAt])
 		s.attempts[0] = at

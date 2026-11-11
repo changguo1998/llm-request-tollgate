@@ -23,6 +23,7 @@
   ],
   "rate_window_sec": 3600,
   "block_window_sec": 35,
+  "sticky_ttl_sec": 300,
   "probe_enabled": true,
   "upstreams": [
     {
