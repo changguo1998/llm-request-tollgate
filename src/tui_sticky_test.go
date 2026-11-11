@@ -70,6 +70,28 @@ func TestStickyCandsAndMark(t *testing.T) {
 	}
 }
 
+// 粘性页分组标题带倒计时列: 只显剩余时间 (mm:ss), 不带文字前缀; 失效的偏好由服务端
+// 从观测面摘除, 不出现星号也不出现倒计时。
+func TestStickyCountdownColumn(t *testing.T) {
+	m := newTUIModel(stickyFixture(t))
+	m.pulse.Sticky = map[string]stickyView{
+		"m1": {Upstream: "u2", Model: "real-2", RemainingMs: 272000}, // 4 分 32 秒
+	}
+	m.tab = tabSticky
+	frame := m.draw()
+	if !strings.Contains(frame, "04:32") {
+		t.Errorf("窗口内的偏好应显示剩余时长 (不带文字): %q", frame)
+	}
+	for _, bad := range []string{"剩余", "已失效"} {
+		if strings.Contains(frame, bad) {
+			t.Errorf("倒计时不应带文字前缀: %q", bad)
+		}
+	}
+	if strings.Contains(frame, "* u2/real-2b") {
+		t.Errorf("无偏好的 m2 候选不该标 *")
+	}
+}
+
 // 组 (别名的别名) 在 sticky 页与逻辑名并列: 组名作逻辑名列出候选链, 也能置组偏好。
 func TestStickyCandsIncludeGroups(t *testing.T) {
 	cfg := filepath.Join(t.TempDir(), "tollgate.json")

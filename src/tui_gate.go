@@ -13,14 +13,14 @@ import (
 )
 
 // gateLabels 是设置页里 gate 参数的顺序与名字, 与 GateCfg 的字段一一对应;
-// 同类配置归到一起: 调度等待 -> 各锁时长 -> 低性能判定 -> 显示窗口 -> 恢复探测。
+// 同类配置归到一起: 调度等待 -> 各锁时长 -> 低性能判定 -> 显示窗口 -> 粘性失效窗口 -> 恢复探测。
 // 时间字段与配置文件的顶层键一致用秒 (`*_sec`, 可小数), 单位见各 gateText;
 // 退避序列只能用 = 按逗号输入 (秒); probe_enabled 是开关 (0/1 = 关/开)。
 var gateLabels = []string{
 	"interval_sec", "sem_wait_sec", "queue_wait_sec", "retry_backoff_sec",
 	"concurrency_lock_sec", "quota_lock_sec", "breaker_lock_sec", "lowperf_lock_sec",
 	"lowperf_window_sec", "lowperf_peak_max", "lowperf_avg_max", "lowperf_ttfb_max_sec",
-	"rate_window_sec", "block_window_sec", "probe_enabled",
+	"rate_window_sec", "block_window_sec", "sticky_ttl_sec", "probe_enabled",
 }
 
 // gateCN 与 gateLabels 一一对应的中文显示名 (设置页用)。
@@ -28,7 +28,7 @@ var gateCN = []string{
 	"出队间隔", "等并发槽位", "排队上限", "退避序列",
 	"并发锁时长", "额度锁时长", "熔断锁时长", "低性能锁时长",
 	"低性能窗口", "低吞吐峰值", "低吞吐平均", "高延迟阈值",
-	"速度窗口", "采样尺度", "恢复探测",
+	"速度窗口", "采样尺度", "粘性失效窗口", "恢复探测",
 }
 
 // 特殊字段的下标 (code 里按下标分支, 集中在这些常量上, 重排顺序只改 gateLabels/gateCN)。
@@ -37,7 +37,7 @@ const (
 	gateIdxTtfb  = 11 // 高延迟阈值 (0 = 关闭该项)
 	gateIdxPeak  = 9  // 低吞吐峰值门槛 (t/s)
 	gateIdxAvg   = 10 // 低吞吐平均门槛 (t/s)
-	gateIdxProbe = 14 // 恢复探测开关
+	gateIdxProbe = 15 // 恢复探测开关
 )
 
 // gateStep 是 +/- 一次调整的步长 (退避序列返回 0 = 不用加减键)。
@@ -60,6 +60,8 @@ func gateStep(i int) int {
 	case 13:
 		return 5000 // block_window: 每次 5 秒
 	case 14:
+		return 60000 // sticky_ttl: 每次 1 分钟
+	case 15:
 		return 1 // probe_enabled: 每次翻转 0/1
 	}
 	return 0
@@ -97,6 +99,8 @@ func (e *tuiEditor) gateField(i int) int {
 	case 13:
 		return e.blockWinMs
 	case 14:
+		return g.StickyTTLMs
+	case 15:
 		if e.probeOn {
 			return 1
 		}
@@ -157,7 +161,7 @@ func (e *tuiEditor) gateNumUnit(i int) (num, unit string) {
 // isSecField 是否时间类字段 (显示/输入都用秒)。
 func isSecField(i int) bool {
 	switch i {
-	case 0, 1, 2, 4, 5, 6, 7, 8, 11, 12, 13:
+	case 0, 1, 2, 4, 5, 6, 7, 8, 11, 12, 13, 14:
 		return true
 	}
 	return false
@@ -250,6 +254,9 @@ func (e *tuiEditor) adjustGate(delta int) {
 		v = clampInt(v, 1000, 86400000)
 		e.blockWinMs = v
 	case 14:
+		v = clampInt(v, 1000, 86400000)
+		e.gate.StickyTTLMs = v
+	case 15:
 		v = clampInt(v, 0, 1)
 		e.probeOn = v == 1
 	}
@@ -354,6 +361,8 @@ func (e *tuiEditor) setSecField(i, ms int) {
 		e.rateWinMs = ms
 	case 13:
 		e.blockWinMs = ms
+	case 14:
+		e.gate.StickyTTLMs = ms
 	}
 }
 
@@ -416,6 +425,7 @@ func (e *tuiEditor) saveGate() error {
 		"retry_backoff_sec":    msListToSec(g.RetryBackoffMs),
 		"rate_window_sec":      msToSec(e.rateWinMs),
 		"block_window_sec":     msToSec(e.blockWinMs),
+		"sticky_ttl_sec":       msToSec(g.StickyTTLMs),
 		"probe_enabled":        e.probeOn,
 	}
 	for k, v := range flat {

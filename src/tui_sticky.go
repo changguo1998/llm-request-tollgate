@@ -86,7 +86,15 @@ func (m *tuiModel) drawSticky(c *tuiCanvas, body int) {
 	last := ""
 	for i, cand := range cands {
 		if cand.logical != last {
-			lines = append(lines, stickyLine{text: tuiBold + cand.logical + tuiReset, cand: -1})
+			hdr := tuiBold + cand.logical + tuiReset
+			// 倒计时列: 窗口内只显剩余时间 (mm:ss), 不带文字; 失效后该逻辑名已不在
+			// 观测面里, 倒计时与星号都不会出现。
+			if p, ok := m.pulse.Sticky[cand.logical]; ok {
+				if rem := time.Duration(p.RemainingMs) * time.Millisecond; rem > 0 {
+					hdr += "  " + tuiDim + durStr(rem) + tuiReset
+				}
+			}
+			lines = append(lines, stickyLine{text: hdr, cand: -1})
 			last = cand.logical
 		}
 		mark := " "

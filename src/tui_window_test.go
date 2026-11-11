@@ -45,7 +45,7 @@ func TestConfigWindowDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.RateWindowSec != 3600 || c.BlockWindowSec != 35 {
-		t.Fatalf("缺省 rate=%d block=%d, want 3600/35", c.RateWindowSec, c.BlockWindowSec)
+		t.Fatalf("缺省 rate=%v block=%v, want 3600/35", c.RateWindowSec, c.BlockWindowSec)
 	}
 
 	p2 := filepath.Join(dir, "c2.json")
@@ -57,7 +57,7 @@ func TestConfigWindowDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c2.RateWindowSec != 7200 || c2.BlockWindowSec != 10 {
-		t.Fatalf("显式 rate=%d block=%d, want 7200/10", c2.RateWindowSec, c2.BlockWindowSec)
+		t.Fatalf("显式 rate=%v block=%v, want 7200/10", c2.RateWindowSec, c2.BlockWindowSec)
 	}
 }
 
@@ -124,12 +124,45 @@ func TestTUISettingsWindowsEditAndSave(t *testing.T) {
 	}
 }
 
+// settings 页编辑粘性失效窗口 (+/- 每次 1min), 保存写回配置顶层键 sticky_ttl_sec (秒)。
+func TestTUISettingsStickyTtlEditAndSave(t *testing.T) {
+	_, cfg := prioFixture(t)
+	e := newTuiEditor(cfg)
+	if e.gate.StickyTTLMs != 300000 {
+		t.Fatalf("缺省粘性失效窗口应为 300000ms (5min), 实为 %d", e.gate.StickyTTLMs)
+	}
+	e.gateSel = 14 // sticky_ttl_sec (gateLabels 下标)
+	e.adjustGate(1)
+	if e.gate.StickyTTLMs != 300000+60000 {
+		t.Fatalf("粘性失效窗口 +1 应到 %d, 实为 %d", 300000+60000, e.gate.StickyTTLMs)
+	}
+	if !e.gateDirty {
+		t.Fatal("改了应标记未保存")
+	}
+	if err := e.saveGate(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Sticky float64 `json:"sticky_ttl_sec"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Sticky != 360 {
+		t.Fatalf("配置应写回 sticky_ttl_sec=360 (秒), 实为 %v", got.Sticky)
+	}
+}
+
 // colKeep: 整列全是 0 或 - 的列被收掉, 任一格有值则保留。
 func TestColKeepDropsAllZeroAndDash(t *testing.T) {
 	cols := []tuiCol{{title: "排队"}, {title: "上游/模型"}, {title: "连错"}}
 	rows := [][]string{
 		{"0", "ustc", "-"},
-		{"0", "group", "5"},
+		{"0", "group", "-"},
 	}
 	keep := colKeep(cols, rows)
 	if keep[0] || keep[2] {
