@@ -305,3 +305,33 @@ func TestDrawEventsWrapsEventChain(t *testing.T) {
 		t.Errorf("首行超出终端宽度: %q (%d 列)", lines[first], tuiWidth(lines[first]))
 	}
 }
+
+// 事件页窗口按显示行装: 滚动到底时窗口钉在尾部, 只画得下的条目, 位置行写总条数。
+func TestDrawEventsWindowClamps(t *testing.T) {
+	m := newTUIModel("cfg")
+	now := time.Now()
+	for i := 0; i < 10; i++ {
+		m.events = append(m.events, routeEvent{
+			Ts: now.Add(time.Duration(i) * time.Second), Req: uint64(i + 1),
+			Logical: "lg", Kind: "ok", Msg: "ev" + itoa(i),
+		})
+	}
+	m.scroll[tabEvents] = 1 << 20 // G 键式超界滚动, 应被夹到 rows-limit
+	m.tab = tabEvents
+	c := &tuiCanvas{cols: 120}
+	m.drawEvents(c, 6) // limit = body-4 = 2
+	out := stripANSI(c.b.String())
+	if !strings.Contains(out, "10 行, 当前 9-10") {
+		t.Fatalf("位置行应写 10 行与窗口 9-10:\n%s", out)
+	}
+	for _, want := range []string{"ev0", "ev1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("窗口里应看到最早的 %s:\n%s", want, out)
+		}
+	}
+	for _, gone := range []string{"ev9", "ev5"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("窗口外的 %s 不该出现:\n%s", gone, out)
+		}
+	}
+}

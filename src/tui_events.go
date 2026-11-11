@@ -53,21 +53,35 @@ func (m *tuiModel) drawEvents(c *tuiCanvas, body int) {
 		return
 	}
 	limit := max(1, body-4)
-	// 事件列放不下时折行: 续行以 "→ " 开头 (断点只在箭头之前), 并相对该条第一行的
-	// 事件列开头再缩进 eventWrapGap 列; 首段仍走表格对齐, 续行按正文宽度自己排版。
-	const evCol = 2
-	lines := make([][]string, len(rows))
-	cont := strings.Repeat(" ", colOffset(cols, vis, evCol)+eventWrapGap)
-	total := 0
-	for i := range rows {
-		lines[i] = wrapEventMsg(m.colorEventBody(out[i][evCol]), cols[evCol].w)
-		total += len(lines[i])
-		out[i][evCol] = lines[i][0]
-	}
+	lines, total := m.wrapEventRows(out, cols[eventMsgCol].w)
 	top := m.scrollWindow(len(rows), limit)
-	// 滚动仍按条目 (一段链 = 一条), 窗口却按显示行数装: 装不下下一条就停, 至少装一条。
+	end, used := eventWindow(lines, top, limit)
+	top = eventFillBack(lines, top, end, used, limit)
+	tablePosLine(c, len(rows), top, end, total > limit)
+	drawEventWindow(c, out, cols, vis, lines, top, end)
+}
+
+// eventMsgCol 是事件表里正文列的下标 (折行与续行缩进都按它)。
+const eventMsgCol = 2
+
+// wrapEventRows 把每条事件的正文按事件列宽折行: 首段写回 out (仍走表格对齐), 续行
+// 单独返回; 返回折行后的行数组与总显示行数。续行以 "→ " 开头, 断点只落在箭头之前。
+func (m *tuiModel) wrapEventRows(out [][]string, width int) ([][]string, int) {
+	lines := make([][]string, len(out))
+	total := 0
+	for i := range out {
+		lines[i] = wrapEventMsg(m.colorEventBody(out[i][eventMsgCol]), width)
+		total += len(lines[i])
+		out[i][eventMsgCol] = lines[i][0]
+	}
+	return lines, total
+}
+
+// eventWindow 按显示行数装窗口: 滚动仍按条目 (一段链 = 一条), 装不下下一条就停,
+// 至少装一条。返回窗口末尾 (不含) 与已占用的显示行数。
+func eventWindow(lines [][]string, top, limit int) (int, int) {
 	end, used := top, 0
-	for end < len(rows) {
+	for end < len(lines) {
 		n := len(lines[end])
 		if end > top && used+n > limit {
 			break
@@ -75,15 +89,26 @@ func (m *tuiModel) drawEvents(c *tuiCanvas, body int) {
 		used += n
 		end++
 	}
-	// 折行让条目占的行数不一: 到了表尾还没占满窗口时把窗口往上撑, 别在底部留一片空白。
-	for top > 0 && end == len(rows) {
+	return end, used
+}
+
+// eventFillBack 把窗口往上撑: 折行让条目占的行数不一, 到了表尾还没占满窗口时
+// 把前面的条目补进来, 别在底部留一片空白。返回新的窗口起点。
+func eventFillBack(lines [][]string, top, end, used, limit int) int {
+	for top > 0 && end == len(lines) {
 		n := len(lines[top-1])
 		if used+n > limit {
 			break
 		}
 		top, used = top-1, used+n
 	}
-	tablePosLine(c, len(rows), top, end, total > limit)
+	return top
+}
+
+// drawEventWindow 画窗口内的条目: 首段走表格对齐, 续行相对事件列开头缩进
+// (colOffset + eventWrapGap) 列。
+func drawEventWindow(c *tuiCanvas, out [][]string, cols []tuiCol, vis []bool, lines [][]string, top, end int) {
+	cont := strings.Repeat(" ", colOffset(cols, vis, eventMsgCol)+eventWrapGap)
 	for i := top; i < end; i++ {
 		c.line(tuiIndent + strings.Join(alignRow(cols, out[i], vis), tuiColSep))
 		for _, s := range lines[i][1:] {

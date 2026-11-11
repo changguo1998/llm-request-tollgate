@@ -105,10 +105,7 @@ func (m *tuiModel) absorb(line []byte) {
 		return
 	}
 	m.scanned++
-	ts, _ := time.Parse(time.RFC3339Nano, r.Ts)
-	if ts.IsZero() {
-		ts = time.Now()
-	}
+	ts := logRecTS(r)
 	// 第 2 页的事件回放覆盖当日 + 前一日 (按本地日历日, 跨天也能看到昨天的结局);
 	// 第 1 页的聚合统计仍只算回看窗口 (m.window), 与是否跨天无关。
 	if ts.Before(eventReplayFrom(time.Now())) {
@@ -118,6 +115,21 @@ func (m *tuiModel) absorb(line []byte) {
 		m.replayEvent(r, ts)
 		return
 	}
+	m.updateRoute(r, ts)
+	m.replayEvent(r, ts)
+}
+
+// logRecTS 解析日志时间; 解析失败 (或字段缺失) 用当前时刻。
+func logRecTS(r logRec) time.Time {
+	ts, _ := time.Parse(time.RFC3339Nano, r.Ts)
+	if ts.IsZero() {
+		return time.Now()
+	}
+	return ts
+}
+
+// updateRoute 把一条窗口内的日志累加进路由聚合 (计数 / token / 样本 / 首末时间)。
+func (m *tuiModel) updateRoute(r logRec, ts time.Time) {
 	key := r.Logical + "\x00" + r.Upstream + "\x00" + r.Model
 	row := m.routes[key]
 	if row == nil {
@@ -129,33 +141,9 @@ func (m *tuiModel) absorb(line []byte) {
 		row.Errs++
 	}
 	row.Fallbacks += r.Fallbacks
-	now := time.Now()
-	if r.Usage != nil {
-		total := r.Usage.Total
-		if total == 0 {
-			total = r.Usage.Prompt + r.Usage.Completion
-		}
-		row.Prompt += r.Usage.Prompt
-		row.Cached += r.Usage.Cached
-		row.Total += total
-		if r.DurationMs > 0 {
-			if r.Usage.Prompt+r.Usage.Completion > 0 {
-				// 样本按回看窗口 (3h) 保留: 平均看 rateWin, 峰值看整窗口。
-				row.TotalRate = addTok(row.TotalRate,
-					tokPoint{ts: ts, tok: r.Usage.Prompt + r.Usage.Completion, dur: r.DurationMs}, now, m.window)
-			}
-			if r.Bytes > 0 {
-				row.ByteRate = addTok(row.ByteRate,
-					tokPoint{ts: ts, tok: int(r.Bytes), dur: r.DurationMs}, now, m.window)
-			}
-		}
-		if r.DecodeMs > 0 && r.Usage.Completion > 0 {
-			row.DecodeRate = addTok(row.DecodeRate,
-				tokPoint{ts: ts, tok: r.Usage.Completion, dur: r.DecodeMs}, now, m.window)
-		}
-	}
+	m.addUsage(row, r, ts)
 	if r.TtfbMs > 0 {
-		row.TtfbPts = addTtfb(row.TtfbPts, ttfbPoint{ts: ts, ms: r.TtfbMs}, now, m.window)
+		row.TtfbPts = addTtfb(row.TtfbPts, ttfbPoint{ts: ts, ms: r.TtfbMs}, time.Now(), m.window)
 	}
 	if row.First.IsZero() || ts.Before(row.First) {
 		row.First = ts
@@ -163,8 +151,36 @@ func (m *tuiModel) absorb(line []byte) {
 	if ts.After(row.Last) {
 		row.Last = ts
 	}
+}
 
-	m.replayEvent(r, ts)
+// addUsage 累加 token 与三类速率样本: token 总量缺省时用 prompt+completion 兜底,
+// 速率样本按回看窗口 (3h) 保留 (平均看 rateWin, 峰值看整窗口)。
+func (m *tuiModel) addUsage(row *routeRow, r logRec, ts time.Time) {
+	if r.Usage == nil {
+		return
+	}
+	now := time.Now()
+	total := r.Usage.Total
+	if total == 0 {
+		total = r.Usage.Prompt + r.Usage.Completion
+	}
+	row.Prompt += r.Usage.Prompt
+	row.Cached += r.Usage.Cached
+	row.Total += total
+	if r.DurationMs > 0 {
+		if r.Usage.Prompt+r.Usage.Completion > 0 {
+			row.TotalRate = addTok(row.TotalRate,
+				tokPoint{ts: ts, tok: r.Usage.Prompt + r.Usage.Completion, dur: r.DurationMs}, now, m.window)
+		}
+		if r.Bytes > 0 {
+			row.ByteRate = addTok(row.ByteRate,
+				tokPoint{ts: ts, tok: int(r.Bytes), dur: r.DurationMs}, now, m.window)
+		}
+	}
+	if r.DecodeMs > 0 && r.Usage.Completion > 0 {
+		row.DecodeRate = addTok(row.DecodeRate,
+			tokPoint{ts: ts, tok: r.Usage.Completion, dur: r.DecodeMs}, now, m.window)
+	}
 }
 
 // eventReplayFrom 是第 2 页事件回放的起点: 前一日 00:00 (本地日历日), 也就是当日 + 前一日。

@@ -65,22 +65,36 @@ func (m *tuiModel) drawSticky(c *tuiCanvas, body int) {
 		c.line(tuiIndent + tuiYell + "配置读不到: " + err.Error() + tuiReset)
 		return
 	}
-	c.line(tuiTitle + tuiIndent + "粘性偏好 (只置一次, 自动迁移照旧; Enter 置偏好, c 清除)" + tuiReset)
-	if m.stickyMsg != "" {
-		col := tuiGreen
-		if m.stickyErr {
-			col = tuiRed
-		}
-		c.line(tuiIndent + col + m.stickyMsg + tuiReset)
-	} else {
-		c.line("")
-	}
+	m.drawStickyHead(c)
 	if len(cands) == 0 {
 		c.line(tuiDim + tuiIndent + "(配置里没有别名)" + tuiReset)
 		return
 	}
 
 	m.stickySel = clampInt(m.stickySel, 0, len(cands)-1)
+	lines, selLine := m.stickyLines(cands)
+	limit := max(1, body-2) // 标题 + 消息行
+	m.stickyTop = stickyWindow(m.stickyTop, selLine, len(lines), limit)
+	drawStickyLines(c, lines, m.stickyTop, min(m.stickyTop+limit, len(lines)))
+}
+
+// drawStickyHead 画标题与消息行 (没有消息时留一空行, 版式不跳); 消息按成败分色。
+func (m *tuiModel) drawStickyHead(c *tuiCanvas) {
+	c.line(tuiTitle + tuiIndent + "粘性偏好 (只置一次, 自动迁移照旧; Enter 置偏好, c 清除)" + tuiReset)
+	if m.stickyMsg == "" {
+		c.line("")
+		return
+	}
+	col := tuiGreen
+	if m.stickyErr {
+		col = tuiRed
+	}
+	c.line(tuiIndent + col + m.stickyMsg + tuiReset)
+}
+
+// stickyLines 把候选摊成显示行: 逻辑名变化时插一行分组标题 (带偏好倒计时), 候选行
+// 标当前偏好 *; 光标行反显。返回选中行在显示行里的下标。
+func (m *tuiModel) stickyLines(cands []stickyCand) ([]stickyLine, int) {
 	lines := make([]stickyLine, 0, len(cands)+8)
 	selLine := 0
 	last := ""
@@ -109,17 +123,23 @@ func (m *tuiModel) drawSticky(c *tuiCanvas, body int) {
 		}
 		lines = append(lines, stickyLine{text: text, cand: i})
 	}
+	return lines, selLine
+}
 
-	limit := max(1, body-2) // 标题 + 消息行
-	if selLine < m.stickyTop {
-		m.stickyTop = selLine
+// stickyWindow 把窗口夹到选中行附近: 光标在窗口上方就顶齐, 在下方就翻一屏。
+func stickyWindow(top, selLine, nLines, limit int) int {
+	if selLine < top {
+		top = selLine
 	}
-	if selLine >= m.stickyTop+limit {
-		m.stickyTop = selLine - limit + 1
+	if selLine >= top+limit {
+		top = selLine - limit + 1
 	}
-	m.stickyTop = clampScroll(m.stickyTop, len(lines), limit)
-	end := min(m.stickyTop+limit, len(lines))
-	for _, ln := range lines[m.stickyTop:end] {
+	return clampScroll(top, nLines, limit)
+}
+
+// drawStickyLines 画窗口内的显示行: 分组标题用标题色, 候选行缩进。
+func drawStickyLines(c *tuiCanvas, lines []stickyLine, top, end int) {
+	for _, ln := range lines[top:end] {
 		if ln.cand < 0 {
 			c.line(tuiIndent + tuiTitle + ln.text + tuiReset)
 			continue

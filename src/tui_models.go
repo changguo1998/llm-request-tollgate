@@ -77,45 +77,64 @@ func groupCell(g candGroup, isDefault bool) string {
 // 两张表不画标题 (列名行保留), 表与表之间空一行; 只出现实际上游/模型, 不按配置候选铺开;
 // 第二张表的行按逻辑名分组, 组与组之间空一行。
 func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
-	cands := m.sortedCands()
-	// 记账列: 第一列固定是「记账」(默认组), 后面按各行自己声明的组铺开, 列标题留空;
-	// 列数取各行组数的最大值, 组少的行后面留空。行与行之间互不占位。
+	full.line("") // 页顶空一行, 不顶在页签下面
+	m.drawUpstreamTable(full, m.sortedCands())
+	full.line("") // 两张表之间空一行
+	mcols, mrows := dropEmptyCols(modelCols(), m.modelRouteRows())
+	drawTable(full, "", mcols, mrows, 0, len(mrows))
+}
+
+// drawUpstreamTable 画第 1 张表: 上游状态 (并发 / 排队 / 错误 / 记账组锁)。
+// 记账列: 第一列固定是「记账」(默认组), 后面按各行自己声明的组铺开, 列标题留空;
+// 列数取各行组数的最大值, 组少的行后面留空。行与行之间互不占位。
+func (m *tuiModel) drawUpstreamTable(c *tuiCanvas, cands []candView) {
 	maxNamed := 0
 	for _, cand := range cands {
 		if n := namedGroupCount(cand.Groups); n > maxNamed {
 			maxNamed = n
 		}
 	}
-	var urows [][]string
+	rows := make([][]string, 0, len(cands))
 	for _, cand := range cands {
-		conc := strconv.Itoa(cand.InFlight)
-		if cand.Probing {
-			conc += tuiYell + "(+1)" + tuiReset // 试探不占槽位, 单独标出来
-		}
-		conc += "/" + strconv.Itoa(cand.SoftCap)
-		queue := strconv.Itoa(cand.Queue)
-		if cand.Queue > 0 && cand.NextMs > 0 {
-			// 排队的下一个发车时刻直接跟在队数后面 (1/1.0s), 不加方括号: 省两格且列宽稳定。
-			queue += "/" + durStr(time.Duration(cand.NextMs)*time.Millisecond)
-		}
-		var def candGroup
-		var named []candGroup
-		for _, g := range cand.Groups {
-			if g.Name == defaultGroup {
-				def = g
-			} else {
-				named = append(named, g)
-			}
-		}
-		row := []string{m.upName(cand.ID), conc, queue, colorCount(cand.ErrStrk), groupCell(def, true)}
-		for _, g := range named {
-			row = append(row, groupCell(g, false))
-		}
-		for len(row) < 5+maxNamed {
-			row = append(row, "")
-		}
-		urows = append(urows, row)
+		rows = append(rows, m.upstreamRow(cand, maxNamed))
 	}
+	drawTable(c, "", upstreamCols(maxNamed), rows, 0, len(rows))
+}
+
+// upstreamRow 拼上游表的一行: 并发 (试探另标 +1) / 排队 (带下一个发车时刻) /
+// 错误 / 默认组与命名记账组的锁; 组少时补空, 让各行列数一致。
+func (m *tuiModel) upstreamRow(cand candView, maxNamed int) []string {
+	conc := strconv.Itoa(cand.InFlight)
+	if cand.Probing {
+		conc += tuiYell + "(+1)" + tuiReset // 试探不占槽位, 单独标出来
+	}
+	conc += "/" + strconv.Itoa(cand.SoftCap)
+	queue := strconv.Itoa(cand.Queue)
+	if cand.Queue > 0 && cand.NextMs > 0 {
+		// 排队的下一个发车时刻直接跟在队数后面 (1/1.0s), 不加方括号: 省两格且列宽稳定。
+		queue += "/" + durStr(time.Duration(cand.NextMs)*time.Millisecond)
+	}
+	var def candGroup
+	var named []candGroup
+	for _, g := range cand.Groups {
+		if g.Name == defaultGroup {
+			def = g
+		} else {
+			named = append(named, g)
+		}
+	}
+	row := []string{m.upName(cand.ID), conc, queue, colorCount(cand.ErrStrk), groupCell(def, true)}
+	for _, g := range named {
+		row = append(row, groupCell(g, false))
+	}
+	for len(row) < 5+maxNamed {
+		row = append(row, "")
+	}
+	return row
+}
+
+// upstreamCols 是上游表的列: 前 5 列固定, 命名记账组各占一列 (空标题)。
+func upstreamCols(maxNamed int) []tuiCol {
 	cols := []tuiCol{
 		{"上游", tuiWidth("上游"), true, false, 4},
 		// 并发列基准 8 格: 容得下 "3(+1)/10" 这种带超发试探标记的写法。
@@ -128,15 +147,16 @@ func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 	for i := 0; i < maxNamed; i++ {
 		cols = append(cols, tuiCol{"", 0, true, false, 3})
 	}
-	full.line("") // 页顶空一行, 不顶在页签下面
-	drawTable(full, "", cols, urows, 0, len(urows))
-	full.line("") // 两张表之间空一行
+	return cols
+}
 
-	// 合并表: 队列状态 (观测面) + 聚合统计 (日志), 行 = 逻辑名的 上游/真实模型,
-	// 按逻辑名分组: 同一逻辑名的候选排在一起, 组与组之间空一行。不加逻辑名列。
-	var mrows [][]string
+// modelRouteRows 把模型队列与聚合统计拼成第 2 张表的显示行: 行 = 逻辑名的
+// 上游/真实模型, 按逻辑名分组 (组与组之间插一空行), 不加逻辑名列。
+func (m *tuiModel) modelRouteRows() [][]string {
+	var rows [][]string
 	prevLogical := ""
 	first := true
+	now := time.Now()
 	for _, r := range m.modelRows() {
 		// 队列的锁都画在队列表里: 退避 = 黄 (等待), 锁按原因分色 —— 熔断锁 = 红 (错误),
 		// 低性能锁 = 黄 (慢到降级, 与退避同为等待/降级一类, 但分属不同列)。
@@ -146,53 +166,52 @@ func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
 			lockColor = tuiYell
 		}
 		lock := colorDur(r.LockMs, lockColor)
-		// 首字节列写 平均/谷值 (与速率列的 平均/峰值 同一口径): 平均 = rateWin 内
-		// 算术平均, 谷值 = 回看窗口内最低的一次时延。
-		ttfb := "-"
-		if len(r.TtfbPts) > 0 {
-			if avg, ok := ttfbAvg(r.TtfbPts, time.Now(), m.rateWin); ok {
-				ttfb = durStr(time.Duration(avg)*time.Millisecond) + "/" +
-					durStr(time.Duration(ttfbMin(r.TtfbPts))*time.Millisecond)
-			}
-		}
-		// 三种速度都写成 平均/峰值 (rateShow: 平均 = rateWin 内算术平均, 峰值 = 回看窗口
-		// 内单笔最高); 缺字段的格子显示 "-"(2B), 整列全空由 dropEmptyCols 收掉。
-		tps := func(pts []tokPoint) string {
-			if avg, peak, ok := rateShow(pts, time.Now(), m.rateWin, m.window); ok {
-				return humanTPS(avg) + "/" + humanTPS(peak)
-			}
-			return "-"
-		}
-		bsp := func(pts []tokPoint) string {
-			if avg, peak, ok := rateShow(pts, time.Now(), m.rateWin, m.window); ok {
-				return humanByte(avg) + "/" + humanByte(peak)
-			}
-			return "-"
-		}
 		// 粘性偏好标记: 该逻辑名当前粘性选中的候选在 上游/模型 前标 *。所有行统一
 		// 占一个标记位 (非偏好行补空格), 模型名从同一列开始, 不让 * 把对齐顶歪。
 		marker := " "
 		if p, ok := m.pulse.Sticky[r.logical]; ok && p.Upstream == r.up && p.Model == r.model {
 			marker = "*"
 		}
-		cell := marker + m.upModel(r.up, r.model)
 		// 与 modelCols 的顺序一一对应 (dropEmptyCols 按下标裁列)。
 		if !first && r.logical != prevLogical {
-			mrows = append(mrows, nil) // 组间隔一空行 (视觉分组, 不占列)
+			rows = append(rows, nil) // 组间隔一空行 (视觉分组, 不占列)
 		}
 		first = false
 		prevLogical = r.logical
-		mrows = append(mrows, []string{
-			cell,
+		rows = append(rows, []string{
+			marker + m.upModel(r.up, r.model),
 			strconv.Itoa(r.Queue), paused, lock,
 			// 缓存命中与总 token 合成一格 (cached/total)。
-			humanTokens(r.Cached) + "/" + humanTokens(r.Total), ttfb,
-			tps(r.DecodeRate), tps(r.TotalRate), bsp(r.ByteRate),
+			humanTokens(r.Cached) + "/" + humanTokens(r.Total),
+			ttfbCell(r.TtfbPts, now, m.rateWin),
+			rateCell(r.DecodeRate, now, m.rateWin, m.window, humanTPS),
+			rateCell(r.TotalRate, now, m.rateWin, m.window, humanTPS),
+			rateCell(r.ByteRate, now, m.rateWin, m.window, humanByte),
 			mages(r.Last),
 		})
 	}
-	mcols, mrows := dropEmptyCols(modelCols(), mrows)
-	drawTable(full, "", mcols, mrows, 0, len(mrows))
+	return rows
+}
+
+// ttfbCell 拼首字节格: 平均/谷值 (平均看 rateWin, 谷值看整窗口); 没样本时 "-"。
+func ttfbCell(pts []ttfbPoint, now time.Time, rateWin time.Duration) string {
+	if len(pts) == 0 {
+		return "-"
+	}
+	avg, ok := ttfbAvg(pts, now, rateWin)
+	if !ok {
+		return "-"
+	}
+	return durStr(time.Duration(avg)*time.Millisecond) + "/" +
+		durStr(time.Duration(ttfbMin(pts))*time.Millisecond)
+}
+
+// rateCell 拼速率格: 平均/峰值; human 决定单位写法 (t/s 或 B/s), 没样本时 "-"。
+func rateCell(pts []tokPoint, now time.Time, rateWin, window time.Duration, human func(float64) string) string {
+	if avg, peak, ok := rateShow(pts, now, rateWin, window); ok {
+		return human(avg) + "/" + human(peak)
+	}
+	return "-"
 }
 
 // modelCols 是第 1 页模型/路由聚合表的列: 按类别从左到右排, 同类相邻 ——
@@ -261,21 +280,41 @@ func (m *tuiModel) sweepRoutes() {
 // 引用关系先查配置 aliases: 只要某逻辑名的候选链包含该 (上游/模型), 就归到那个组
 // (即使窗口内没日志); 配置里也找不到的才落空逻辑名组 (排最末)。
 func (m *tuiModel) modelRows() []*modelRow {
-	by := map[string]*modelRow{}
-	get := func(logical, up, model string) *modelRow {
-		k := logical + "\x00" + up + "\x00" + model
-		r := by[k]
-		if r == nil {
-			r = &modelRow{logical: logical, up: up, model: model}
-			by[k] = r
+	by := modelRowIndex{}
+	m.mergeRouteRows(by)
+	m.mergeCandRows(by, m.aliasOwners())
+	out := make([]*modelRow, 0, len(by))
+	for _, r := range by {
+		if r.blank() {
+			continue // 全是 0 / - 的行没有信息量 (只是配置里有这个模型), 不占版面
 		}
-		return r
+		out = append(out, r)
 	}
+	sortModelRows(out)
+	return out
+}
+
+// modelRowIndex 是 逻辑名/上游/模型 -> 聚合行 的索引, get 按需建行。
+type modelRowIndex map[string]*modelRow
+
+func (ix modelRowIndex) get(logical, up, model string) *modelRow {
+	k := logical + "\x00" + up + "\x00" + model
+	r := ix[k]
+	if r == nil {
+		r = &modelRow{logical: logical, up: up, model: model}
+		ix[k] = r
+	}
+	return r
+}
+
+// mergeRouteRows 把日志聚合累加进索引: 同一 逻辑名/上游/模型 的分片合并, 样本按切片
+// 拼接, 最近时间取极值。没路由到任何上游的记录 (如 unknown model) 不属于模型视角。
+func (m *tuiModel) mergeRouteRows(by modelRowIndex) {
 	for _, rr := range m.routes {
 		if rr.Upstream == "" && rr.Model == "" {
-			continue // 没路由到任何上游的记录 (如 unknown model) 不属于模型视角
+			continue
 		}
-		r := get(rr.Logical, rr.Upstream, rr.Model)
+		r := by.get(rr.Logical, rr.Upstream, rr.Model)
 		r.Reqs += rr.Reqs
 		r.Errs += rr.Errs
 		r.Fallbacks += rr.Fallbacks
@@ -289,59 +328,62 @@ func (m *tuiModel) modelRows() []*modelRow {
 			r.Last = rr.Last
 		}
 	}
-	// 配置归属: (上游, 真实模型) -> 引用它的逻辑名们 (候选链顺序不算顺序, 只数集合)。
-	// 组 (别名的别名) 展开后与逻辑名同属一张候选表, 组名也是引用它的逻辑名。
-	// 配置读不到 (如 -tui 时 cfgPath 缺失) 为 nil, 退回纯日志分组的老行为。
-	aliasGroups := map[string][]string{}
-	if c, err := loadConfigOpt(m.cfgPath, true); err == nil {
-		for logical, list := range c.expandedAliases() {
-			for _, tgt := range list {
-				k := tgt[0] + "\x00" + tgt[1]
-				aliasGroups[k] = append(aliasGroups[k], logical)
-			}
+}
+
+// aliasOwners 读配置的候选链, 返回 (上游, 真实模型) -> 引用它的逻辑名们 (候选链顺序
+// 不算顺序, 只数集合)。组 (别名的别名) 展开后与逻辑名同属一张候选表, 组名也是引用它的
+// 逻辑名。配置读不到 (如 -tui 时 cfgPath 缺失) 返回空表, 退回纯日志分组的老行为。
+func (m *tuiModel) aliasOwners() map[string][]string {
+	owner := map[string][]string{}
+	c, err := loadConfigOpt(m.cfgPath, true)
+	if err != nil {
+		return owner
+	}
+	for logical, list := range c.expandedAliases() {
+		for _, tgt := range list {
+			k := tgt[0] + "\x00" + tgt[1]
+			owner[k] = append(owner[k], logical)
 		}
 	}
+	return owner
+}
+
+// mergeCandRows 把观测面的队列 / 锁状态补进索引, 已有同 上游/模型 的行 (任意逻辑名)
+// 一起更新; 窗口内没有日志行时按配置归属补到每个引用者; 配置里也没有的 (上游/模型)
+// 落空逻辑名组, 只带观测面状态、垫在最末。
+func (m *tuiModel) mergeCandRows(by modelRowIndex, owners map[string][]string) {
 	for _, cand := range m.pulse.Cands {
 		for _, md := range cand.Models {
-			// 队列状态补到所有引用该 (上游/模型) 的逻辑名组; 窗口内没有任何日志归属时,
-			// 按配置候选链找引用它的逻辑名们 (同一个逻辑名不管有没有记录都归一组),
-			// 配置里也没有才落空逻辑名组 (只有观测面状态、没路由去向的模型也要看得到)。
 			found := false
 			for _, r := range by {
 				if r.up == cand.ID && r.model == md.Model {
-					r.Queue, r.Fails, r.PausedMs, r.LockMs = md.Queue, md.Fails, md.PausedMs, md.LeftMs
-					r.LockWhy = md.Why
+					applyCandState(r, md)
 					found = true
 				}
 			}
 			if found {
 				continue
 			}
-			k := cand.ID + "\x00" + md.Model
-			owners := aliasGroups[k]
-			if len(owners) == 0 {
-				// 配置里也没有这个 (上游/模型): 只有观测面状态, 单独垫底一组。
-				r := get("", cand.ID, md.Model)
-				r.Queue, r.Fails, r.PausedMs, r.LockMs = md.Queue, md.Fails, md.PausedMs, md.LeftMs
-				r.LockWhy = md.Why
-				continue
+			logs := owners[cand.ID+"\x00"+md.Model]
+			if len(logs) == 0 {
+				logs = []string{""}
 			}
-			for _, logical := range owners {
-				r := get(logical, cand.ID, md.Model)
-				r.Queue, r.Fails, r.PausedMs, r.LockMs = md.Queue, md.Fails, md.PausedMs, md.LeftMs
-				r.LockWhy = md.Why
+			for _, logical := range logs {
+				applyCandState(by.get(logical, cand.ID, md.Model), md)
 			}
 		}
 	}
-	out := make([]*modelRow, 0, len(by))
-	for _, r := range by {
-		if r.blank() {
-			continue // 全是 0 / - 的行没有信息量 (只是配置里有这个模型), 不占版面
-		}
-		out = append(out, r)
-	}
-	// 组间: 有逻辑名的按组内最近请求时间降序 (常用的在前), 空逻辑名 (只观测面) 垫底;
-	// 组内: 最近时间降序, 同刻按请求数 / 上游 / 模型兜底 (与旧的混排口径一致)。
+}
+
+// applyCandState 把一条模型锁状态写进聚合行。
+func applyCandState(r *modelRow, md candModelLock) {
+	r.Queue, r.Fails, r.PausedMs, r.LockMs = md.Queue, md.Fails, md.PausedMs, md.LeftMs
+	r.LockWhy = md.Why
+}
+
+// sortModelRows 组间: 有逻辑名的按组内最近请求时间降序 (常用的在前), 空逻辑名 (只观测面)
+// 垫底; 组内: 最近时间降序, 同刻按请求数 / 上游 / 模型兜底 (与旧的混排口径一致)。
+func sortModelRows(out []*modelRow) {
 	groupLast := map[string]time.Time{}
 	for _, r := range out {
 		if r.logical != "" && r.Last.After(groupLast[r.logical]) {
@@ -371,7 +413,6 @@ func (m *tuiModel) modelRows() []*modelRow {
 			return out[i].model < out[j].model
 		}
 	})
-	return out
 }
 
 // scrollWindow 把该页的滚动位置夹进实际行数, 返回窗口第一行 —— 空表与 G 键 (设成很大)

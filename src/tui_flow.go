@@ -54,6 +54,20 @@ func (m *tuiModel) flowRows() [][]string {
 // 每段写「短词 耗时」; 没到过的阶段不出现在链里。当前阶段实时走, 卡住原因 / 接收中的实时
 // 吞吐 / 该段的结局词写在链尾 (链尾就是这条尝试走到的地方)。
 func (m *tuiModel) stageChain(f flow, tr flowTry) string {
+	chain := strings.Join(m.stageTokens(f, tr), stageSep)
+	tail := m.stageTail(f, tr)
+	if len(tail) == 0 {
+		return chain
+	}
+	if chain == "" {
+		return strings.Join(tail, " ")
+	}
+	return chain + " " + strings.Join(tail, " ")
+}
+
+// stageTokens 把到过的阶段按流程顺序拼成链首, 每段写「短词 耗时」: 当前段实时走
+// (不满 1s 也写), 已结束且不满 1s 的段不写耗时; 没到过的阶段不出现。
+func (m *tuiModel) stageTokens(f flow, tr flowTry) []string {
 	reach := func(st int) bool {
 		return tr.Cur == st || (st < len(tr.Segs) && tr.Segs[st] > 0)
 	}
@@ -67,7 +81,6 @@ func (m *tuiModel) stageChain(f flow, tr flowTry) string {
 		}
 		return sec
 	}
-	// 耗时: 当前这段实时走 (不满 1s 也写), 已经结束的一段不满 1s 就不写时间。
 	dur := func(st int) string {
 		sec := secOf(st)
 		if tr.Cur != st && sec < 1 {
@@ -99,7 +112,11 @@ func (m *tuiModel) stageChain(f flow, tr flowTry) string {
 	if reach(stageRecv) {
 		toks = append(toks, "recv"+dur(stageRecv))
 	}
-	chain := strings.Join(toks, stageSep)
+	return toks
+}
+
+// stageTail 是链尾 (这条尝试走到的地方): 卡住原因 / 接收中的实时吞吐 / 结局词。
+func (m *tuiModel) stageTail(f flow, tr flowTry) []string {
 	var tail []string
 	if tr.Cur >= 0 && isGateDetail(f.Gate) {
 		tail = append(tail, f.Gate)
@@ -112,13 +129,7 @@ func (m *tuiModel) stageChain(f flow, tr flowTry) string {
 	if tr.Fail != "" {
 		tail = append(tail, colorTryFail(tr.Fail))
 	}
-	if len(tail) > 0 {
-		if chain != "" {
-			chain += " "
-		}
-		chain += strings.Join(tail, " ")
-	}
-	return chain
+	return tail
 }
 
 // liveTps 是接收中这一笔的实时吞吐, 只写一个: 优先解码 (已收到的输出 token / 首字节

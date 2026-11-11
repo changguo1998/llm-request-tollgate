@@ -18,21 +18,40 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 		c.line(tuiIndent + tuiYell + "设置页未装载" + tuiReset)
 		return
 	}
-	gateLines := 1 + len(gateLabels)
+	e.vis = 1
+	col1 := m.settingsParamsCol(e, body)
+	col2, col3 := m.settingsModelCols(e, body)
+	m.settingsGrid(c, col1, col2, col3, body)
+	c.line(m.prioMessage(e))
+}
+
+// settingsParamsCol 画第 1 列: 全局参数 + 供应商。供应商高度 = 内容区去掉参数区与
+// 固定留白, 超出的不画; 配置读不到时只显示错误。
+func (m *tuiModel) settingsParamsCol(e *tuiEditor, body int) []string {
 	provH := 0
 	if e.usable() {
-		provH = min(len(e.providers), max(1, body-gateLines-7))
+		provH = min(len(e.providers), max(1, body-(1+len(gateLabels))-7))
 	}
-	// 模型列独立铺满内容区: 标题 1 行 + 底部消息行 1 行, 其余行全部给模型 (可滚动),
-	// 不再被第 1 列的高度公式压短。滚动窗口与可见行数按"显示行" (含分组标题) 在第
-	// 2 列构建时计算, 这里只先取过滤后的模型行。
-	rows := e.filtered()
-	e.vis = 1
+	col1 := m.settingsGateLines(e, body)
+	col1 = append(col1, "")
+	col1 = append(col1, settingsTitle("供应商", e.focus == 1))
+	if !e.usable() {
+		return append(col1, tuiYell+e.err+tuiReset)
+	}
+	for i, name := range e.providers {
+		if i >= provH {
+			break
+		}
+		col1 = append(col1, m.settingsProviderLine(e, i, name))
+	}
+	return col1
+}
 
-	// ---- 第 1 列: 全局参数 + 供应商 ----
+// settingsGateLines 画全局参数区: 标签左对齐; 冒号后补齐到固定数字列, 数字右对齐
+// (小数点/最后一位对齐), 单位第一字母对齐; 焦点行反显, 正在输入时换编辑底色。
+func (m *tuiModel) settingsGateLines(e *tuiEditor, body int) []string {
 	col1 := make([]string, 0, body)
 	col1 = append(col1, settingsTitle("全局参数", e.focus == 2))
-	// 标签左对齐; 冒号后补齐到固定数字列, 数字右对齐 (小数点/最后一位对齐), 单位第一字母对齐。
 	labelW := 0
 	for i := range gateLabels {
 		if w := tuiWidth(gateCN[i]); w > labelW {
@@ -59,29 +78,28 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 		}
 		col1 = append(col1, text)
 	}
-	col1 = append(col1, "")
-	col1 = append(col1, settingsTitle("供应商", e.focus == 1))
-	if e.usable() {
-		for i, name := range e.providers {
-			if i >= provH {
-				break
-			}
-			attr := ""
-			if e.focus == 1 && i == e.provSel {
-				attr = tuiRev
-			}
-			prio := prioOf(e.provEntry(name))
-			state := ""
-			if prio < 0 {
-				state = " (停用)"
-			}
-			col1 = append(col1, attr+tuiIndent+m.upNameAttr(name, attr)+"  priority="+strconv.Itoa(prio)+state+tuiReset)
-		}
-	} else {
-		col1 = append(col1, tuiYell+e.err+tuiReset)
-	}
+	return col1
+}
 
-	// ---- 第 2 列: 模型 (按逻辑名分组, 与 sticky 页同款: 组与组之间用逻辑名隔开) ----
+// settingsProviderLine 画一行供应商: 名字带专属色, 优先级与停用标记跟在后面。
+func (m *tuiModel) settingsProviderLine(e *tuiEditor, i int, name string) string {
+	attr := ""
+	if e.focus == 1 && i == e.provSel {
+		attr = tuiRev
+	}
+	prio := prioOf(e.provEntry(name))
+	state := ""
+	if prio < 0 {
+		state = " (停用)"
+	}
+	return attr + tuiIndent + m.upNameAttr(name, attr) + "  priority=" + strconv.Itoa(prio) + state + tuiReset
+}
+
+// settingsModelCols 画第 2 / 3 列: 模型列表按逻辑名分组后横向分两栏, 连续铺排。
+// 模型列独立铺满内容区: 标题 1 行 + 底部消息行 1 行, 其余行全部给模型 (可滚动),
+// 不再被第 1 列的高度公式压短。
+func (m *tuiModel) settingsModelCols(e *tuiEditor, body int) ([]string, []string) {
+	rows := e.filtered()
 	col2 := make([]string, 0, body)
 	hidden := len(e.droplist())
 	flt := e.filter
@@ -90,18 +108,32 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 	}
 	t := "模型 (过滤: " + flt + ", " + strconv.Itoa(len(rows)) + " 个, 黑名单剔除 " + strconv.Itoa(hidden) + ")"
 	col2 = append(col2, settingsTitle(t, e.focus == 0))
-	// 显示行: 逻辑名变化时先插一行加粗分组标题 (不可选, 只作分隔), 组内模型行缩进;
-	// 光标只落在模型行上, 分组标题跟随组内第一行一起滚动。
-	type prioLine struct {
-		row  int // 模型行在 rows 里的下标; -1 = 逻辑名分组标题
-		text string
-	}
-	lines := make([]prioLine, 0, len(rows)+8)
+	lines, selLine := m.settingsModelLines(e, rows)
+	window := settingsScrollWindow(e, len(lines), len(rows), body, selLine)
+	// 两栏都从 e.scrollTop 开始连续铺: 左栏前 window 行, 右栏续后 window 行。
+	llen := min(e.scrollTop+window, len(lines))
+	rlen := min(e.scrollTop+2*window, len(lines))
+	col2 = settingsPane(col2, lines, e.scrollTop, llen)
+	col3 := settingsPane(make([]string, 0, body), lines, e.scrollTop+window, rlen)
+	return col2, col3
+}
+
+// settingsLine 是模型列表的一显示行: row >= 0 是模型行 (rows 下标), -1 是分组标题。
+type settingsLine struct {
+	row  int
+	text string
+}
+
+// settingsModelLines 把过滤后的模型行摊成显示行: 逻辑名变化时先插一行加粗分组标题
+// (不可选, 只作分隔), 组内模型行缩进; 光标只落在模型行上。组 (别名的别名) 是手工
+// 维护的配置, 不进 store, 也不参与权重编辑 —— 只读列在末尾。返回选中行的显示下标。
+func (m *tuiModel) settingsModelLines(e *tuiEditor, rows []tuiPrioRow) ([]settingsLine, int) {
+	lines := make([]settingsLine, 0, len(rows)+8)
 	selLine := -1
 	last := ""
 	for i, row := range rows {
 		if row.alias != last {
-			lines = append(lines, prioLine{row: -1, text: tuiBold + row.alias + tuiReset})
+			lines = append(lines, settingsLine{row: -1, text: tuiBold + row.alias + tuiReset})
 			last = row.alias
 		}
 		attr := ""
@@ -111,29 +143,31 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 		// M 后的模型优先级按 2 列右对齐 (负号也算 1 列), 与负数并排时不顶格。
 		text := "  M" + tuiPadLeft(strconv.Itoa(prioOf(row.model)), 2) + " P" + strconv.Itoa(prioOf(row.entry)) +
 			" " + m.upNameAttr(row.provider, attr) + "/" + modelID(row.model)
-		lines = append(lines, prioLine{row: i, text: attr + text + tuiReset})
+		lines = append(lines, settingsLine{row: i, text: attr + text + tuiReset})
 		if i == e.modelSel {
 			selLine = len(lines) - 1
 		}
 	}
-	// 组 (别名的别名) 是手工维护的配置, 不进 store, 也不参与权重编辑 —— 只读列出,
-	// 让组名与成员在设置页可见。组名作为逻辑名使用, 成员按配置顺序展示。
 	if groups, ok := e.groups(); ok && len(groups) > 0 {
-		lines = append(lines, prioLine{row: -1, text: tuiBold + "组 (别名的别名, 只读)" + tuiReset})
+		lines = append(lines, settingsLine{row: -1, text: tuiBold + "组 (别名的别名, 只读)" + tuiReset})
 		for _, g := range groups {
-			lines = append(lines, prioLine{row: -1,
+			lines = append(lines, settingsLine{row: -1,
 				text: "  " + tuiBold + g.name + tuiReset + " <- " + strings.Join(g.members, ", ")})
 		}
 	}
-	// 滚动窗口按显示行算: 模型列表横向分两栏, 一屏 = 2*window 个显示行 (左栏 +
-	// 右栏), 选中行始终钉在这屏里 (焦点在模型面板时)。
+	return lines, selLine
+}
+
+// settingsScrollWindow 按显示行算滚动窗口: 模型列表横向分两栏, 一屏 = 2*window 个
+// 显示行 (左栏 + 右栏), 选中行始终钉在这屏里 (焦点在模型面板时); 返回每栏行数。
+func settingsScrollWindow(e *tuiEditor, nLines, nRows, body, selLine int) int {
 	window := max(1, body-2)
-	if len(lines) > 0 {
-		window = min(window, len(lines))
+	if nLines > 0 {
+		window = min(window, nLines)
 	}
 	e.vis = max(1, window)
 	if e.focus == 0 && selLine >= 0 {
-		e.modelSel = clampInt(e.modelSel, 0, max(0, len(rows)-1))
+		e.modelSel = clampInt(e.modelSel, 0, max(0, nRows-1))
 		span := 2 * window
 		if selLine < e.scrollTop {
 			e.scrollTop = selLine
@@ -142,37 +176,36 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 			e.scrollTop = selLine - span + 1
 		}
 	}
-	if e.scrollTop > max(0, len(lines)-1) {
-		e.scrollTop = max(0, len(lines)-1)
+	if e.scrollTop > max(0, nLines-1) {
+		e.scrollTop = max(0, nLines-1)
 	}
-	// 两栏都从 e.scrollTop 开始连续铺: 左栏前 window 行, 右栏续后 window 行。
-	appendPrio := func(dst []string, from, to int) []string {
-		if from < 0 {
-			from = 0
-		}
-		if to > len(lines) {
-			to = len(lines)
-		}
-		if from >= to { // 窗口完全落在显示行之外 (含空列表) 时没有内容
-			return dst
-		}
-		for _, ln := range lines[from:to] {
-			if ln.row < 0 {
-				dst = append(dst, tuiIndent+tuiTitle+ln.text+tuiReset)
-				continue
-			}
-			dst = append(dst, tuiIndent+ln.text)
-		}
+	return window
+}
+
+// settingsPane 取显示行的一段拼成列内容: 分组标题用标题色, 模型行缩进。
+func settingsPane(dst []string, lines []settingsLine, from, to int) []string {
+	if from < 0 {
+		from = 0
+	}
+	if to > len(lines) {
+		to = len(lines)
+	}
+	if from >= to { // 窗口完全落在显示行之外 (含空列表) 时没有内容
 		return dst
 	}
-	llen := min(e.scrollTop+window, len(lines))
-	rlen := min(e.scrollTop+2*window, len(lines))
-	col2 = appendPrio(col2, e.scrollTop, llen)
-	col3 := appendPrio(make([]string, 0, body), e.scrollTop+window, rlen)
+	for _, ln := range lines[from:to] {
+		if ln.row < 0 {
+			dst = append(dst, tuiIndent+tuiTitle+ln.text+tuiReset)
+			continue
+		}
+		dst = append(dst, tuiIndent+ln.text)
+	}
+	return dst
+}
 
-	// 三列并排 (模型列表占第 2 / 3 两列): 第 1 列按内容宽, 模型两栏平分剩余宽度,
-	// 顶到终端右边界; 内容区不足的行补空, 让三列贴满整个内容高度 (中间空白),
-	// 消息行固定落在内容区最底一行。
+// settingsGrid 三列并排 (模型列表占第 2 / 3 两列): 第 1 列按内容宽, 模型两栏平分
+// 剩余宽度, 顶到终端右边界; 内容区不足的行补空, 让三列贴满整个内容高度。
+func (m *tuiModel) settingsGrid(c *tuiCanvas, col1, col2, col3 []string, body int) {
 	w1 := colWidth(col1)
 	w2 := max(6, (m.cols-2-w1-3)/2)
 	w3 := max(6, m.cols-2-w1-2-w2-1)
@@ -180,7 +213,6 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 	for i := 0; i < gridH; i++ {
 		c.line(tuiPad(atSlice(col1, i), w1) + " " + tuiPad(atSlice(col2, i), w2) + " " + tuiPad(atSlice(col3, i), w3))
 	}
-	c.line(m.prioMessage(e))
 }
 
 // atSlice 取切片第 i 项, 越界给空串 (各列行数不同时补空)。

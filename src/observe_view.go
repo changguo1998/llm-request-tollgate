@@ -46,78 +46,100 @@ func (a *App) candViews() []candView {
 	now := time.Now()
 	out := make([]candView, 0, len(cands))
 	for _, c := range cands {
-		c.mu.Lock()
-		v := candView{
-			ID: c.id, Queue: c.queued(), InFlight: c.inFlight, SoftCap: c.softCap,
-			Probing: c.probing,
-		}
-		for _, g := range c.modelGates {
-			if g.fails > v.ErrStrk {
-				v.ErrStrk = g.fails
-			}
-			if left := g.pausedUntil.Sub(now); left > 0 && msCeil(left) > v.PausedMs {
-				v.PausedMs = msCeil(left)
-			}
-		}
-		// 额度锁按组记, 上游行给出最久的那一把 (老消费方还看这个汇总值)。
-		for _, l := range c.groupLocks {
-			if left := l.left(now); left > 0 && msCeil(left) > v.LockMs {
-				v.LockMs, v.LockWhy = msCeil(left), l.reason
-			}
-		}
-		// 记账列: 声明过的组都列出来 (没锁也列, 组名要当表头), 无 models 的上游只有默认组。
-		names := order[c.id]
-		if len(names) == 0 {
-			names = []string{defaultGroup}
-		}
-		for _, name := range names {
-			g := candGroup{Name: name}
-			if l, ok := c.groupLocks[name]; ok {
-				g.LockMs = msCeil(l.left(now))
-			}
-			v.Groups = append(v.Groups, g)
-		}
-		// 模型视角: 只列真正进过队列的 上游/模型 (队列已空但曾经有过请求的也算),
-		// 不按逻辑名或配置里的候选清单铺开。
-		models := map[string]*candModelLock{}
-		ensure := func(m string) *candModelLock {
-			if x := models[m]; x != nil {
-				return x
-			}
-			x := &candModelLock{Model: m}
-			models[m] = x
-			return x
-		}
-		for m := range c.seen {
-			ensure(m)
-		}
-		for m, q := range c.modelQ {
-			ensure(m).Queue = len(q)
-		}
-		for model, g := range c.modelGates {
-			x := ensure(model)
-			x.Fails = g.fails
-			if left := g.pausedUntil.Sub(now); left > 0 {
-				x.PausedMs = msCeil(left)
-			}
-			if left := g.lock.left(now); left > 0 {
-				x.LeftMs, x.Why = msCeil(left), g.lock.reason
-			}
-		}
-		for _, x := range models {
-			v.Models = append(v.Models, *x)
-		}
-		sort.Slice(v.Models, func(i, j int) bool { return v.Models[i].Model < v.Models[j].Model })
-		if left := c.concLock.left(now); left > 0 {
-			v.ConcMs = msCeil(left)
-		}
-		if left := c.nextSend.Sub(now); left > 0 {
-			v.NextMs = msCeil(left)
-		}
-		c.mu.Unlock()
-		out = append(out, v)
+		out = append(out, c.view(order[c.id], now))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// view 锁住一个候选读出瞬时状态: 队列计数 + 汇总锁 + 记账组 + 模型视角。
+func (c *cand) view(groups []string, now time.Time) candView {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	v := candView{
+		ID: c.id, Queue: c.queued(), InFlight: c.inFlight, SoftCap: c.softCap,
+		Probing: c.probing,
+	}
+	c.aggLocks(&v, now)
+	v.Groups = c.groupView(groups, now)
+	v.Models = c.modelView(now)
+	if left := c.concLock.left(now); left > 0 {
+		v.ConcMs = msCeil(left)
+	}
+	if left := c.nextSend.Sub(now); left > 0 {
+		v.NextMs = msCeil(left)
+	}
+	return v
+}
+
+// aggLocks 汇总该上游最坏的连错 / 退避 / 组额度锁; 额度锁按组记, 上游行给出最久的
+// 那一把 (老消费方还看这个汇总值)。
+func (c *cand) aggLocks(v *candView, now time.Time) {
+	for _, g := range c.modelGates {
+		if g.fails > v.ErrStrk {
+			v.ErrStrk = g.fails
+		}
+		if left := g.pausedUntil.Sub(now); left > 0 && msCeil(left) > v.PausedMs {
+			v.PausedMs = msCeil(left)
+		}
+	}
+	for _, l := range c.groupLocks {
+		if left := l.left(now); left > 0 && msCeil(left) > v.LockMs {
+			v.LockMs, v.LockWhy = msCeil(left), l.reason
+		}
+	}
+}
+
+// groupView 是记账列的快照: 声明过的组都列出来 (没锁也列, 组名要当表头), 无 models
+// 的上游只有默认组。
+func (c *cand) groupView(names []string, now time.Time) []candGroup {
+	if len(names) == 0 {
+		names = []string{defaultGroup}
+	}
+	out := make([]candGroup, 0, len(names))
+	for _, name := range names {
+		g := candGroup{Name: name}
+		if l, ok := c.groupLocks[name]; ok {
+			g.LockMs = msCeil(l.left(now))
+		}
+		out = append(out, g)
+	}
+	return out
+}
+
+// modelView 是模型视角的快照: 只列真正进过队列的 上游/模型 (队列已空但曾经有过请求的
+// 也算), 不按逻辑名或配置里的候选清单铺开; 按模型 id 排序。
+func (c *cand) modelView(now time.Time) []candModelLock {
+	models := map[string]*candModelLock{}
+	ensure := func(m string) *candModelLock {
+		if x := models[m]; x != nil {
+			return x
+		}
+		x := &candModelLock{Model: m}
+		models[m] = x
+		return x
+	}
+	for m := range c.seen {
+		ensure(m)
+	}
+	for m, q := range c.modelQ {
+		ensure(m).Queue = len(q)
+	}
+	for model, g := range c.modelGates {
+		x := ensure(model)
+		x.Fails = g.fails
+		if left := g.pausedUntil.Sub(now); left > 0 {
+			x.PausedMs = msCeil(left)
+		}
+		if left := g.lock.left(now); left > 0 {
+			x.LeftMs, x.Why = msCeil(left), g.lock.reason
+		}
+	}
+	out := make([]candModelLock, 0, len(models))
+	for _, x := range models {
+		out = append(out, *x)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })
 	return out
 }
 

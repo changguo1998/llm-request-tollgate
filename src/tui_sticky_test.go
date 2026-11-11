@@ -212,3 +212,78 @@ func TestStickyPagePostFailure(t *testing.T) {
 		t.Errorf("失败应写红色消息: %q err=%v", m.stickyMsg, m.stickyErr)
 	}
 }
+
+// 偏好页的空态与出错态: 配置读不到只报错不 panic; 没有别名时给出提示。
+// 消息行按成功/失败分色。
+func TestDrawStickyEmptyAndError(t *testing.T) {
+	bad := newTUIModel(filepath.Join(t.TempDir(), "nope.json"))
+	c := &tuiCanvas{cols: 80}
+	bad.drawSticky(c, 10)
+	if out := stripANSI(c.b.String()); !strings.Contains(out, "配置读不到: ") {
+		t.Errorf("配置读不到时应报错:\n%s", out)
+	}
+
+	cfg := filepath.Join(t.TempDir(), "empty.json")
+	if err := os.WriteFile(cfg, []byte(`{"listen":"127.0.0.1:0","upstreams":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newTUIModel(cfg)
+	c = &tuiCanvas{cols: 80}
+	m.drawSticky(c, 10)
+	if out := stripANSI(c.b.String()); !strings.Contains(out, "(配置里没有别名)") {
+		t.Errorf("没有别名时应给提示:\n%s", out)
+	}
+
+	m.stickyMsg = "已置偏好"
+	m.stickyErr = false
+	c = &tuiCanvas{cols: 80}
+	m.drawSticky(c, 10)
+	if raw := c.b.String(); !strings.Contains(raw, tuiGreen+"已置偏好"+tuiReset) {
+		t.Errorf("成功消息应为绿色: %q", raw)
+	}
+	m.stickyErr = true
+	c = &tuiCanvas{cols: 80}
+	m.drawSticky(c, 10)
+	if raw := c.b.String(); !strings.Contains(raw, tuiRed+"已置偏好"+tuiReset) {
+		t.Errorf("失败消息应为红色: %q", raw)
+	}
+}
+
+// 偏好页按显示行滚动: 光标走到底部时窗口跟着走, 只画最后几组。
+func TestDrawStickyScrollWindow(t *testing.T) {
+	dir := t.TempDir()
+	var models []string
+	for i := 0; i < 12; i++ {
+		name := "a" + itoa(i)
+		if i < 10 {
+			name = "a0" + itoa(i) // 等宽名字, 字典序与数值序一致
+		}
+		models = append(models, `{"id":"r`+itoa(i)+`","alias":"`+name+`"}`)
+	}
+	cfg := filepath.Join(dir, "tollgate.json")
+	body := `{"listen":"127.0.0.1:0","upstreams":[{"id":"u1","base_url":"http://x",
+	  "models":[` + strings.Join(models, ",") + `]}]}`
+	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newTUIModel(cfg)
+	m.stickySel = 11
+	const bodyRows = 8 // 标题 + 消息行, 列表窗口 6 行
+	c := &tuiCanvas{cols: 80}
+	m.drawSticky(c, bodyRows)
+	// 显示行 = 12 个分组标题 + 12 个候选 = 24; 选中下标 11 的行在第 23 行。
+	if want := 23 - 6 + 1; m.stickyTop != want {
+		t.Fatalf("滚动位置应为 %d, 得到 %d", want, m.stickyTop)
+	}
+	out := stripANSI(c.b.String())
+	for _, gone := range []string{"a00", "a08"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("已滚出窗口的 %s 不该出现:\n%s", gone, out)
+		}
+	}
+	for _, want := range []string{"a09", "a10", "a11"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("窗口里应看到 %s:\n%s", want, out)
+		}
+	}
+}
