@@ -11,12 +11,12 @@ import (
 // 从日志里读, 服务不为 TUI 记账、不写状态文件。
 
 const (
-	viewVer     = "tollgate-state/1" // 观测面版本 (TUI 用它判断对端是不是这个接口)
+	viewVer     = "tollgate-state/2" // 观测面版本 (TUI 用它判断对端是不是这个接口)
 	viewEvents  = 2048               // 事件环容量 (阶段事件每笔数条, 环要大些才接得住一轮)
 	viewActives = 512                // 进行中请求的上限 (防泄漏兜底, 正常远低于此)
 )
 
-// 请求所处阶段: 与调度器的真实步骤一一对应 (TUI 第 1 页按它分块)。
+// 请求所处阶段: 与调度器的真实步骤一一对应 (TUI 第 1 页按它逐列展示)。
 // 顺序即流程顺序, 别随意调换。
 const (
 	stageParse     = iota // 已解析出逻辑名, 还没进候选链
@@ -46,15 +46,22 @@ type flow struct {
 	RecvTok   int       `json:"recv_tok,omitempty"`   // 接收中: 已收到的输出 token 数 (流式估算)
 	RecvBytes int64     `json:"recv_bytes,omitempty"` // 接收中: 已转发的响应字节数 (流式)
 	RecvStart int64     `json:"recv_start,omitempty"` // 接收中: 首字节到达时刻 (Unix 毫秒)
-	// 耗时列的分段数据: Segs 是各阶段已结算的累计耗时 (秒, 下标 = stage*), 当前阶段
-	// 还没结算 (只记在 stageAt 里), TUI 用 CurAt 现算这一段; MaxStage 是到过的最远
-	// 阶段, TUI 据此决定括号里写几段 (没到过的阶段不补 0)。
-	Segs     []float64 `json:"segs,omitempty"`
-	CurAt    int64     `json:"cur_at,omitempty"`
-	MaxStage int       `json:"max_stage,omitempty"`
+	// Tries 是这笔请求的每一次尝试 (换候选 / 同候选重试就多一段): 第 1 页一段一行。
+	Tries []flowTry `json:"tries,omitempty"`
 
-	stageAt  time.Time         // 进入当前阶段的时刻 (阶段耗时统计用, 不出 JSON)
-	stageDur [stageCount]int64 // 各阶段已结算的累计耗时 (纳秒, 下标 = stage*)
+	stageAt time.Time // 进入当前阶段的时刻 (当前一段的该阶段耗时现算用, 不出 JSON)
+}
+
+// flowTry 是一次尝试: 到过各阶段的已结算耗时 (秒, 下标 = stage*), 当前阶段与其进入
+// 时刻 (TUI 现算这一格), 以及结束时的结局词。Cur < 0 = 这一段已结束。
+type flowTry struct {
+	Up    string    `json:"upstream,omitempty"`
+	Model string    `json:"backend,omitempty"`
+	Segs  []float64 `json:"segs,omitempty"`
+	Cur   int       `json:"cur"`
+	CurAt int64     `json:"cur_at,omitempty"`
+	Stop  int       `json:"stop,omitempty"` // 停在哪个阶段 (Fail 非空时有意义)
+	Fail  string    `json:"fail,omitempty"` // 结局词: fail(502) / reject(quota 05:00)
 }
 
 // viewEvent 是事件流的一条: 调度器动作 + 每笔请求的阶段与结局 (由引擎侧发出, 不经日志回读)。
@@ -125,39 +132,8 @@ type pulse struct {
 	Sticky map[string]stickyView `json:"sticky,omitempty"`
 }
 
-// stageName 是屏幕上「状态」那一列: 只写变化的部分 (在等什么 / 卡在哪一步)。
-// 所处阶段由块标题说明 (并发池 / 频率队列 / 状态锁 / 已发送 / 接收中 / 已失败),
-// 标题与所在位置覆盖得到的不重复写 (在频率队列里 = 在等出队, 在已发送块 = 已发出),
-// 这里只留真正卡住的原因: 额度锁 / 熔断锁 / 低性能锁 / 退避的倒计时 (解析中一闪而过也保留)。
-func stageName(f flow) string {
-	switch f.Stage {
-	case stageParse:
-		return "解析中"
-	case stageSem:
-		return "" // 块标题「并发池」已说明
-	case stageQueue:
-		if isGateDetail(f.Gate) {
-			return f.Gate // 排队期间撞上的锁 / 退避: 为什么没出队
-		}
-		return "" // 在频率队列里就说明在等出队节拍
-	case stageModelWait:
-		if isGateDetail(f.Gate) {
-			return f.Gate // 退避 … / 熔断锁 … / 低性能锁 … / 额度锁 …
-		}
-		return "" // 块标题「状态锁」已说明
-	case stageRecv:
-		return "" // 块标题「接收中」已说明
-	case stageFailed:
-		return "" // 块标题「已失败」已说明
-	}
-	if isGateDetail(f.Gate) {
-		return f.Gate
-	}
-	return "" // 已发送块: 已发出由位置说明, 同一位置没有别的内容就是已发出
-}
-
-// isGateDetail 判断 Gate 是不是值得在状态列单独写的细节: 锁与退避是「为什么卡住」的
-// 原因; 等节拍 (在队列里必然在等) 与 已发出 (已发送块已隐含) 不写。
+// isGateDetail 判断 Gate 是不是值得写在链尾的细节: 锁与退避是「为什么卡住」的
+// 原因; 等节拍 (在队列里必然在等) 与 已发出 (发送阶段本身已说明) 不写。
 func isGateDetail(g string) bool {
 	for _, p := range []string{"额度锁", "熔断锁", "低性能锁", "退避"} {
 		if strings.HasPrefix(g, p) {

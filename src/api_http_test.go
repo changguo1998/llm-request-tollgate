@@ -104,7 +104,7 @@ func TestUnknownModelEmitsErrorEvent(t *testing.T) {
 		t.Fatal("应有一条收尾事件")
 	}
 	last := evs[len(evs)-1]
-	if last.Kind != "error" || last.Msg != "parse -> fail(404)" {
+	if last.Kind != "error" || last.Msg != "parse → fail(404)" {
 		t.Errorf("未知模型应记 404 收尾事件, 得到 %+v", last)
 	}
 	if last.Req == 0 || last.Logical != "nope" {

@@ -11,19 +11,20 @@ import (
 	"time"
 )
 
-// flowActives 拷贝当前进行中的请求 (按开始时间升序), 顺手把耗时列要的分段数据换成
-// 秒 (JSON 里的 stageDur 是内部纳秒记账, 不出原始数组)。
+// flowActives 拷贝当前进行中的请求 (按开始时间升序): 每段尝试的 Segs 已是秒, 已结算;
+// 当前阶段的进入时刻填进 CurAt (JSON 里的 stageAt 是内部记账, 不出原始时刻)。
 func (a *App) flowActives() []flow {
 	a.flowMu.Lock()
 	out := make([]flow, 0, len(a.flows))
 	for _, f := range a.flows {
 		v := *f
-		v.Segs = make([]float64, stageCount)
-		for st := 0; st < stageCount; st++ {
-			v.Segs[st] = time.Duration(v.stageDur[st]).Seconds()
+		v.Tries = make([]flowTry, len(f.Tries))
+		copy(v.Tries, f.Tries)
+		for i := range v.Tries {
+			v.Tries[i].Segs = append([]float64(nil), f.Tries[i].Segs...)
 		}
-		if !v.stageAt.IsZero() {
-			v.CurAt = v.stageAt.UnixMilli()
+		if n := len(v.Tries); n > 0 && v.Tries[n-1].Cur >= 0 && !f.stageAt.IsZero() {
+			v.Tries[n-1].CurAt = f.stageAt.UnixMilli()
 		}
 		out = append(out, v)
 	}

@@ -1,5 +1,5 @@
 // observe_stage_test.go: 事件的阶段战报与结局 —— 请求编号可回溯, 正文按短词表
-// (from(参数) -> to(参数), new/switch/retry -> sem, 结局 fail/reject/ok)。
+// (from(参数) → to(参数), new/switch/retry → sem, 结局 fail/reject/ok)。
 package main
 
 import (
@@ -26,12 +26,12 @@ func TestFlowStageNarrative(t *testing.T) {
 	o.finish(200)
 
 	want := []string{
-		"new(gpt-5) -> sem(u1)",
-		"sem(u1) -> freq(u1)",
-		"freq(u1) -> queue(u1/real-1)",
-		"queue(u1/real-1) -> send",
-		"send -> recv",
-		"recv -> ok(200)",
+		"new(gpt-5) → sem(u1)",
+		"sem(u1) → freq(u1)",
+		"freq(u1) → queue(u1/real-1)",
+		"queue(u1/real-1) → send",
+		"send → recv",
+		"recv → ok(200)",
 	}
 	evs := stageMsgs(a)
 	if len(evs) != len(want) {
@@ -71,10 +71,10 @@ func TestFlowStageSwitchNarrative(t *testing.T) {
 	if len(evs) != 7 {
 		t.Fatalf("应共 7 条 (切换 5 条 + 失败 1 条 + switch 1 条), 得到 %d: %+v", len(evs), evs)
 	}
-	if got, want := evs[len(evs)-1].Msg, "switch(u2/real-2) -> sem(u2)"; got != want {
+	if got, want := evs[len(evs)-1].Msg, "switch(u2/real-2) → sem(u2)"; got != want {
 		t.Errorf("换候选文案应为 %q, 得到 %q", want, got)
 	}
-	if got, want := evs[len(evs)-2].Msg, "send -> fail(503)"; got != want {
+	if got, want := evs[len(evs)-2].Msg, "send → fail(503)"; got != want {
 		t.Errorf("失败结局应为 %q, 得到 %q", want, got)
 	}
 }
@@ -90,10 +90,10 @@ func TestFlowStageRetryNarrative(t *testing.T) {
 	o.stage(stageSem) // 重试同一候选: acquire 重新报 sem
 
 	evs := stageMsgs(a)
-	if got, want := evs[len(evs)-1].Msg, "retry(u1/real-1) -> sem(u1)"; got != want {
+	if got, want := evs[len(evs)-1].Msg, "retry(u1/real-1) → sem(u1)"; got != want {
 		t.Errorf("重试文案应为 %q, 得到 %q", want, got)
 	}
-	if got, want := evs[len(evs)-2].Msg, "send -> fail(connection)"; got != want {
+	if got, want := evs[len(evs)-2].Msg, "send → fail(connection)"; got != want {
 		t.Errorf("失败结局应为 %q, 得到 %q", want, got)
 	}
 }
@@ -109,8 +109,8 @@ func TestFlowOutcomeReject(t *testing.T) {
 
 	evs := stageMsgs(a)
 	want := []string{
-		"sem -> reject(breaker 05:00)",
-		"sem -> reject(backoff-timeout)",
+		"sem → reject(breaker 05:00)",
+		"sem → reject(backoff-timeout)",
 	}
 	if len(evs) != 3 {
 		t.Fatalf("应有 3 条事件, 得到 %d: %+v", len(evs), evs)
@@ -122,7 +122,7 @@ func TestFlowOutcomeReject(t *testing.T) {
 	}
 }
 
-// 模型找不到: 没有候选可试, 收尾补 parse -> fail(404), 不重复。
+// 模型找不到: 没有候选可试, 收尾补 parse → fail(404), 不重复。
 func TestFlowFinishModelNotFound(t *testing.T) {
 	a := newTestApp(t, "http://127.0.0.1:1", GateCfg{}, nil)
 	id := a.flowStart("gpt-5", "", "/v1/chat/completions", true)
@@ -134,7 +134,7 @@ func TestFlowFinishModelNotFound(t *testing.T) {
 	if len(evs) != 1 {
 		t.Fatalf("没有候选时应有 1 条收尾, 得到 %d: %+v", len(evs), evs)
 	}
-	if got, want := evs[0].Msg, "parse -> fail(404)"; got != want {
+	if got, want := evs[0].Msg, "parse → fail(404)"; got != want {
 		t.Errorf("收尾应为 %q, 得到 %q", want, got)
 	}
 	if evs[0].Kind != "error" {
@@ -177,5 +177,73 @@ func TestLowPerfLockEventText(t *testing.T) {
 		if evs[i].Upstream != "u1" || evs[i].Model != "real-1" {
 			t.Errorf("第 %d 条应挂 u1/real-1, 得到 %+v", i+1, evs[i])
 		}
+	}
+}
+
+// 观测面的每尝试数据: 换候选 / 同候选重试各算一段, 每段记各阶段耗时与结局词;
+// 回退后的新段从并发池重新开始 (Cur 与 Segs 都是新的一份)。
+func TestFlowTriesPerAttempt(t *testing.T) {
+	a := newTestApp(t, "http://127.0.0.1:1", GateCfg{}, nil)
+	id := a.flowStart("gpt-5", "", "/v1/chat/completions", true)
+	o := &flowObs{a: a, id: id, logical: "gpt-5", up: "u1", model: "real-1"}
+	o.mark(0)
+	o.stage(stageSend)
+	o.mark(502) // 候选失败
+	o.outcome(stageSend, "fail", "502")
+	o.up, o.model = "u2", "real-2"
+	o.attempt++
+	o.mark(0) // 换到下一个候选
+	o.stage(stageQueue)
+
+	act := a.flowActives()
+	if len(act) != 1 {
+		t.Fatalf("应有一笔进行中, 得到 %d", len(act))
+	}
+	tries := act[0].Tries
+	if len(tries) != 2 {
+		t.Fatalf("换一次候选应有两段尝试, 得到 %d: %+v", len(tries), tries)
+	}
+	first := tries[0]
+	if first.Up != "u1" || first.Model != "real-1" || first.Cur != -1 {
+		t.Errorf("第一段应已结束并记住候选: %+v", first)
+	}
+	if first.Fail != "fail(502)" || first.Stop != stageSend {
+		t.Errorf("第一段应记结局词与停下的阶段: %+v", first)
+	}
+	if len(first.Segs) != stageCount || first.Segs[stageSend] <= 0 {
+		t.Errorf("第一段应记发送阶段的耗时: %+v", first.Segs)
+	}
+	second := tries[1]
+	if second.Up != "u2" || second.Cur != stageQueue {
+		t.Errorf("第二段应从并发池重新开始, 当前在频率队列: %+v", second)
+	}
+	if second.CurAt == 0 {
+		t.Errorf("当前阶段应带进入时刻: %+v", second)
+	}
+	if second.Segs[stageSend] != 0 {
+		t.Errorf("新的一段不该沿用上一段的耗时: %+v", second.Segs)
+	}
+}
+
+// 同候选重试也算新的一段: 从发送之后退回并发池, 尝试数不变也要另起一段。
+func TestFlowTriesSameCandidateRetry(t *testing.T) {
+	a := newTestApp(t, "http://127.0.0.1:1", GateCfg{}, nil)
+	id := a.flowStart("gpt-5", "", "/v1/chat/completions", true)
+	o := &flowObs{a: a, id: id, logical: "gpt-5", up: "u1", model: "real-1"}
+	o.mark(0)
+	o.stage(stageSend)
+	o.mark(-1) // 传输失败
+	o.outcome(stageSend, "fail", "connection")
+	o.stage(stageSem) // 同一候选重试
+
+	tries := a.flowActives()[0].Tries
+	if len(tries) != 2 {
+		t.Fatalf("同候选重试也应另起一段, 得到 %d: %+v", len(tries), tries)
+	}
+	if tries[0].Fail != "fail(connection)" || tries[0].Cur != -1 {
+		t.Errorf("上一段应记传输失败并结束: %+v", tries[0])
+	}
+	if tries[1].Cur != stageSem || tries[1].Up != "u1" {
+		t.Errorf("新的一段应仍在同一候选, 从并发池重新开始: %+v", tries[1])
 	}
 }

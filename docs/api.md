@@ -224,20 +224,21 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
   `backend` / `stage` / `attempt` / `gate`; 接收中的流式请求另带 `recv_tok` (已收到的
   输出 token 估计数)、`recv_bytes` (已转发的响应字节数) 与 `recv_start` (首字节到达时刻,
   Unix 毫秒), 后三个用来算这笔的实时吞吐 (解码 / 总 / 下载三种, 不加前缀: 解码与下载从
-  首字节起算, 总用请求开始时刻 `start`); 耗时列另带
-  `segs` (各阶段已结算的累计耗时, 秒, 下标 =
-  `stage`)、`cur_at` (当前阶段进入时刻, Unix 毫秒, TUI 用它现算正在走的那一段) 与
-  `max_stage` (到过的最远阶段, TUI 据此决定写几段).
+  首字节起算, 总用请求开始时刻 `start`); `tries` 是这笔请求的每一次尝试 (换候选 / 同候选
+  重试就多一段), 每段带 `upstream` / `backend` / `segs` (该段各阶段已结算耗时, 秒, 下标 =
+  `stage`) / `cur` (当前阶段, `-1` = 该段已结束) / `cur_at` (当前阶段进入时刻, Unix 毫秒,
+  TUI 用它现算正在走的那一格) / `stop` (失败停在哪个阶段) / `fail` (结局词
+  `fail(502)` / `reject(quota 05:00)`); 观测面版本 `tollgate-state/2`.
 "- `events` 每条: `seq` / `ts` / `kind` / `req` (跨重启唯一的请求编号, 省略 = 不挂某笔请求) /
   `logical` / `upstream` / `model` / `msg`. `kind`: `stage` (请求阶段战报, 短词链
-  `from(参数) -> to(参数)`: 进 sem 是 `new(逻辑名) / switch(新候选) / retry(候选) -> sem(供应商)`, 之后
-  `sem -> freq -> queue(候选) -> send -> recv`) / `ok` (成功收尾 `recv -> ok(200)`) /
-  `error` (每段候选失败的结局: `send -> fail(归类词|状态码|connection)` 或
-  `sem -> reject(原因)`, 请求整体结局 = 链上最后一条) / `gate` (进入退避 `backoff`) /
+  `from(参数) → to(参数)`: 进 sem 是 `new(逻辑名) / switch(新候选) / retry(候选) → sem(供应商)`, 之后
+  `sem → freq → queue(候选) → send → recv`) / `ok` (成功收尾 `recv → ok(200)`) /
+  `error` (每段候选失败的结局: `send → fail(归类词|状态码|connection)` 或
+  `sem → reject(原因)`, 请求整体结局 = 链上最后一条) / `gate` (进入退避 `backoff`) /
   `lock` (`lock(quota 组名 05:00)` / `lock(breaker 05:00)` /
   `lock(lowperf peak 2.0 / avg 1.0 t/s 05:00 | ttfb 45s 05:00)`) / `unlock` (到期恢复
-  `unlock`, 人工解锁 `unlock(manual N)`) / `probe` (开始 `probe`, 通过 `probe -> ok`, 失败
-  `probe -> fail(request|transport|http 502|ttfb 45s) -> lock(原因 05:00)`) / `start` / `reload`.
+  `unlock`, 人工解锁 `unlock(manual N)`) / `probe` (开始 `probe`, 通过 `probe → ok`, 失败
+  `probe → fail(request|transport|http 502|ttfb 45s) → lock(原因 05:00)`) / `start` / `reload`.
   阶段战报与收尾带 `req` + `logical`; 锁 / 探测 / 启动没有 `req`, 消费方按 `upstream` /
   `model` 显示. 仅仅首字节慢、没有触发锁的请求不发事件. TUI 显示时把同一秒内同一请求的
   `stage` / `ok` / `error` 事件折叠成一条链 (桥接阶段去重, 取信息量更多的表达), 跨秒拆条;
