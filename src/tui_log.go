@@ -8,17 +8,22 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"time"
 )
 
 // pollLog 读日志: 归档文件 (跨天) 整体扫一遍, 当前文件增量读。
 // 与 -summary / -usage 取同样的文件范围 (logFilesFor 的窗口), 这样看到的不是"从本次启动起"。
+// 文件按名字排序后再读: 归档 (<base>-<日期>.jsonl) 排在当前文件 (<base>.jsonl) 之前,
+// 于是按时间先后入账; 事件环只留最近若干条, 读入顺序决定留下的那批是不是最新的。
 func (m *tuiModel) pollLog() {
 	if m.logPath == "" {
 		return
 	}
-	for _, f := range logFilesFor(m.logPath, tuiScanWindow) {
+	files := logFilesFor(m.logPath, tuiScanWindow)
+	sort.Strings(files)
+	for _, f := range files {
 		current := filepath.Clean(f) == filepath.Clean(m.logPath)
 		if !current {
 			if m.scannedFiles[filepath.Clean(f)] { // 归档不会再变, 扫过就跳过
@@ -100,8 +105,14 @@ func (m *tuiModel) absorb(line []byte) {
 		m.durSum += r.DurationMs
 		m.durN++
 	}
+	// 第 2 页的事件回放覆盖当日 + 前一日 (按本地日历日, 跨天也能看到昨天的结局);
+	// 第 1 页的聚合统计仍只算回看窗口 (m.window), 与是否跨天无关。
+	if ts.Before(eventReplayFrom(time.Now())) {
+		return // 前一日之前的记录: 两张表都不展示
+	}
 	if age := time.Since(ts); age > m.window {
-		return // 窗口外的记录不算 (日志文件按 mtime 已粗筛过, 这里再按时间精筛)
+		m.replayEvent(r, ts)
+		return
 	}
 	key := r.Logical + "\x00" + r.Upstream + "\x00" + r.Model
 	row := m.routes[key]
@@ -149,8 +160,18 @@ func (m *tuiModel) absorb(line []byte) {
 		row.Last = ts
 	}
 
-	// 事件: 只挑改变了程序状态的那些 (闸门挡下 / 错误 / 换候选 / 排队); 文案与引擎侧
-	// 结局事件同一短词表。回放只有日志里的一行, 还原不了整条链, 只写结局形态。
+	m.replayEvent(r, ts)
+}
+
+// eventReplayFrom 是第 2 页事件回放的起点: 前一日 00:00 (本地日历日), 也就是当日 + 前一日。
+func eventReplayFrom(now time.Time) time.Time {
+	return time.Date(now.Year(), now.Month(), now.Day()-1, 0, 0, 0, 0, now.Location())
+}
+
+// replayEvent 从一条日志记录还原一条第 2 页事件: 只挑改变了程序状态的那些 (闸门挡下 /
+// 错误 / 换候选 / 排队); 文案与引擎侧结局事件同一短词表。日志一请求一行, 还原不了整条链,
+// 只写结局形态。
+func (m *tuiModel) replayEvent(r logRec, ts time.Time) {
 	switch {
 	case r.Gate != "":
 		m.addEvent(routeEvent{Ts: ts, Req: r.Req, Kind: "gate", Logical: r.Logical, Upstream: r.Upstream,

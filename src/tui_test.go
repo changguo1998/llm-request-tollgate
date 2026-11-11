@@ -277,3 +277,34 @@ func TestSweepRoutes(t *testing.T) {
 		t.Errorf("应剩 2 行, 得到 %d: %+v", len(m.routes), m.routes)
 	}
 }
+
+// 第 2 页的事件回放覆盖当日 + 前一日 (跨天也能看到昨天的结局); 第 1 页的聚合统计
+// 仍只算回看窗口 (3h), 与是否跨天无关。
+func TestEventReplayRangeAndStatsWindow(t *testing.T) {
+	now := time.Now()
+	line := func(ts time.Time) []byte {
+		return []byte(`{"ts":"` + ts.Format(time.RFC3339Nano) +
+			`","logical":"m1","upstream":"u1","model":"r1","path":"/v1/chat/completions","status":200,"queued":true}`)
+	}
+	cases := []struct {
+		name      string
+		ts        time.Time
+		wantRow   bool
+		wantEvent bool
+	}{
+		{"回看窗口内", now.Add(-2 * time.Hour), true, true},
+		{"前一日内但超出回看窗口", now.Add(-4 * time.Hour), false, true},
+		{"前一日之前", eventReplayFrom(now).Add(-time.Minute), false, false},
+	}
+	for _, c := range cases {
+		m := newTUIModel("cfg")
+		m.window = 3 * time.Hour
+		m.absorb(line(c.ts))
+		_, hasRow := m.routes["m1\x00u1\x00r1"]
+		hasEvent := len(m.events) == 1
+		if hasRow != c.wantRow || hasEvent != c.wantEvent {
+			t.Errorf("%s: 聚合行 %v (期望 %v), 事件 %v (期望 %v)",
+				c.name, hasRow, c.wantRow, hasEvent, c.wantEvent)
+		}
+	}
+}
