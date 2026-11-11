@@ -36,25 +36,51 @@ func tableHead(cols []tuiCol, vis []bool) string {
 	return tuiIndent + tuiBold + strings.Join(alignRow(cols, head, vis), tuiColSep) + tuiReset
 }
 
-// drawTable 画一张表: 标题行 + 表头 + 行 + 滚动位置 + 单位行 (标题与单位是灰字, 空表也画)。
-func drawTable(c *tuiCanvas, title string, cols []tuiCol, rows [][]string, scroll, limit int) {
-	cols, vis := tableLayout(cols, rows, c.cols)
+// tableTop 画标题行与列名行 (空表也画, 版式不跳)。
+func tableTop(c *tuiCanvas, title string, cols []tuiCol, vis []bool) {
 	if title != "" {
 		c.line(tuiDim + tuiIndent + title + tuiReset)
 	}
 	c.line(tableHead(cols, vis))
+}
+
+// tableEmptyLine 是空表的占位行。
+func tableEmptyLine(c *tuiCanvas) {
+	c.line(tuiDim + "  (空)" + tuiReset)
+}
+
+// tablePosLine 画滚动位置行: 总行数 + 当前窗口范围 (1 基), 只有内容高过窗口 (taller) 才画。
+// 它画在行之前: 内容高过屏幕时画布会裁尾部, 放最后就会被裁掉 (行比位置重要, 所以裁的是行)。
+func tablePosLine(c *tuiCanvas, total, top, end int, taller bool) {
+	if !taller {
+		return
+	}
+	c.line(tuiDim + "  " + strconv.Itoa(total) + " 行, 当前 " +
+		strconv.Itoa(top+1) + "-" + strconv.Itoa(end) + tuiReset)
+}
+
+// colOffset 是第 i 列在屏幕上的起点列 (0 基): 缩进 + 前面各可见列的列宽与列间距。
+func colOffset(cols []tuiCol, vis []bool, i int) int {
+	n := len(tuiIndent)
+	for j := 0; j < i && j < len(cols); j++ {
+		if vis[j] {
+			n += cols[j].w + tuiColGap
+		}
+	}
+	return n
+}
+
+// drawTable 画一张表: 标题行 + 表头 + 行 + 滚动位置 (标题与位置是灰字, 空表也画)。
+func drawTable(c *tuiCanvas, title string, cols []tuiCol, rows [][]string, scroll, limit int) {
+	cols, vis := tableLayout(cols, rows, c.cols)
+	tableTop(c, title, cols, vis)
 	if len(rows) == 0 {
-		c.line(tuiDim + "  (空)" + tuiReset)
+		tableEmptyLine(c)
 		return
 	}
 	top := clampScroll(scroll, len(rows), limit)
 	end := min(top+limit, len(rows))
-	// 位置行画在行之前: 内容高过屏幕时画布会裁尾部, 放最后就会被裁掉 (行比位置重要,
-	// 所以裁的是行, 不是它)。
-	if len(rows) > limit {
-		c.line(tuiDim + "  " + strconv.Itoa(len(rows)) + " 行, 当前 " +
-			strconv.Itoa(top+1) + "-" + strconv.Itoa(end) + tuiReset)
-	}
+	tablePosLine(c, len(rows), top, end, len(rows) > limit)
 	for i := top; i < end; i++ {
 		c.line(tuiIndent + strings.Join(alignRow(cols, rows[i], vis), tuiColSep))
 	}
