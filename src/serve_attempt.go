@@ -22,34 +22,7 @@ func (s *serveState) attemptLoop() {
 		s.obs.mark(0)
 		// pref: 正在处理的是不是本笔的偏好候选 (排位首位那个)。
 		pref := at.idx == s.prefIdx
-		if at.cd == nil {
-			s.obs.outcome(stageSem, "reject", "disabled")
-			s.noteFailure(fmt.Errorf("upstream %s has no scheduler", at.up.ID), at.up.ID, at.mod)
-			continue
-		}
-		if locked, left, reason := at.cd.locked(at.mod, at.group); locked {
-			// 锁内不真发 (该模型的熔断锁 / 它所属组的额度锁), 直接换下一个候选。
-			// 若这是恢复态 (锁已到期待探测通过): 后台顺手发起一笔恢复探测, 请求本身
-			// 仍照锁定规则进下一个候选, 不等待结果。
-			s.app.kickRecovery(at.cd, at.mod, at.group)
-			// 偏好候选被长期锁 (额度 / 低性能 / 熔断) 顶班: 成功后直接迁移偏好。
-			if pref && stickyLongLock(reason) {
-				s.stickyLong = true
-			}
-			s.obs.outcome(stageSem, "reject", lockParam(reason, left))
-			s.noteFailure(fmt.Errorf("upstream %s locked for %s (%s)",
-				at.up.ID, left.Round(time.Second), reason), at.up.ID, at.mod)
-			s.noteLeft(left)
-			s.lockedSkips++
-			continue
-		}
-		if paused, left := at.cd.paused(at.mod); paused {
-			// 该模型正在退避: 不进它的队列白等 (退避比排队预算长), 直接换候选。
-			s.obs.outcome(stageSem, "reject", "backoff "+durStr(left))
-			s.noteFailure(fmt.Errorf("upstream %s/%s backing off for %s",
-				at.up.ID, at.mod, left.Round(time.Second)), at.up.ID, at.mod)
-			s.noteLeft(left)
-			s.backoffSkips++
+		if s.skipCandidate(at, pref) {
 			continue
 		}
 		// /v1/responses 没有 stream_options, 不做 include_usage 注入 (用量本就在响应里)。
@@ -66,43 +39,54 @@ func (s *serveState) attemptLoop() {
 	}
 }
 
+// skipCandidate 处理三种不发请求就换候选的情况: 没调度器 / 锁内 / 退避中。
+// 返回 true 表示本候选已跳过。
+func (s *serveState) skipCandidate(at attempt, pref bool) bool {
+	if at.cd == nil {
+		s.obs.outcome(stageSem, "reject", "disabled")
+		s.noteFailure(fmt.Errorf("upstream %s has no scheduler", at.up.ID), at.up.ID, at.mod)
+		return true
+	}
+	if locked, left, reason := at.cd.locked(at.mod, at.group); locked {
+		// 锁内不真发 (该模型的熔断锁 / 它所属组的额度锁), 直接换下一个候选。
+		// 若这是恢复态 (锁已到期待探测通过): 后台顺手发起一笔恢复探测, 请求本身
+		// 仍照锁定规则进下一个候选, 不等待结果。
+		s.app.kickRecovery(at.cd, at.mod, at.group)
+		// 偏好候选被长期锁 (额度 / 低性能 / 熔断) 顶班: 成功后直接迁移偏好。
+		if pref && stickyLongLock(reason) {
+			s.stickyLong = true
+		}
+		s.obs.outcome(stageSem, "reject", lockParam(reason, left))
+		s.noteFailure(fmt.Errorf("upstream %s locked for %s (%s)",
+			at.up.ID, left.Round(time.Second), reason), at.up.ID, at.mod)
+		s.noteLeft(left)
+		s.lockedSkips++
+		return true
+	}
+	if paused, left := at.cd.paused(at.mod); paused {
+		// 该模型正在退避: 不进它的队列白等 (退避比排队预算长), 直接换候选。
+		s.obs.outcome(stageSem, "reject", "backoff "+durStr(left))
+		s.noteFailure(fmt.Errorf("upstream %s/%s backing off for %s",
+			at.up.ID, at.mod, left.Round(time.Second)), at.up.ID, at.mod)
+		s.noteLeft(left)
+		s.backoffSkips++
+		return true
+	}
+	return false
+}
+
 // tryCandidate 在一个候选上重试到出结果: 退避后回到出队就是重新排队, 退避长过排队上限时
 // 自然变成 queue_timeout, 于是换下一个候选。
 func (s *serveState) tryCandidate(at attempt, body []byte) {
 	a := s.app
 	for {
-		// 每轮都重建出站请求: 上一轮的 body 已经被读过, 复用同一个 Request 会带空体。
-		outReq, err := http.NewRequestWithContext(s.r.Context(), s.r.Method,
-			at.up.BaseURL+s.upPath, bytes.NewReader(body))
+		outReq, err := s.outboundRequest(at, body)
 		if err != nil {
 			s.noteFailure(err, at.up.ID, at.mod)
 			return
 		}
-		outReq.ContentLength = int64(len(body))
-		prepareOutboundHeaders(outReq.Header, s.r.Header, at.up)
-		// 取资格放在请求体准备之后, 构造失败就不白占槽位。
-		kind, why, sem, qms, ok := at.cd.acquire(s.r.Context(), s.gate, at.mod, at.group, s.obs.stage)
-		s.semMs += sem
-		s.queueMs += qms
+		kind, ok := s.acquireCandidate(at)
 		if !ok {
-			// 偏好候选取资格失败 (锁 / 信号量超时 / 排队超时): 是临时不可用, 顶班
-			// 不算迁移; 锁且是长期锁 (额度 / 低性能 / 熔断) 则按候选失效直接迁移。
-			if at.idx == s.prefIdx && why == "locked" {
-				if _, _, reason := at.cd.locked(at.mod, at.group); stickyLongLock(reason) {
-					s.stickyLong = true
-				}
-			}
-			s.gateReject = why
-			s.obs.outcome(stageSem, "reject", acquireFailParam(at, why))
-			s.lastUpID, s.lastMod = at.up.ID, at.mod
-			s.failed++
-			if why == "locked" {
-				a.kickRecovery(at.cd, at.mod, at.group)
-				s.lockedSkips++
-				if _, left, _ := at.cd.locked(at.mod, at.group); left > s.gateLeft {
-					s.gateLeft = left
-				}
-			}
 			return
 		}
 		s.sentAt = time.Now()
@@ -120,31 +104,7 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 		}
 		s.obs.stage(stageRecv)
 		if shouldFallback(resp.StatusCode) {
-			b, berr := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			at.cd.finish(kind, false)
-			s.obs.mark(resp.StatusCode)
-			moveOn, longLock := a.classifyFailure(at, kind, resp, b, s.gate, s.upPath)
-			s.obs.outcome(stageSend, "fail", failClassParam(at, resp.StatusCode, b))
-			// 偏好候选真实报错后换走: 命中长期锁 (额度 / 低性能 / 熔断) 才迁移 —— 熔断是
-			// 连续失败到阈值才上锁, 一上锁即把偏好迁走; 没落锁的单次波动不动偏好, 下笔
-			// 照常先试它 (锁查询在 classifyFailure 之后, 拿到的是本笔失败刚上的锁)。
-			if at.idx == s.prefIdx {
-				if _, _, reason := at.cd.locked(at.mod, at.group); longLock || stickyLongLock(reason) {
-					s.stickyLong = true
-				}
-			}
-			s.lastErr = fmt.Errorf("upstream %s returned %d", at.up.ID, resp.StatusCode)
-			s.lastStatus, s.lastHdr, s.lastBody = resp.StatusCode, resp.Header.Clone(), b
-			s.lastUpID, s.lastMod = at.up.ID, at.mod
-			s.failed++
-			if berr != nil {
-				s.lastErr = berr
-			}
-			// 每次上游真实请求以错误收场都落一笔日志 (带上原始响应体/头与归类);
-			// 后续候选兜底成功时这笔记错误也留痕, 供排查额度与到期时间。
-			s.logUpstreamError(at, resp.StatusCode, b, s.lastHdr, nil)
-			if moveOn {
+			if s.failedResponse(at, kind, resp) {
 				return
 			}
 			continue
@@ -160,6 +120,78 @@ func (s *serveState) tryCandidate(at attempt, body []byte) {
 		s.obs.stage(stageRecv) // 响应头已到, 之后的整段转发都算「接收中」, 别再退回并发池
 		return
 	}
+}
+
+// outboundRequest 每轮重建出站请求: 上一轮的 body 已经被读过, 复用同一个 Request 会带空体。
+func (s *serveState) outboundRequest(at attempt, body []byte) (*http.Request, error) {
+	outReq, err := http.NewRequestWithContext(s.r.Context(), s.r.Method,
+		at.up.BaseURL+s.upPath, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	outReq.ContentLength = int64(len(body))
+	prepareOutboundHeaders(outReq.Header, s.r.Header, at.up)
+	return outReq, nil
+}
+
+// acquireCandidate 取资格并记等待耗时; 失败时结算拒发原因 (偏好候选的长期锁迁移)。
+// 返回 ok=false 表示本候选该放弃, 换下一个。
+func (s *serveState) acquireCandidate(at attempt) (kind slotKind, ok bool) {
+	kind, why, sem, qms, ok := at.cd.acquire(s.r.Context(), s.gate, at.mod, at.group, s.obs.stage)
+	s.semMs += sem
+	s.queueMs += qms
+	if ok {
+		return kind, true
+	}
+	// 偏好候选取资格失败 (锁 / 信号量超时 / 排队超时): 是临时不可用, 顶班
+	// 不算迁移; 锁且是长期锁 (额度 / 低性能 / 熔断) 则按候选失效直接迁移。
+	if at.idx == s.prefIdx && why == "locked" {
+		if _, _, reason := at.cd.locked(at.mod, at.group); stickyLongLock(reason) {
+			s.stickyLong = true
+		}
+	}
+	s.gateReject = why
+	s.obs.outcome(stageSem, "reject", acquireFailParam(at, why))
+	s.lastUpID, s.lastMod = at.up.ID, at.mod
+	s.failed++
+	if why == "locked" {
+		s.app.kickRecovery(at.cd, at.mod, at.group)
+		s.lockedSkips++
+		if _, left, _ := at.cd.locked(at.mod, at.group); left > s.gateLeft {
+			s.gateLeft = left
+		}
+	}
+	return kind, false
+}
+
+// failedResponse 处理可回退的状态码: 读 body、归类上锁、记最近错误与日志。
+// 返回 true 表示该换下一个候选 (不再重试本候选)。
+func (s *serveState) failedResponse(at attempt, kind slotKind, resp *http.Response) bool {
+	b, berr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	at.cd.finish(kind, false)
+	s.obs.mark(resp.StatusCode)
+	moveOn, longLock := s.app.classifyFailure(at, kind, resp, b, s.gate, s.upPath)
+	s.obs.outcome(stageSend, "fail", failClassParam(at, resp.StatusCode, b))
+	// 偏好候选真实报错后换走: 命中长期锁 (额度 / 低性能 / 熔断) 才迁移 —— 熔断是
+	// 连续失败到阈值才上锁, 一上锁即把偏好迁走; 没落锁的单次波动不动偏好, 下笔
+	// 照常先试它 (锁查询在 classifyFailure 之后, 拿到的是本笔失败刚上的锁)。
+	if at.idx == s.prefIdx {
+		if _, _, reason := at.cd.locked(at.mod, at.group); longLock || stickyLongLock(reason) {
+			s.stickyLong = true
+		}
+	}
+	s.lastErr = fmt.Errorf("upstream %s returned %d", at.up.ID, resp.StatusCode)
+	s.lastStatus, s.lastHdr, s.lastBody = resp.StatusCode, resp.Header.Clone(), b
+	s.lastUpID, s.lastMod = at.up.ID, at.mod
+	s.failed++
+	if berr != nil {
+		s.lastErr = berr
+	}
+	// 每次上游真实请求以错误收场都落一笔日志 (带上原始响应体/头与归类);
+	// 后续候选兜底成功时这笔记错误也留痕, 供排查额度与到期时间。
+	s.logUpstreamError(at, resp.StatusCode, b, s.lastHdr, nil)
+	return moveOn
 }
 
 // classifyFailure 按上游自己的规则给失败归类并按类上锁, 返回 (moveOn, longLock):

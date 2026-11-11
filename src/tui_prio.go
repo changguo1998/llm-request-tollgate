@@ -12,12 +12,35 @@ import (
 // (负优先级, 下限 -1) 除外: 预览里排在最后, 但生成器会跳过, 不会落进 aliases/tollgate 目录。
 // 停用的 provider (负优先级) 整家跳过: 它的模型不进候选, 生成配置时也不进 upstreams。
 func (e *tuiEditor) buildAliases() []tuiAlias {
-	dropped := e.droplist()
-	type item struct {
-		rank int
-		cand tuiPrioCand
+	byAlias := e.collectPrioItems()
+	names := make([]string, 0, len(byAlias))
+	for name := range byAlias {
+		names = append(names, name)
 	}
-	byAlias := map[string][]item{}
+	sort.Strings(names)
+	out := make([]tuiAlias, 0, len(names))
+	for _, name := range names {
+		items := byAlias[name]
+		sortPrioItems(items)
+		alias := tuiAlias{name: name}
+		for _, it := range items {
+			alias.cands = append(alias.cands, it.cand)
+		}
+		out = append(out, alias)
+	}
+	return out
+}
+
+// prioItem 是候选在逻辑名分组里的排序键与内容。
+type prioItem struct {
+	rank int
+	cand tuiPrioCand
+}
+
+// collectPrioItems 按 provider 顺序扫模型并归到逻辑名; 停用的 provider 与黑名单模型跳过。
+func (e *tuiEditor) collectPrioItems() map[string][]prioItem {
+	dropped := e.droplist()
+	byAlias := map[string][]prioItem{}
 	for rank, name := range e.providers {
 		entry := e.provEntry(name)
 		if entry == nil {
@@ -33,37 +56,27 @@ func (e *tuiEditor) buildAliases() []tuiAlias {
 				continue
 			}
 			alias := aliasOf(model)
-			byAlias[alias] = append(byAlias[alias], item{rank, tuiPrioCand{name, id, prioOf(model), provPrio}})
+			byAlias[alias] = append(byAlias[alias], prioItem{rank, tuiPrioCand{name, id, prioOf(model), provPrio}})
 		}
 	}
-	names := make([]string, 0, len(byAlias))
-	for name := range byAlias {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	out := make([]tuiAlias, 0, len(names))
-	for _, name := range names {
-		items := byAlias[name]
-		sort.SliceStable(items, func(i, j int) bool {
-			a, b := items[i], items[j]
-			if a.cand.modelPrio != b.cand.modelPrio {
-				return a.cand.modelPrio > b.cand.modelPrio
-			}
-			if a.cand.provPrio != b.cand.provPrio {
-				return a.cand.provPrio > b.cand.provPrio
-			}
-			if a.rank != b.rank {
-				return a.rank < b.rank
-			}
-			return a.cand.modelID < b.cand.modelID
-		})
-		alias := tuiAlias{name: name}
-		for _, it := range items {
-			alias.cands = append(alias.cands, it.cand)
+	return byAlias
+}
+
+// sortPrioItems 是组内顺序: 模型优先级 -> provider 优先级 -> 上游顺序 -> 模型 id。
+func sortPrioItems(items []prioItem) {
+	sort.SliceStable(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		if a.cand.modelPrio != b.cand.modelPrio {
+			return a.cand.modelPrio > b.cand.modelPrio
 		}
-		out = append(out, alias)
-	}
-	return out
+		if a.cand.provPrio != b.cand.provPrio {
+			return a.cand.provPrio > b.cand.provPrio
+		}
+		if a.rank != b.rank {
+			return a.rank < b.rank
+		}
+		return a.cand.modelID < b.cand.modelID
+	})
 }
 
 // rebuild 重算列表 (别名升序, 别名内按候选顺序), 并把光标钉回原来那一行 —— 调优先级

@@ -116,7 +116,18 @@ func tuiTarget(inProc, stateSet bool, stateURL, defURL string) (bool, string, er
 	return false, "", nil
 }
 
-func main() {
+// mainOpts 是命令行解析结果。
+type mainOpts struct {
+	cfgPath  string
+	summary  string
+	usage    string
+	windows  string
+	check    bool
+	tui      bool
+	tuiState tuiStateArg
+}
+
+func parseMainOpts() mainOpts {
 	cfgPath := flag.String("config", "config.local.json", "config file path")
 	summary := flag.String("summary", "", "aggregate JSONL request log and exit")
 	usage := flag.String("usage", "", "list token usage by upstream/model and window, then exit")
@@ -127,43 +138,63 @@ func main() {
 	flag.Var(&tuiState, "tui-state", "run the terminal dashboard against a running proxy (default URL: "+
 		defaultTuiStateURL+")")
 	flag.CommandLine.Parse(withTuiStateDefault(os.Args[1:], defaultTuiStateURL))
+	return mainOpts{
+		cfgPath: *cfgPath, summary: *summary, usage: *usage, windows: *windows,
+		check: *check, tui: *tui, tuiState: tuiState,
+	}
+}
 
-	enabled, baseURL, err := tuiTarget(*tui, tuiState.set, tuiState.url, defaultTuiStateURL)
+func main() {
+	o := parseMainOpts()
+	enabled, baseURL, err := tuiTarget(o.tui, o.tuiState.set, o.tuiState.url, defaultTuiStateURL)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		fmt.Fprintln(os.Stderr, "用法: -tui (同进程) 或 -tui-state [base] (看常驻服务)")
 		os.Exit(2)
 	}
 	if enabled {
-		runTUI(*cfgPath, baseURL)
+		runTUI(o.cfgPath, baseURL)
 		return
 	}
+	if o.summary != "" {
+		runSummary(o.summary)
+		return
+	}
+	if o.usage != "" {
+		runUsage(o.usage, splitWindows(o.windows))
+		return
+	}
+	if o.check {
+		runCheck(o.cfgPath)
+		return
+	}
+	serveProxy(o.cfgPath)
+}
 
-	if *summary != "" {
-		runSummary(*summary)
-		return
-	}
-	if *usage != "" {
-		var ws []string
-		for _, s := range strings.Split(*windows, ",") {
-			if s = strings.TrimSpace(s); s != "" {
-				ws = append(ws, s)
-			}
+// splitWindows 把 -windows 的逗号列表去空白。
+func splitWindows(s string) []string {
+	var ws []string
+	for _, w := range strings.Split(s, ",") {
+		if w = strings.TrimSpace(w); w != "" {
+			ws = append(ws, w)
 		}
-		runUsage(*usage, ws)
-		return
 	}
-	if *check {
-		cfg, err := loadConfig(*cfgPath)
-		if err != nil {
-			log.Fatalf("config invalid: %v", err)
-		}
-		log.Printf("config OK: listen=%s log_path=%s upstreams=%d aliases=%d",
-			cfg.Listen, cfg.LogPath, len(cfg.Upstreams), len(cfg.Aliases))
-		return
-	}
+	return ws
+}
 
-	cfg, err := loadConfig(*cfgPath)
+// runCheck 校验配置并打印概要。
+func runCheck(cfgPath string) {
+	cfg, err := loadConfig(cfgPath)
+	if err != nil {
+		log.Fatalf("config invalid: %v", err)
+	}
+	log.Printf("config OK: listen=%s log_path=%s upstreams=%d aliases=%d",
+		cfg.Listen, cfg.LogPath, len(cfg.Upstreams), len(cfg.Aliases))
+}
+
+// serveProxy 是常驻模式: 起服务 + SIGHUP 热加载别名与上游。
+func serveProxy(cfgPath string) {
+	cfg, err := loadConfig(cfgPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
@@ -171,23 +202,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("init: %v", err)
 	}
-
-	// SIGHUP 热加载别名与上游。
 	go func() {
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGHUP)
 		for range ch {
-			c, err := loadConfig(*cfgPath)
+			c, err := loadConfig(cfgPath)
 			if err != nil {
 				log.Printf("reload failed: %v", err)
 				continue
 			}
 			app.applyConfig(c)
-			log.Printf("config reloaded from %s", *cfgPath)
+			log.Printf("config reloaded from %s", cfgPath)
 		}
 	}()
-
-	log.Printf("llm-request-tollgate listening on %s (config %s)", cfg.Listen, *cfgPath)
+	log.Printf("llm-request-tollgate listening on %s (config %s)", cfg.Listen, cfgPath)
 	if err := http.ListenAndServe(cfg.Listen, app); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("listen: %v", err)
 	}

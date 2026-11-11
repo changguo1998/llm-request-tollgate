@@ -212,12 +212,22 @@ func (a *App) serveSticky(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	logical, upstream, model := q.Get("logical"), q.Get("upstream"), q.Get("model")
 	if upstream == "" {
-		n := a.sticky.reset(logical)
-		a.evAdd("sticky", logical, "", "", "人工清除偏好 "+strconv.Itoa(n)+" 条")
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"cleared": n})
+		a.stickyClear(w, logical)
 		return
 	}
+	a.stickySet(w, logical, upstream, model)
+}
+
+// stickyClear 清除某逻辑名的偏好 (不带 upstream 时的路径)。
+func (a *App) stickyClear(w http.ResponseWriter, logical string) {
+	n := a.sticky.reset(logical)
+	a.evAdd("sticky", logical, "", "", "人工清除偏好 "+strconv.Itoa(n)+" 条")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"cleared": n})
+}
+
+// stickySet 在候选链里定位 (上游, 模型) 并写入偏好下标。
+func (a *App) stickySet(w http.ResponseWriter, logical, upstream, model string) {
 	if logical == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request_error",
 			"logical is required when upstream is set")

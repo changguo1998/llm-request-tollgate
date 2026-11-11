@@ -370,6 +370,25 @@ func loadConfigOpt(path string, lenient bool) (*Config, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, err
 	}
+	c.applyDefaults()
+	if err := c.normalizeUpstreams(); err != nil {
+		return nil, err
+	}
+	// 候选表重建: 顶层 aliases 键已废弃, 逻辑名与候选链全部从上游 models 的
+	// alias / priority 重建, 之后 applyConfig 与组校验拿到的就是这张表。
+	c.rebuildAliases()
+	if err := c.normalizeGroups(); err != nil {
+		return nil, err
+	}
+	c.LowPerfExempt = trimNonEmpty(c.LowPerfExempt)
+	if err := c.applyKeyEnv(lenient); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// applyDefaults 补上监听 / 日志 / 显示窗口 / 三项超时的历史缺省。
+func (c *Config) applyDefaults() {
 	if c.Listen == "" {
 		c.Listen = "127.0.0.1:8787"
 	}
@@ -394,6 +413,11 @@ func loadConfigOpt(path string, lenient bool) (*Config, error) {
 	if c.StreamIdleSec <= 0 {
 		c.StreamIdleSec = 240
 	}
+}
+
+// normalizeUpstreams 清洗模型条目: id / billing / alias 去空白, 兼容旧字段名,
+// 拒绝空 id 与同一上游里的重复模型。
+func (c *Config) normalizeUpstreams() error {
 	// 额度组: 同一上游里模型 id 唯一; 声明了 models 的上游, 模型条目清一下空白
 	// (id / billing / alias), 缺省逻辑名留空由 rebuildAliases 用模型 id 兜底。
 	for i := range c.Upstreams {
@@ -414,65 +438,75 @@ func loadConfigOpt(path string, lenient bool) (*Config, error) {
 			}
 			m.LegacyAlias, m.LegacyBilling = "", ""
 			if m.ID == "" {
-				return nil, fmt.Errorf("upstream %s: model entry without id", u.ID)
+				return fmt.Errorf("upstream %s: model entry without id", u.ID)
 			}
 			if ids[m.ID] {
-				return nil, fmt.Errorf("upstream %s: duplicate model %s", u.ID, m.ID)
+				return fmt.Errorf("upstream %s: duplicate model %s", u.ID, m.ID)
 			}
 			ids[m.ID] = true
 		}
 	}
-	// 候选表重建: 顶层 aliases 键已废弃, 逻辑名与候选链全部从上游 models 的
-	// alias / priority 重建, 之后 applyConfig 与组校验拿到的就是这张表。
-	c.rebuildAliases()
-	// 组 (别名的别名): 组名不能与逻辑名重名 (否则展开后互相覆盖无从区分);
-	// 成员必须都是已注册逻辑名 (禁止嵌套: 组成员只能是逻辑名, 不能是别的组名)。
-	// 成员带多余空白时剔除 (与逻辑名同一的 TrimSpace 口径), 免得校验过了展开时查空表。
+	return nil
+}
+
+// normalizeGroups 校验组 (别名的别名): 组名不能与逻辑名重名 (否则展开后互相覆盖
+// 无从区分); 成员必须都是已注册逻辑名 (禁止嵌套: 组成员只能是逻辑名, 不能是别的组名)。
+// 成员带多余空白时剔除 (与逻辑名同一的 TrimSpace 口径), 免得校验过了展开时查空表。
+func (c *Config) normalizeGroups() error {
 	for gname, members := range c.Groups {
 		gname = strings.TrimSpace(gname)
 		if gname == "" {
-			return nil, fmt.Errorf("group: empty group name")
+			return fmt.Errorf("group: empty group name")
 		}
 		if _, dup := c.Aliases[gname]; dup {
-			return nil, fmt.Errorf("group %s: name collides with an alias", gname)
+			return fmt.Errorf("group %s: name collides with an alias", gname)
 		}
 		if len(members) == 0 {
-			return nil, fmt.Errorf("group %s: no members", gname)
+			return fmt.Errorf("group %s: no members", gname)
 		}
 		clean := members[:0]
 		for _, m := range members {
 			m = strings.TrimSpace(m)
 			if m == "" {
-				return nil, fmt.Errorf("group %s: empty member name", gname)
+				return fmt.Errorf("group %s: empty member name", gname)
 			}
 			if _, ok := c.Aliases[m]; !ok {
-				return nil, fmt.Errorf("group %s: member %s is not a registered alias", gname, m)
+				return fmt.Errorf("group %s: member %s is not a registered alias", gname, m)
 			}
 			clean = append(clean, m)
 		}
 		c.Groups[gname] = clean
 	}
-	// 低性能豁免名单: 按真实模型 id 匹配, 手写配置容易带多余空白, 去空白并剔除空串。
-	exempt := c.LowPerfExempt[:0]
-	for _, m := range c.LowPerfExempt {
-		if m = strings.TrimSpace(m); m != "" {
-			exempt = append(exempt, m)
+	return nil
+}
+
+// trimNonEmpty 去空白并剔除空串 (豁免名单等手写配置用)。
+func trimNonEmpty(in []string) []string {
+	out := in[:0]
+	for _, s := range in {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
 		}
 	}
-	c.LowPerfExempt = exempt
-	// key_env: 配置只存环境变量名, 真 key 启动/热加载时从环境取, 不落盘。
+	return out
+}
+
+// applyKeyEnv 从环境变量取真 key (配置只存变量名, 不落盘); lenient 时缺变量放行。
+func (c *Config) applyKeyEnv(lenient bool) error {
 	for i := range c.Upstreams {
 		u := &c.Upstreams[i]
-		if u.KeyEnv != "" {
-			v, ok := os.LookupEnv(u.KeyEnv)
-			if !ok || v == "" {
-				if lenient {
-					continue
-				}
-				return nil, fmt.Errorf("upstream %s: env %s not set", u.ID, u.KeyEnv)
-			}
-			u.Key = v
+		if u.KeyEnv == "" {
+			continue
 		}
+		v, ok := os.LookupEnv(u.KeyEnv)
+		if ok && v != "" {
+			u.Key = v
+			continue
+		}
+		if lenient {
+			continue
+		}
+		return fmt.Errorf("upstream %s: env %s not set", u.ID, u.KeyEnv)
 	}
-	return &c, nil
+	return nil
 }

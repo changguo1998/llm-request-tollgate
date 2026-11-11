@@ -97,10 +97,22 @@ func (a *App) applyConfig(c *Config) {
 	// 门控参数是全局的, 热加载直接生效; 队列与自适应上限按上游 id 保留 (爬了半天的
 	// 上限不该被 hup 清掉, 排队中的请求也不该被丢)。
 	a.gate = normGate(c.gate())
-	// settings 页离线编辑时 (tui_model) 也会拼一个 App 再 applyConfig, 表可能还没建。
 	if a.cands == nil {
 		a.cands = map[string]*cand{}
 	}
+	a.upstreams, a.groups, a.groupOrder = a.rebuildUpstreams(c)
+	a.aliases = buildAliasTargets(c, a.groups)
+	// 粘性偏好跨热加载保留, 但候选集变化后越界的作废 (配置顺序重新积累)。
+	if a.sticky != nil {
+		a.sticky.prune(a.aliases)
+	}
+	a.ensureTransport(rh)
+}
+
+// rebuildUpstreams 重建上游表 / 额度组 / 组序列; 调度状态按上游 id 保留不重建:
+// 队列里排着的请求、爬到的并发上限、退避与锁都该跨热加载延续 (上限有意不落盘,
+// 但 hup 不该把它清掉)。
+func (a *App) rebuildUpstreams(c *Config) (map[string]*UpstreamCfg, map[string]map[string]string, map[string][]string) {
 	upstreams := map[string]*UpstreamCfg{}
 	groups := map[string]map[string]string{} // 上游 -> 真实模型 -> 额度组名
 	groupSeq := map[string][]string{}        // 上游 -> 组名 (按配置首次出现, 含默认组)
@@ -122,8 +134,6 @@ func (a *App) applyConfig(c *Config) {
 		}
 		groupSeq[u.ID] = names
 		groups[u.ID] = byModel
-		// 调度状态按上游 id 保留不重建: 队列里排着的请求、爬到的并发上限、退避与锁
-		// 都该跨热加载延续 (上限有意不落盘, 但 hup 不该把它清掉)。
 		if _, ok := a.cands[u.ID]; !ok {
 			a.cands[u.ID] = newCand(u.ID)
 		}
@@ -134,9 +144,11 @@ func (a *App) applyConfig(c *Config) {
 			cd.denyRecovery()
 		}
 	}
-	a.upstreams = upstreams
-	a.groups = groups
-	a.groupOrder = groupSeq
+	return upstreams, groups, groupSeq
+}
+
+// buildAliasTargets 把展开后的候选链转成运行时别名表 (候选带额度组)。
+func buildAliasTargets(c *Config, groups map[string]map[string]string) map[string][]aliasTarget {
 	aliases := map[string][]aliasTarget{}
 	for name, list := range c.expandedAliases() {
 		for _, pair := range list {
@@ -145,27 +157,26 @@ func (a *App) applyConfig(c *Config) {
 			})
 		}
 	}
-	a.aliases = aliases
-	// 粘性偏好跨热加载保留, 但候选集变化后越界的作废 (配置顺序重新积累)。
-	if a.sticky != nil {
-		a.sticky.prune(aliases)
-	}
-	// transport 启动时建一次 (不重建连接池); 热加载只更新 response_header 超时。
-	if a.transport == nil {
-		a.transport = &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				d := net.Dialer{Timeout: time.Duration(a.connectNs.Load())}
-				conn, err := d.DialContext(ctx, network, addr)
-				if err != nil {
-					return nil, err
-				}
-				// 每次读写重设 idle 死线 (取自实时值) 实现流空闲超时。
-				return &idleConn{Conn: conn, a: a}, nil
-			},
-			ResponseHeaderTimeout: rh,
-		}
-	} else {
+	return aliases
+}
+
+// ensureTransport 启动时建一次 Transport (不重建连接池); 热加载只更新 response_header 超时。
+func (a *App) ensureTransport(rh time.Duration) {
+	if a.transport != nil {
 		a.transport.ResponseHeaderTimeout = rh
+		return
+	}
+	a.transport = &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			d := net.Dialer{Timeout: time.Duration(a.connectNs.Load())}
+			conn, err := d.DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			// 每次读写重设 idle 死线 (取自实时值) 实现流空闲超时。
+			return &idleConn{Conn: conn, a: a}, nil
+		},
+		ResponseHeaderTimeout: rh,
 	}
 }
 

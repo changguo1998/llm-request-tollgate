@@ -107,50 +107,61 @@ func (a *App) runRecovery(c *cand, t recoverRef) {
 	// 锁记录没带路径的 (旧锁 / 单元测试) 兜底 chat/completions。
 	upPath, bodyTmpl := probeTarget(t.path)
 	body := []byte(strings.ReplaceAll(bodyTmpl, "{model}", modelID))
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
-		up.BaseURL+upPath, bytes.NewReader(body))
+	req, err := probeRequest(up, upPath, body)
 	if err != nil {
 		// 构造失败极罕见: 按失败重锁重挂, 下次再探。
-		until := c.settleRecovery(t, false, g)
-		a.armLockRecovery(t, until)
-		a.evAdd("probe", "", c.id, modelID, probeFailText(t, g, "request"))
+		a.probeFail(c, t, g, modelID, "request")
 		return
 	}
-	req.ContentLength = int64(len(body))
-	prepareOutboundHeaders(req.Header, http.Header{}, up)
-	req.Header.Set("Content-Type", "application/json")
 
 	sentAt := time.Now()
 	resp, err := a.transport.RoundTrip(req)
 	if err != nil {
-		until := c.settleRecovery(t, false, g)
-		a.armLockRecovery(t, until)
-		a.evAdd("probe", "", c.id, modelID, probeFailText(t, g, "transport"))
+		a.probeFail(c, t, g, modelID, "transport")
 		return
 	}
 	ttfb := time.Since(sentAt)
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		until := c.settleRecovery(t, false, g)
-		a.armLockRecovery(t, until)
-		a.evAdd("probe", "", c.id, modelID,
-			probeFailText(t, g, "http "+strconv.Itoa(resp.StatusCode)))
+		a.probeFail(c, t, g, modelID, "http "+strconv.Itoa(resp.StatusCode))
 		return
 	}
+	a.probeResult(c, t, g, modelID, ttfb)
+}
+
+// probeResult 结算探测成功: 低性能锁额外看首字节时延, 超限仍按失败重锁。
+func (a *App) probeResult(c *cand, t recoverRef, g GateCfg, modelID string, ttfb time.Duration) {
 	// 低性能锁的恢复不仅看可达性: 配置了首字节时延阈值时, 探测 TTFB 超限说明性能
 	// 还没恢复, 按失败重锁 (否则会「放行一笔又锁上」的周期抖动)。其他锁只看可达性。
 	if t.reason == lowPerfReason {
 		if thr := g.lowPerfTtfbMax(); thr > 0 && ttfb > thr {
-			until := c.settleRecovery(t, false, g)
-			a.armLockRecovery(t, until)
-			a.evAdd("probe", "", c.id, modelID,
-				probeFailText(t, g, "ttfb "+durStr(ttfb)))
+			a.probeFail(c, t, g, modelID, "ttfb "+durStr(ttfb))
 			return
 		}
 	}
 	c.settleRecovery(t, true, g)
 	a.evAdd("probe", "", c.id, modelID, "probe"+stageSep+"ok")
+}
+
+// probeRequest 构造恢复探测的出站请求 (与普通转发同一套认证头)。
+func probeRequest(up *UpstreamCfg, upPath string, body []byte) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		up.BaseURL+upPath, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.ContentLength = int64(len(body))
+	prepareOutboundHeaders(req.Header, http.Header{}, up)
+	req.Header.Set("Content-Type", "application/json")
+	return req, nil
+}
+
+// probeFail 探测失败: 按原锁时长重锁并重挂下一次, 事件里带细分原因。
+func (a *App) probeFail(c *cand, t recoverRef, g GateCfg, modelID, why string) {
+	until := c.settleRecovery(t, false, g)
+	a.armLockRecovery(t, until)
+	a.evAdd("probe", "", c.id, modelID, probeFailText(t, g, why))
 }
 
 // probeFailText 写探测失败后按原锁时长重锁的事件: `probe → fail(原因) → lock(锁原因 倒计时)`。
