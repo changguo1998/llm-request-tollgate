@@ -350,6 +350,7 @@ func (m *tuiModel) commonKey(b byte) bool {
 	case 'r': // 重读全部日志 (换窗口 / 想看全量时用)
 		m.logPos, m.logRest, m.scannedFiles = map[string]int64{}, map[string][]byte{}, map[string]bool{}
 		m.routes = map[string]*routeRow{}
+		m.nameEnds = map[string][]time.Time{} // 配色权重也从头重算, 免得重复累加
 		m.events = nil
 		m.scanned = 0
 		m.ev.resetScan()          // 时间范围回读也从头扫

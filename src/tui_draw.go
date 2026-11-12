@@ -23,9 +23,9 @@ func (m *tuiModel) draw() string {
 	for i, cand := range m.sortedCands() {
 		m.upColors[cand.ID] = upPalette[i%len(upPalette)]
 	}
-	// 逻辑名专属色: 配置里的逻辑名 (含组名) 按字典序分色, 与上游的分配互不影响,
-	// 留给各页的名称单元格 (目前是 events 页的标识列)。
-	names := m.cachedLogicalNames()
+	// 逻辑名专属色: 配置里的逻辑名 (含组名) 按窗口内请求的衰减权重降序分色 (同权重按
+	// 字典序), 与上游的分配互不影响, 留给各页的名称单元格 (目前是 events 页的标识列)。
+	names := m.weightOrder(m.cachedLogicalNames(), time.Now())
 	m.logicalColors = make(map[string]string, len(names))
 	for i, name := range names {
 		m.logicalColors[name] = logicalPalette[i%len(logicalPalette)]

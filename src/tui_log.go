@@ -142,6 +142,7 @@ func (m *tuiModel) updateRoute(r logRec, ts time.Time) {
 	}
 	row.Fallbacks += r.Fallbacks
 	m.addUsage(row, r, ts)
+	m.addNameEnd(r.Logical, ts) // 配色权重: 按请求结束时刻累计
 	if r.TtfbMs > 0 {
 		row.TtfbPts = addTtfb(row.TtfbPts, ttfbPoint{ts: ts, ms: r.TtfbMs}, time.Now(), m.window)
 	}

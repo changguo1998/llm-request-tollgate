@@ -248,7 +248,8 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
   `model` 显示. 仅仅首字节慢、没有触发锁的请求不发事件. TUI 显示时把同一秒内同一请求的
   `stage` / `ok` / `error` 事件折叠成一条链 (桥接阶段去重, 取信息量更多的表达), 跨秒拆条;
   正文用终端前景色, `fail(...)` 红字, `switch` / `retry` 黄字, 收尾词 `ok(200)` 绿字, 供应商名
-  带上游专属色, `events` 标识列的逻辑名带专属色 (加粗).
+  带上游专属色, `events` 标识列的逻辑名带专属色 (加粗; 按窗口内请求的结束时刻做 10min
+  高斯衰减求和排序, 同权重按字典序).
 - 其余方法返回 405.
 
 ## 7. JSONL 请求日志 (每行一笔)

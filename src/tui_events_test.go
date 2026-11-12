@@ -162,15 +162,16 @@ func TestEventWhoLogicalColor(t *testing.T) {
 	}
 }
 
-// 逻辑名名单按配置里的逻辑名 (含组名) 字典序: 每个逻辑名一种专属色, 不随帧变。
+// 逻辑名名单按配置里的逻辑名 (含组名) 字典序缓存; 分色按权重降序, 无请求时按字典序垫底。
 func TestLogicalNameColors(t *testing.T) {
 	m := newTUIModel(stickyFixture(t))
 	names := m.cachedLogicalNames()
 	if !eqSlice(names, []string{"m1", "m2"}) {
 		t.Fatalf("逻辑名应为字典序的 m1 / m2, 得到 %v", names)
 	}
-	colors := make(map[string]string, len(names))
-	for i, name := range names {
+	order := m.weightOrder(names, time.Now())
+	colors := make(map[string]string, len(order))
+	for i, name := range order {
 		colors[name] = logicalPalette[i%len(logicalPalette)]
 	}
 	if got := logicalPalette[0]; got != "\x1b[34m" || logicalPalette[1] != "\x1b[35m" || logicalPalette[2] != "\x1b[36m" {
@@ -180,7 +181,7 @@ func TestLogicalNameColors(t *testing.T) {
 		t.Errorf("两个逻辑名不该同色: %v", colors)
 	}
 	if colors["m1"] != logicalPalette[0] || colors["m2"] != logicalPalette[1] {
-		t.Errorf("字典序靠前的逻辑名应先用标准色, 得到 %v", colors)
+		t.Errorf("无请求时字典序靠前的逻辑名应先拿标准色, 得到 %v", colors)
 	}
 }
 
