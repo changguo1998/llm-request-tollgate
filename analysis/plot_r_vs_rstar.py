@@ -6,11 +6,11 @@ r*  = r * (c/b)^(-g)     (perfref 定稿口径, g 取 speedref_params.json, 缺�
 
 版本: gnuplot(pngcairo) + 零第三方库; 比例 1:1 —— 图片宽高比 1:1 且图区正方形
 (set size square), 两轴范围取同一值, 保证 y=x 是对角 45 度线; border 四边闭合.
-每模型一种颜色 (含图例). 超出 --max 的离群点剔除 (缺省 1200).
+每模型一种颜色 (含图例). 超出 --max 的离群点剔除 (缺省 400).
 
 用法::
-    python3 analysis/plot_r_vs_rstar.py                     # 全部模型 -> tmp/r_rstar.png
-    python3 analysis/plot_r_vs_rstar.py --model u/m --model ... --out tmp/a.png --max 600
+    python3 analysis/plot_r_vs_rstar.py                     # 全部模型 -> tmp/r_rstar.png (两轴 0-400)
+    python3 analysis/plot_r_vs_rstar.py --model u/m --model ... --out tmp/a.png --max 300
 """
 
 import argparse
@@ -32,7 +32,7 @@ COLORS = [
     "#1a7fd0", "#e05a2a", "#0a9a3a", "#9a3ab8",
     "#c9a000", "#1a9a9a", "#c04060", "#7a7a5a",
 ]
-PS = 0.22
+PS = 0.7
 
 
 def load_params():
@@ -97,7 +97,8 @@ def render(by_model, out, maxv):
         "set xlabel 'r = c/d  (tokens/s)'",
         "set ylabel 'r* = (c/d)(c/b)^(-g)  (tokens/s)'",
         "set title 'r* vs r  (n=%d, crop > %g)'" % (n, maxv),
-        "set key outside top right",
+        "set key top left",
+
         "f(x)=x",
         "plot " + ",\\\n     ".join(items),
     ])
@@ -117,7 +118,7 @@ def main():
     ap = argparse.ArgumentParser(description="r* vs r 散点 (y=x 对角线, 线性 1:1, 裁剪离群)")
     ap.add_argument("--model", action="append", default=[], help="只画指定 上游/模型 (可多次)")
     ap.add_argument("--out", default=OUT_DEF)
-    ap.add_argument("--max", type=float, default=1200.0, help="两轴统一上限, 超出剔除 (缺省 1200)")
+    ap.add_argument("--max", type=float, default=400.0, help="两轴统一上限, 超出剔除 (缺省 400)")
     args = ap.parse_args()
 
     params = load_params()
