@@ -26,7 +26,7 @@ func TestStageChainBuild(t *testing.T) {
 		t.Fatalf("阶段链应为 %q, 得到 %q", want, got)
 	}
 
-	// 耗时仍用前景色, 青色只给接收中的实时吞吐。
+	// 耗时仍用前景色, 青色只给接收中的实时性能。
 	raw := m.stageChain(f, tr)
 	if strings.Contains(raw, tuiLive) {
 		t.Errorf("耗时不该带进行中色: %q", raw)

@@ -31,7 +31,7 @@ func (s *serveState) forward() {
 	tps, bps, completion := responseRates(s.stream, usage, decodeMs, bytesOut)
 	if status < 400 {
 		// 低性能锁的样本: 吞吐只取能拆出解码段的流式成功请求, 首字节时延取任何成功响应。
-		a.notePerfRequest(s.servedUp.ID, realModel, completion, decodeMs, ttfbMs, s.upPath)
+		a.notePerfRequest(s.servedUp.ID, realModel, completion, decodeMs, ttfbMs, bytesOut, s.upPath)
 	}
 	s.logResponse(status, realModel, usage, missing, ttfbMs, decodeMs, tps, bps, bytesOut)
 }

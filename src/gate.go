@@ -68,9 +68,9 @@ type modelGate struct {
 	fails       int        // 连续错误计数, 成功清零
 	pausedUntil time.Time  // 退避到什么时候: 退避期间该模型不出队
 	lock        lockState  // 定时锁 (熔断 / 低性能): 只锁该 upstream/model
-	tps         []tokPoint // 低性能锁的吞吐样本: 窗口内每笔流式成功请求的解码吞吐
+	tps         []perfPt   // 低性能锁的吞吐样本: 窗口内每笔流式成功请求的性能值 (r*, 或退化原始速率)
 	lat         []latPoint // 低性能锁的延迟样本: 窗口内每笔成功响应的首字节时延
-	// 历史解码速率 (落盘): perfN 是样本笔数, perfSum 是各笔 tok/dur 速率之和;
+	// 历史性能值 (落盘): perfN 是样本笔数, perfSum 是各笔性能值 (r*, 或退化原始速率) 之和;
 	// 历史平均 = perfSum/perfN, 供低吞吐的相对门槛比较。
 	perfN   int64
 	perfSum float64

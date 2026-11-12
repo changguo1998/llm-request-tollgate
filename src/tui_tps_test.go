@@ -8,28 +8,6 @@ import (
 	"time"
 )
 
-// 模型/路由表的吞吐口径: 最近 1h 内的总输出 token 除以这些请求的耗时之和 (空闲不计);
-// 同时给出单笔请求的峰值 (同一口径)。
-func TestTokRate(t *testing.T) {
-	now := time.Now()
-	pts := []tokPoint{
-		{ts: now.Add(-90 * time.Minute), tok: 99999, dur: 999000}, // 窗口外, 不计
-		{ts: now.Add(-30 * time.Minute), tok: 1800, dur: 30000},   // 60 t/s
-		{ts: now.Add(-10 * time.Minute), tok: 1800, dur: 30000},   // 60 t/s
-		{ts: now.Add(-5 * time.Minute), tok: 600, dur: 5000},      // 120 t/s
-	}
-	avg, peak, ok := tokRate(pts, now, tuiTokWindow)
-	if !ok || avg != 4200.0/65 || peak != 120 {
-		t.Errorf("应为 平均 %.2f / 峰值 120, 得到 (%v, %v, %v)", 4200.0/65, avg, peak, ok)
-	}
-	if _, _, ok := tokRate([]tokPoint{{ts: now.Add(-2 * time.Hour), tok: 100, dur: 1000}}, now, tuiTokWindow); ok {
-		t.Error("窗口内没有样本时应 ok=false")
-	}
-	if _, _, ok := tokRate([]tokPoint{{ts: now, tok: 100}}, now, tuiTokWindow); ok {
-		t.Error("没有耗时的样本不能让分母为 0")
-	}
-}
-
 // 首字节口口径: 平均 = win 窗口内算术平均, 谷值 = 全部样本中的最小一次。
 func TestTtfbAvgMin(t *testing.T) {
 	now := time.Now()
@@ -50,7 +28,7 @@ func TestTtfbAvgMin(t *testing.T) {
 	}
 }
 
-// 第 1 页阶段链在实时接收时把链尾的实时吞吐写成性能 (r*), 用当前参数表现算;
+// 第 1 页阶段链在实时接收时把链尾写成实时性能 (r*), 用当前参数表现算;
 // 样本不齐 (没有 token 或字节) 时不写, 缺参数时退原始解码速率。
 func TestFlowCellLiveTps(t *testing.T) {
 	m := newTUIModel("cfg")

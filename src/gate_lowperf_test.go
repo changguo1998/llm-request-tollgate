@@ -15,7 +15,7 @@ func newPerfApp(g GateCfg) (*App, *cand) {
 	return &App{cands: map[string]*cand{"u1": c}, gate: g}, c
 }
 
-// seedPerfHistory 预置历史解码速率: n 笔, 总速率 sum; 历史平均 = sum/n。
+// seedPerfHistory 预置历史性能值 (各笔 r*, 或退化原始速率): n 笔, 总和 sum; 历史平均 = sum/n。
 func seedPerfHistory(c *cand, model string, n int64, sum float64) {
 	c.mu.Lock()
 	mg := c.gate(model)
@@ -33,14 +33,6 @@ func TestLowPerfRelMaxDefault(t *testing.T) {
 	}
 }
 
-// avgRate 是各笔速率的算术平均 (不是按时长加权), 与历史平均的口径一致。
-func TestAvgRateArithmeticMean(t *testing.T) {
-	pts := []tokPoint{{tok: 10, dur: 1000}, {tok: 100, dur: 1000}} // 10 t/s 与 100 t/s
-	if got := avgRate(pts); got != 55 {
-		t.Fatalf("算术平均应为 55, 得到 %v", got)
-	}
-}
-
 // 低性能锁 (低吞吐分支): 窗口内峰值与平均都低于绝对门槛, 且当前平均跌到历史平均的
 // lowperf_rel_max 以下时锁住该模型, 时长取 lowperf_lock_ms (缺省 5min); 单笔样本不够
 // 判定, 也不连坐同家。
@@ -48,11 +40,11 @@ func TestLowPerfLockTriggers(t *testing.T) {
 	a, c := newPerfApp(normGate(GateCfg{}))
 	seedPerfHistory(c, "m1", 10, 500) // 历史平均 50 t/s: 当前 0.4 t/s 远低于它
 
-	a.notePerfRequest("u1", "m1", 2, 5000, 0, "") // 0.4 t/s: 只有一笔, 不判
+	a.notePerfRequest("u1", "m1", 2, 5000, 0, 0, "") // 0.4 t/s: 只有一笔, 不判
 	if locked, _, _ := c.locked("m1", ""); locked {
 		t.Fatal("单笔样本不该触发低性能锁")
 	}
-	a.notePerfRequest("u1", "m1", 2, 5000, 0, "") // 两笔 0.4 t/s: 峰值与平均都低于门槛
+	a.notePerfRequest("u1", "m1", 2, 5000, 0, 0, "") // 两笔 0.4 t/s: 峰值与平均都低于门槛
 	locked, left, reason := c.locked("m1", "")
 	if !locked || reason != lowPerfReason || left < 4*time.Minute {
 		t.Fatalf("两笔 0.4 t/s 应触发低性能锁: locked=%v left=%s reason=%s", locked, left, reason)
@@ -75,8 +67,8 @@ func TestLowPerfLockTriggers(t *testing.T) {
 func TestLowPerfLockNeedsPerfHistory(t *testing.T) {
 	a, c := newPerfApp(normGate(GateCfg{}))
 
-	a.notePerfRequest("u1", "m1", 2, 5000, 0, "")
-	a.notePerfRequest("u1", "m1", 2, 5000, 0, "")
+	a.notePerfRequest("u1", "m1", 2, 5000, 0, 0, "")
+	a.notePerfRequest("u1", "m1", 2, 5000, 0, 0, "")
 	if locked, _, reason := c.locked("m1", ""); locked {
 		t.Fatalf("历史不足时不该触发低吞吐锁: reason=%s", reason)
 	}
@@ -87,8 +79,8 @@ func TestLowPerfLockHistoryRatio(t *testing.T) {
 	a, c := newPerfApp(normGate(GateCfg{}))
 	seedPerfHistory(c, "m1", 10, 5) // 历史平均 0.5 t/s
 
-	a.notePerfRequest("u1", "m1", 2, 5000, 0, "")
-	a.notePerfRequest("u1", "m1", 2, 5000, 0, "")
+	a.notePerfRequest("u1", "m1", 2, 5000, 0, 0, "")
+	a.notePerfRequest("u1", "m1", 2, 5000, 0, 0, "")
 	if locked, _, reason := c.locked("m1", ""); locked {
 		t.Fatalf("当前平均未跌到历史平均的 20%% 以下, 不该锁: reason=%s", reason)
 	}
@@ -99,11 +91,11 @@ func TestLowPerfLockHistoryRatio(t *testing.T) {
 func TestLowPerfLockHighLatencyTriggers(t *testing.T) {
 	a, c := newPerfApp(normGate(GateCfg{LowPerfTtfbMaxMs: 100})) // 阈值 100ms
 
-	a.notePerfRequest("u1", "m1", 0, 0, 300, "") // 300ms: 只有一笔, 不判
+	a.notePerfRequest("u1", "m1", 0, 0, 300, 0, "") // 300ms: 只有一笔, 不判
 	if locked, _, _ := c.locked("m1", ""); locked {
 		t.Fatal("单笔高延迟样本不该触发低性能锁")
 	}
-	a.notePerfRequest("u1", "m1", 0, 0, 300, "") // 两笔平均 300ms > 100ms
+	a.notePerfRequest("u1", "m1", 0, 0, 300, 0, "") // 两笔平均 300ms > 100ms
 	locked, left, reason := c.locked("m1", "")
 	if !locked || reason != lowPerfReason || left < 4*time.Minute {
 		t.Fatalf("平均 300ms 高延迟应触发低性能锁: locked=%v left=%s reason=%s", locked, left, reason)
@@ -114,8 +106,8 @@ func TestLowPerfLockHighLatencyTriggers(t *testing.T) {
 func TestLowPerfLockHighLatencyBelowThreshold(t *testing.T) {
 	a, c := newPerfApp(normGate(GateCfg{LowPerfTtfbMaxMs: 100}))
 
-	a.notePerfRequest("u1", "m1", 0, 0, 50, "")
-	a.notePerfRequest("u1", "m1", 0, 0, 50, "") // 平均 50ms < 100ms
+	a.notePerfRequest("u1", "m1", 0, 0, 50, 0, "")
+	a.notePerfRequest("u1", "m1", 0, 0, 50, 0, "") // 平均 50ms < 100ms
 	if locked, _, reason := c.locked("m1", ""); locked {
 		t.Fatalf("平均 50ms 不该触发高延迟锁: reason=%s", reason)
 	}
@@ -125,8 +117,8 @@ func TestLowPerfLockHighLatencyBelowThreshold(t *testing.T) {
 func TestLowPerfLockLatencyDisabledByDefault(t *testing.T) {
 	a, c := newPerfApp(normGate(GateCfg{}))
 
-	a.notePerfRequest("u1", "m1", 0, 0, 5000, "")
-	a.notePerfRequest("u1", "m1", 0, 0, 5000, "") // 平均 5s, 但阈值 0 = 关闭
+	a.notePerfRequest("u1", "m1", 0, 0, 5000, 0, "")
+	a.notePerfRequest("u1", "m1", 0, 0, 5000, 0, "") // 平均 5s, 但阈值 0 = 关闭
 	if locked, _, reason := c.locked("m1", ""); locked {
 		t.Fatalf("缺省阈值 0 不应触发高延迟锁: reason=%s", reason)
 	}
@@ -136,8 +128,8 @@ func TestLowPerfLockLatencyDisabledByDefault(t *testing.T) {
 func TestLowPerfLockPeakAboveThreshold(t *testing.T) {
 	a, c := newPerfApp(normGate(GateCfg{}))
 
-	a.notePerfRequest("u1", "m1", 30, 5000, 0, "") // 6 t/s: 峰值 >= 5
-	a.notePerfRequest("u1", "m1", 1, 5000, 0, "")  // 0.2 t/s: 只把平均拉低
+	a.notePerfRequest("u1", "m1", 30, 5000, 0, 0, "") // 6 t/s: 峰值 >= 5
+	a.notePerfRequest("u1", "m1", 1, 5000, 0, 0, "")  // 0.2 t/s: 只把平均拉低
 	if locked, _, reason := c.locked("m1", ""); locked {
 		t.Fatalf("峰值 6 t/s 不该触发低性能锁: reason=%s", reason)
 	}
@@ -150,9 +142,9 @@ func TestLowPerfLockIgnoresExpiredSamples(t *testing.T) {
 
 	c.mu.Lock()
 	c.gate("m1").tps = append(c.gate("m1").tps,
-		tokPoint{ts: time.Now().Add(-2 * g.perfWindow()), tok: 1, dur: 5000})
+		perfPt{ts: time.Now().Add(-2 * g.perfWindow()), v: 0.2})
 	c.mu.Unlock()
-	a.notePerfRequest("u1", "m1", 1, 5000, 0, "")
+	a.notePerfRequest("u1", "m1", 1, 5000, 0, 0, "")
 	if locked, _, _ := c.locked("m1", ""); locked {
 		t.Fatal("窗口外的旧样本不该参与判定")
 	}
@@ -163,10 +155,10 @@ func TestLowPerfLockNotRepeated(t *testing.T) {
 	a, c := newPerfApp(normGate(GateCfg{}))
 	seedPerfHistory(c, "m1", 10, 500) // 历史平均 50 t/s, 两笔 0.4 t/s 可触发
 
-	a.notePerfRequest("u1", "m1", 2, 5000, 0, "")
-	a.notePerfRequest("u1", "m1", 2, 5000, 0, "")
+	a.notePerfRequest("u1", "m1", 2, 5000, 0, 0, "")
+	a.notePerfRequest("u1", "m1", 2, 5000, 0, 0, "")
 	_, first, _ := c.locked("m1", "")
-	a.notePerfRequest("u1", "m1", 2, 5000, 0, "") // 锁内又完成一笔 (锁前已发出)
+	a.notePerfRequest("u1", "m1", 2, 5000, 0, 0, "") // 锁内又完成一笔 (锁前已发出)
 	locked, second, reason := c.locked("m1", "")
 	if !locked || reason != lowPerfReason {
 		t.Fatalf("锁内应保持低性能锁: locked=%v reason=%s", locked, reason)
@@ -219,8 +211,8 @@ func TestLowPerfLockExempt(t *testing.T) {
 	g := normGate(GateCfg{LowPerfTtfbMaxMs: 100, LowPerfExempt: []string{"m1"}})
 	a, c := newPerfApp(g)
 
-	a.notePerfRequest("u1", "m1", 1, 5000, 500, "") // 0.2 t/s + 500ms: 任一分支都够触发
-	a.notePerfRequest("u1", "m1", 1, 5000, 500, "")
+	a.notePerfRequest("u1", "m1", 1, 5000, 500, 0, "") // 0.2 t/s + 500ms: 任一分支都够触发
+	a.notePerfRequest("u1", "m1", 1, 5000, 500, 0, "")
 	if locked, _, reason := c.locked("m1", ""); locked {
 		t.Fatalf("豁免名单内的模型不该触发低性能锁: reason=%s", reason)
 	}
@@ -233,8 +225,8 @@ func TestLowPerfLockExempt(t *testing.T) {
 
 	// 名单外: 同样的两笔低吞吐照常触发。
 	seedPerfHistory(c, "m2", 10, 500) // 名单外模型也需要历史平均
-	a.notePerfRequest("u1", "m2", 1, 5000, 0, "")
-	a.notePerfRequest("u1", "m2", 1, 5000, 0, "")
+	a.notePerfRequest("u1", "m2", 1, 5000, 0, 0, "")
+	a.notePerfRequest("u1", "m2", 1, 5000, 0, 0, "")
 	if locked, _, reason := c.locked("m2", ""); !locked || reason != lowPerfReason {
 		t.Fatalf("名单外模型应照常触发低性能锁: locked=%v reason=%s", locked, reason)
 	}
@@ -290,7 +282,7 @@ func TestLowPerfLockPersists(t *testing.T) {
 func TestPerfHistoryPersistsWithoutLock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "gate-state.json")
 	a := &App{cands: map[string]*cand{"u1": newCand("u1")}, gatePath: path, gate: normGate(GateCfg{})}
-	a.notePerfRequest("u1", "m1", 2, 5000, 0, "") // 0.4 t/s, 单笔不够触发锁
+	a.notePerfRequest("u1", "m1", 2, 5000, 0, 0, "") // 0.4 t/s, 单笔不够触发锁
 
 	restarted := &App{cands: map[string]*cand{"u1": newCand("u1")}, gatePath: path}
 	restarted.loadGateState()
@@ -310,15 +302,15 @@ func TestLowPerfLockAfterHistoryRestart(t *testing.T) {
 	restarted := &App{cands: map[string]*cand{"u1": newCand("u1")}, gatePath: path,
 		gate: normGate(GateCfg{})}
 	restarted.loadGateState()
-	restarted.notePerfRequest("u1", "m1", 2, 5000, 0, "")
-	restarted.notePerfRequest("u1", "m1", 2, 5000, 0, "")
+	restarted.notePerfRequest("u1", "m1", 2, 5000, 0, 0, "")
+	restarted.notePerfRequest("u1", "m1", 2, 5000, 0, 0, "")
 	locked, _, reason := restarted.cands["u1"].locked("m1", "")
 	if !locked || reason != lowPerfReason {
 		t.Fatalf("恢复历史后两笔 0.4 t/s 应触发低性能锁: locked=%v reason=%s", locked, reason)
 	}
 }
 
-// 低性能锁恢复解锁后, 观察窗口 (lowperf_window) 内又锁: 重锁时长翻倍递增, 封顶 8 倍
+// 低性能锁恢复解锁后, 观察窗口 (perf_window) 内又锁: 重锁时长翻倍递增, 封顶 8 倍
 // 基础时长 —— 没真恢复的候选慢慢退成长期死锁, 抖动自衰减。
 func TestLowPerfLockRelockEscalatesInWindow(t *testing.T) {
 	a, c := newPerfApp(normGate(GateCfg{}))
@@ -370,5 +362,24 @@ func TestLowPerfLockRelockResetsAfterWindow(t *testing.T) {
 	locked, left, reason := c.locked("m1", "")
 	if !locked || reason != lowPerfReason || left < 4*time.Minute || left > 6*time.Minute {
 		t.Fatalf("超过观察窗口应回到基础时长: locked=%v left=%s reason=%s", locked, left, reason)
+	}
+}
+
+// 有参数表 + 响应字节时, 低性能样本按该请求的 r* 记: 样本值 = (c/d)*(c/b)^g。
+func TestLowPerfRequestRecordsPerfValue(t *testing.T) {
+	a, c := newPerfApp(normGate(GateCfg{}))
+	a.perfRef = &PerfRef{byModel: map[string]perfParam{"u1/m1": {G: 1}}}
+	// rate = 10/1000*1000 = 10 t/s; c/b = 10/1000 = 0.01; ^1 -> 0.1
+	a.notePerfRequest("u1", "m1", 10, 1000, 0, 1000, "")
+	c.mu.Lock()
+	n := len(c.gate("m1").tps)
+	v := 0.0
+	if n > 0 {
+		v = c.gate("m1").tps[0].v
+	}
+	hist := c.gate("m1").perfSum
+	c.mu.Unlock()
+	if n != 1 || v < 0.099 || v > 0.101 || hist < 0.099 || hist > 0.101 {
+		t.Fatalf("样本应按 r* 记 0.1: n=%d v=%v hist=%v", n, v, hist)
 	}
 }

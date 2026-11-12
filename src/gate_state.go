@@ -20,8 +20,8 @@ type gateLockRec struct {
 	Path     string `json:"path,omitempty"`
 }
 
-// gatePerfRec 是落盘的历史解码速率: N 是样本笔数, Sum 是各笔 tok/dur 速率之和;
-// 历史平均 = Sum/N (各笔速率的算术平均)。
+// gatePerfRec 是落盘的历史性能值: N 是样本笔数, Sum 是各笔性能值 (r*, 或退化原始解码速率) 之和;
+// 历史平均 = Sum/N (各笔性能值的算术平均)。
 type gatePerfRec struct {
 	Upstream string  `json:"upstream"`
 	Model    string  `json:"model"`
