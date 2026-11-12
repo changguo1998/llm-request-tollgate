@@ -292,7 +292,7 @@ func perfCell(pts []perfPoint, now time.Time, shortWin, longWin time.Duration, u
 
 // modelCols 是第 1 页模型/路由聚合表的列: 按类别从左到右排, 同类相邻 ——
 // 调度状态 (排队 / 退避 / 熔断锁), 流量 (Token = cached/total / 首字节 / 性能),
-// 时间 (最近一次)。性能列是窗口内每笔请求 r* = (c/d)*(c/b)^(-g) 的算术平均 (单值)。
+// 时间 (最近一次)。性能列是窗口内每笔请求 r* = m*(c/d)*(c/b)^(-g) 的算术平均 (单值)。
 // 全部按内容成长 (grow=true), 基准宽只贴标题/内容的典型宽度, 不留大补白 ——
 // 这样与第 1 页和其它表一样, 列与列之间视觉上只隔 1 格。
 func modelCols() []tuiCol {

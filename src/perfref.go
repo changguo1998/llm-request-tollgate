@@ -1,6 +1,6 @@
 // perfref.go: 速度参考 (speed reference) 参数加载与 r* 指标计算.
 //
-// 定稿口径见 docs/speed-metric.md §6: r* = (c/d) * (c/b)^(-g).
+// 定稿口径见 docs/speed-metric.md §6: r* = m * (c/d) * (c/b)^(-g).
 // 参数来自 analysis/plot_speedref.py 生成的 JSON (analysis/figs/speedref_params.json),
 // 键为 "upstream/model", 每个条目含 g/a; 顶层 _meta 元数据被忽略.
 //
@@ -14,16 +14,18 @@ import (
 	"os"
 )
 
-// perfParam 是一条 上游/模型 的速度参考参数: g 长度指数, a 参考基准 (log 空间).
+// perfParam 是一条 上游/模型 的速度参考参数: g 长度指数, a 参考基准 (log 空间),
+// M 缩放常数 (典型密度处的 (c/b)^g, 使典型状态 r* 回到实际解码速率).
 type perfParam struct {
 	G float64 `json:"g"`
 	A float64 `json:"a"`
+	M float64 `json:"m,omitempty"`
 }
 
 // perfMetaKey 是参数文件顶层的元数据键 (_meta: 版本/时间戳), 加载时跳过.
 const perfMetaKey = "_meta"
 
-// PerfRef 是所有模型的速度参考参数表: "upstream/model" -> (g, a).
+// PerfRef 是所有模型的速度参考参数表: "upstream/model" -> (g, a, m).
 type PerfRef struct {
 	byModel map[string]perfParam
 }
@@ -63,12 +65,13 @@ func (p *PerfRef) g(up, model string) float64 {
 	return pr.G
 }
 
-// index 算一笔请求的速度参考指标 r* (性能): (c/d) * (c/b)^(-g).
+// index 算一笔请求的速度参考指标 r* (性能): m * (c/d) * (c/b)^(-g).
 // c/d 用解码吞吐 (c 输出 token, d 毫秒), (c/b) 用字节密度的倒数. 为什么是 -g: 归一目标是
-// 让 r* 与密度无关 — 拟合 log(c/d) = a + g*log(c/b) 给出 g 后, log r* = log(c/d) - g*log(c/b)
-// 沿拟合线恒等于 a, 即任一密度的请求归一后都落回该模型典型速率 e^a (典型状态附近数值即该
-// 模型典型速率, 约 e^a 量级); a 仅作参考不参与计算. 任一输入无效 (c<=0 / d<=0 / b<=0) 时
-// 返回 0, 调用方应保证先行过滤; 参数表里没有该模型时退回原始速率 c/d.
+// 让 r* 与密度无关 — 拟合 log(c/d) = a + g*log(c/b) 给出 g 后, 沿拟合线 log r* = log(c/d)
+// − g*log(c/b) 恒等于 a, 即任一密度的请求归一后都落回同一个基准. m 是缩放常数
+// (典型密度处的 (c/b)^g), 把它乘回去让典型值回到该模型实际解码速率 (约 e^a 量级);
+// 旧参数表缺 m 时按 1 处理 (仅基准不同, 相对比较不受影响). 任一输入无效 (c<=0 / d<=0 /
+// b<=0) 时返回 0; 参数表里没有该模型时退回原始速率 c/d.
 func (p *PerfRef) index(up, model string, c, d, b int64) float64 {
 	if c <= 0 || d <= 0 || b <= 0 {
 		return 0
@@ -78,7 +81,11 @@ func (p *PerfRef) index(up, model string, c, d, b int64) float64 {
 	if !ok {
 		return rate // 无参考参数: 退回原始速率
 	}
-	// perf (性能, r*): (c/d) * (c/b)^(-g); c/b 恒为正, 无定义域问题
-	perf := rate * math.Pow(float64(c)/float64(b), -pr.G)
+	// perf (性能, r*): m * (c/d) * (c/b)^(-g); c/b 恒为正, 无定义域问题
+	m := pr.M
+	if m <= 0 {
+		m = 1 // 旧参数表无 m: 退 m=1
+	}
+	perf := m * rate * math.Pow(float64(c)/float64(b), -pr.G)
 	return perf
 }

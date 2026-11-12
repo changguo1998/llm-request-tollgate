@@ -40,6 +40,32 @@ func TestPerfRefLoadAndIndex(t *testing.T) {
 	}
 }
 
+// m 存在时乘进去: r* = m * (c/d) * (c/b)^(-g).
+func TestPerfRefScaleM(t *testing.T) {
+	p, err := loadPerfRef(writePerfRef(t, `{"ustc/m1": {"g": 0.5, "a": 2.0, "m": 3.0}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := p.index("ustc", "m1", 100, 5000, 6000)
+	want := 3.0 * 20.0 * math.Pow(100.0/6000.0, -0.5)
+	if math.Abs(got-want) > 1e-9 {
+		t.Errorf("带 m 应乘入: got %v want %v", got, want)
+	}
+}
+
+// 旧参数表无 m 字段: 按 m=1 处理 (兼容旧 JSON).
+func TestPerfRefMissingM(t *testing.T) {
+	p, err := loadPerfRef(writePerfRef(t, `{"ustc/m1": {"g": 0.5}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := p.index("ustc", "m1", 100, 5000, 6000)
+	want := 20.0 * math.Pow(100.0/6000.0, -0.5)
+	if math.Abs(got-want) > 1e-9 {
+		t.Errorf("缺 m 应退 m=1: got %v want %v", got, want)
+	}
+}
+
 // g=0 且参数在表中: (c/b)^0=1, perf 等于原始速率 c/d.
 func TestPerfRefGZeroInTable(t *testing.T) {
 	p, err := loadPerfRef(writePerfRef(t, perfRefSample))
@@ -171,6 +197,9 @@ func TestPerfRecomputeFromLogs(t *testing.T) {
 	}
 	if want := math.Log(50.0); math.Abs(pr.A-want) > 1e-9 {
 		t.Errorf("a 应为 ln(50)=%v, 得到 %v", want, pr.A)
+	}
+	if math.Abs(pr.M-1) > 1e-9 {
+		t.Errorf("恒定样本 m 应为 1 (g=0), 得到 %v", pr.M)
 	}
 }
 

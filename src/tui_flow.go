@@ -133,7 +133,7 @@ func (m *tuiModel) stageTail(f flow, tr flowTry) []string {
 }
 
 // livePerf 是接收中这一笔的实时性能 (r*): 用已收到的输出 token / 首字节到现在的毫秒 /
-// 已收到的字节, 按当前参数表现算 perf = (c/d)*(c/b)^(-g); 缺参数时退原始解码速率。
+// 已收到的字节, 按当前参数表现算 perf = m*(c/d)*(c/b)^(-g); 缺参数时退原始解码速率。
 // 样本不齐 (token / 字节 / 接收窗口任一缺失) 时为空。
 func (m *tuiModel) livePerf(f flow) string {
 	if f.Stage != stageRecv || f.RecvStart <= 0 || f.RecvTok <= 0 || f.RecvBytes <= 0 {

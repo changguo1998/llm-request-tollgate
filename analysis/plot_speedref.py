@@ -198,8 +198,10 @@ def main():
         g, a = np.polyfit(zall[sel], yall[sel], 1)
         f = flatness(ideal, float(g))
         n_dense = int(sel.sum())
+        # 缩放常数 m = (典型区 c/b 中位)^g: 把归一后的 r* 校准回典型解码速率量级
+        m = math.exp(g * median(zall[sel]))
         params[f"{up}/{model}"] = {
-            "g": round(float(g), 4), "a": round(float(a), 4),
+            "g": round(float(g), 4), "a": round(float(a), 4), "m": round(float(m), 6),
             "ref_hours": sorted(ih), "n_ideal": len(ideal), "n_typical": n_dense,
             "frac": FRAC,
             "flatness_short_mid_long": [round(v, 3) for v in f],

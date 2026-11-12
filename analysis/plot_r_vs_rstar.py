@@ -62,7 +62,8 @@ def load_pts(params, only):
                 if c <= 0 or d <= 0 or b <= 0:
                     continue
                 r = c / d * 1000.0
-                rstar = r * (c / b) ** (-pr["g"])
+                m = pr.get("m", 1) or 1
+                rstar = m * r * (c / b) ** (-pr["g"])
                 out.setdefault(key, []).append((r, rstar))
     return out
 

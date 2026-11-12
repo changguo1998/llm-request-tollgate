@@ -317,7 +317,9 @@ func recomputePerfRef(logDir string, models [][2]string) (*PerfRef, []string, er
 			}
 		}
 		g, a := perfOLS(zs, ys)
-		byModel[m[0]+"/"+m[1]] = perfParam{G: g, A: a}
+		// 缩放常数 m = (典型区 c/b 中位)^g: 把归一后的 r* 校准回典型解码速率量级
+		scale := math.Exp(g * perfMedian(zs))
+		byModel[m[0]+"/"+m[1]] = perfParam{G: g, A: a, M: scale}
 	}
 	return &PerfRef{byModel: byModel}, skipped, nil
 }

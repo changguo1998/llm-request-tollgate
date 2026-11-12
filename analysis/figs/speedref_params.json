@@ -1,11 +1,12 @@
 {
   "_meta": {
     "version": "2026-11",
-    "generated_at": "2026-11-12T23:34:37"
+    "generated_at": "2026-11-12T23:40:28"
   },
   "group/gpt-6-sol": {
     "g": 0.2263,
     "a": 5.3306,
+    "m": 0.190943,
     "ref_hours": [
       6,
       8
@@ -23,6 +24,7 @@
   "ustc/deepseek-flash": {
     "g": 0.7937,
     "a": 7.9505,
+    "m": 0.031757,
     "ref_hours": [
       3,
       5,
@@ -45,6 +47,7 @@
   "group/kimi-k3.1-pro": {
     "g": 0.2223,
     "a": 5.5518,
+    "m": 0.329122,
     "ref_hours": [
       5,
       6,
@@ -65,6 +68,7 @@
   "arkcp/deepseek-v4-1-flash-economy": {
     "g": -0.3562,
     "a": 2.9087,
+    "m": 6.003409,
     "ref_hours": [
       0,
       12,
@@ -83,6 +87,7 @@
   "group/deepseek-v4.1-flash-off": {
     "g": -1.2584,
     "a": -1.9576,
+    "m": 1155.806287,
     "ref_hours": [
       18,
       21

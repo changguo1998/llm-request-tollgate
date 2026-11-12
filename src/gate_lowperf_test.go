@@ -365,7 +365,7 @@ func TestLowPerfLockRelockResetsAfterWindow(t *testing.T) {
 	}
 }
 
-// 有参数表 + 响应字节时, 低性能样本按该请求的 r* 记: 样本值 = (c/d)*(c/b)^(-g)。
+// 有参数表 + 响应字节时, 低性能样本按该请求的 r* 记: 样本值 = m*(c/d)*(c/b)^(-g)。
 func TestLowPerfRequestRecordsPerfValue(t *testing.T) {
 	a, c := newPerfApp(normGate(GateCfg{}))
 	a.perfRef = &PerfRef{byModel: map[string]perfParam{"u1/m1": {G: 1}}}

@@ -50,7 +50,7 @@ func (a *App) recomputePerf() {
 	log.Printf("perf recompute: %d model(s)%s", len(p.byModel), note)
 }
 
-// perfIndex 是速度参考指标的线程安全读取口: perf = (c/d)*(c/b)^(-g); 无参数表时
+// perfIndex 是速度参考指标的线程安全读取口: perf = m*(c/d)*(c/b)^(-g); 无参数表时
 // 退回原始速率 c/d (tokens/s)。
 func (a *App) perfIndex(up, model string, c, d, b int64) float64 {
 	a.perfRefMu.RLock()
