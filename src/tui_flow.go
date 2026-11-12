@@ -66,7 +66,7 @@ func (m *tuiModel) stageChain(f flow, tr flowTry) string {
 }
 
 // stageTokens 把到过的阶段按流程顺序拼成链首, 每段写「短词 耗时」: 当前段实时走
-// (不满 1s 也写), 已结束且不满 1s 的段不写耗时; 没到过的阶段不出现。
+// (不满 1s 也写, 耗时用青色标出), 已结束且不满 1s 的段不写耗时; 没到过的阶段不出现。
 func (m *tuiModel) stageTokens(f flow, tr flowTry) []string {
 	reach := func(st int) bool {
 		return tr.Cur == st || (st < len(tr.Segs) && tr.Segs[st] > 0)
@@ -85,6 +85,9 @@ func (m *tuiModel) stageTokens(f flow, tr flowTry) []string {
 		sec := secOf(st)
 		if tr.Cur != st && sec < 1 {
 			return ""
+		}
+		if tr.Cur == st { // 当前阶段的耗时实时走, 用无状态含义的青色标出
+			return " " + tuiLive + segStr(sec) + tuiReset
 		}
 		return " " + segStr(sec)
 	}

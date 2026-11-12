@@ -26,6 +26,15 @@ func TestStageChainBuild(t *testing.T) {
 		t.Fatalf("阶段链应为 %q, 得到 %q", want, got)
 	}
 
+	// 当前阶段 (recv) 的耗时带进行中的青色; 已结束的各段不带。
+	raw := m.stageChain(f, tr)
+	if !strings.Contains(raw, "recv "+tuiLive+"4s"+tuiReset) {
+		t.Errorf("当前阶段的耗时应带青色: %q", raw)
+	}
+	if strings.Contains(raw, tuiLive+"3s") || strings.Contains(raw, tuiLive+"10s") {
+		t.Errorf("已结束阶段的耗时不该带进行中色: %q", raw)
+	}
+
 	// 还没取信号量时解析段单独出现, 不写 sem。
 	takeParse := flowTry{Cur: stageParse, Segs: make([]float64, stageCount)}
 	takeParse.Segs[stageParse] = 2
@@ -37,11 +46,11 @@ func TestStageChainBuild(t *testing.T) {
 	fail := flow{Logical: "lg"}
 	trf := flowTry{Up: "u1", Cur: stageSend, Fail: "fail(502)", Segs: make([]float64, stageCount)}
 	trf.Segs[stageSem] = 1
-	raw := m.stageChain(fail, trf)
-	if !strings.Contains(raw, tuiRed+"fail(502)"+tuiReset) {
-		t.Errorf("失败结局应红字: %q", raw)
+	failRaw := m.stageChain(fail, trf)
+	if !strings.Contains(failRaw, tuiRed+"fail(502)"+tuiReset) {
+		t.Errorf("失败结局应红字: %q", failRaw)
 	}
-	if got := stripANSI(raw); !strings.HasSuffix(got, "send 0s fail(502)") {
+	if got := stripANSI(failRaw); !strings.HasSuffix(got, "send 0s fail(502)") {
 		t.Errorf("链尾应为 send 0s fail(502), 得到 %q", got)
 	}
 }
