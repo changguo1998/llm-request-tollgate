@@ -78,6 +78,7 @@ type Config struct {
 	LowPerfWindowSec   float64 `json:"lowperf_window_sec"`
 	LowPerfPeakMax     int     `json:"lowperf_peak_max"`     // tokens/s, 非时间
 	LowPerfAvgMax      int     `json:"lowperf_avg_max"`      // tokens/s, 非时间
+	LowPerfRelMax      float64 `json:"lowperf_rel_max"`      // 低吞吐相对门槛: 当前平均 / 历史平均 < 它 (0.2 = 20%)
 	LowPerfTtfbMaxSec  float64 `json:"lowperf_ttfb_max_sec"` // 高延迟阈值 (秒); 0 = 关闭
 	LowPerfLockSec     float64 `json:"lowperf_lock_sec"`
 	// LowPerfExempt 是低性能锁豁免名单: 名单内的真实模型 id 禁止触发低性能锁。
@@ -223,6 +224,7 @@ func (c *Config) gate() GateCfg {
 		IntervalMs: secToMs(c.IntervalSec), SemWaitMs: secToMs(c.SemWaitSec), QueueWaitMs: secToMs(c.QueueWaitSec),
 		ConcurrencyLockMs: secToMs(c.ConcurrencyLockSec), QuotaLockMs: secToMs(c.QuotaLockSec), BreakerLockMs: secToMs(c.BreakerLockSec),
 		LowPerfWindowMs: secToMs(c.LowPerfWindowSec), LowPerfPeakMax: c.LowPerfPeakMax, LowPerfAvgMax: c.LowPerfAvgMax,
+		LowPerfRelMax: c.LowPerfRelMax,
 		LowPerfLockMs: secToMs(c.LowPerfLockSec), LowPerfTtfbMaxMs: secToMs(c.LowPerfTtfbMaxSec),
 		LowPerfExempt:  c.LowPerfExempt,
 		RetryBackoffMs: secListToMs(c.RetryBackoffSec),
@@ -235,7 +237,7 @@ func (c *Config) setGate(g GateCfg) {
 	c.IntervalSec, c.SemWaitSec, c.QueueWaitSec = msToSec(g.IntervalMs), msToSec(g.SemWaitMs), msToSec(g.QueueWaitMs)
 	c.ConcurrencyLockSec, c.QuotaLockSec, c.BreakerLockSec = msToSec(g.ConcurrencyLockMs), msToSec(g.QuotaLockMs), msToSec(g.BreakerLockMs)
 	c.LowPerfWindowSec = msToSec(g.LowPerfWindowMs)
-	c.LowPerfPeakMax, c.LowPerfAvgMax = g.LowPerfPeakMax, g.LowPerfAvgMax
+	c.LowPerfPeakMax, c.LowPerfAvgMax, c.LowPerfRelMax = g.LowPerfPeakMax, g.LowPerfAvgMax, g.LowPerfRelMax
 	c.LowPerfLockSec, c.LowPerfTtfbMaxSec = msToSec(g.LowPerfLockMs), msToSec(g.LowPerfTtfbMaxMs)
 	c.LowPerfExempt = g.LowPerfExempt
 	c.RetryBackoffSec = msListToSec(g.RetryBackoffMs)
@@ -250,13 +252,15 @@ type GateCfg struct {
 	ConcurrencyLockMs int `json:"concurrency_lock_ms"`
 	QuotaLockMs       int `json:"quota_lock_ms"`
 	BreakerLockMs     int `json:"breaker_lock_ms"`
-	// 低性能锁: 覆盖两种「慢到没有实用价值」—— 低吞吐 (窗口内解码吞吐的峰值与平均都
-	// 低于门槛) 或 高延迟 (窗口内平均首字节时延超过阈值), 任一命中即锁该 上游/模型。
-	LowPerfWindowMs  int `json:"lowperf_window_ms"`
-	LowPerfPeakMax   int `json:"lowperf_peak_max"`    // 低吞吐峰值上限 (tokens/s)
-	LowPerfAvgMax    int `json:"lowperf_avg_max"`     // 低吞吐平均上限 (tokens/s)
-	LowPerfTtfbMaxMs int `json:"lowperf_ttfb_max_ms"` // 高延迟阈值 (平均首字节时延, ms); 0 = 关闭该项
-	LowPerfLockMs    int `json:"lowperf_lock_ms"`
+	// 低性能锁: 覆盖两种「慢到没有实用价值」—— 低吞吐 (峰值与平均低于绝对门槛, 且
+	// 当前平均 / 历史平均低于 lowperf_rel_max) 或 高延迟 (窗口内平均首字节时延超过阈值),
+	// 任一命中即锁该 上游/模型。
+	LowPerfWindowMs  int     `json:"lowperf_window_ms"`
+	LowPerfPeakMax   int     `json:"lowperf_peak_max"`    // 低吞吐峰值上限 (tokens/s)
+	LowPerfAvgMax    int     `json:"lowperf_avg_max"`     // 低吞吐平均上限 (tokens/s)
+	LowPerfRelMax    float64 `json:"lowperf_rel_max"`     // 低吞吐相对门槛: 当前平均 / 历史平均 < 它
+	LowPerfTtfbMaxMs int     `json:"lowperf_ttfb_max_ms"` // 高延迟阈值 (平均首字节时延, ms); 0 = 关闭该项
+	LowPerfLockMs    int     `json:"lowperf_lock_ms"`
 	// LowPerfExempt 是低性能锁豁免名单: 名单内的模型禁止触发低性能锁 (按真实模型 id 匹配)。
 	LowPerfExempt  []string `json:"lowperf_exempt,omitempty"`
 	RetryBackoffMs []int    `json:"retry_backoff_ms"`
@@ -266,6 +270,9 @@ type GateCfg struct {
 
 // gateIntervalMs 是出队节拍的缺省值。
 const gateIntervalMs = 500
+
+// defaultLowPerfRelMax 是低吞吐相对门槛的缺省值 (当前平均 / 历史平均 < 20%)。
+const defaultLowPerfRelMax = 0.2
 
 // normGate 按缺省值补齐门控参数。
 func normGate(g GateCfg) GateCfg {
@@ -295,6 +302,12 @@ func normGate(g GateCfg) GateCfg {
 	}
 	if g.LowPerfAvgMax <= 0 {
 		g.LowPerfAvgMax = 1
+	}
+	if g.LowPerfRelMax <= 0 {
+		g.LowPerfRelMax = defaultLowPerfRelMax
+	}
+	if g.LowPerfRelMax > 1 {
+		g.LowPerfRelMax = 1
 	}
 	if g.LowPerfLockMs <= 0 {
 		g.LowPerfLockMs = 300000

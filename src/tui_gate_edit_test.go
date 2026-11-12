@@ -15,9 +15,9 @@ func TestAdjustGateBounds(t *testing.T) {
 		0: {100, 60000}, 1: {100, 600000}, 2: {100, 600000},
 		4: {1000, 86400000}, 5: {1000, 86400000}, 6: {1000, 86400000},
 		7: {1000, 86400000}, 8: {1000, 86400000},
-		9: {1, 100000}, 10: {1, 100000}, 11: {0, 86400000},
-		12: {60000, 86400000}, 13: {1000, 86400000}, 14: {1000, 86400000},
-		15: {0, 1},
+		9: {1, 100000}, 10: {1, 100000}, 11: {1, 100},
+		12: {0, 86400000}, 13: {60000, 86400000}, 14: {1000, 86400000}, 15: {1000, 86400000},
+		16: {0, 1},
 	}
 	for i, b := range bounds {
 		e.gateSel = i
@@ -63,6 +63,7 @@ func TestSetGatePromptInvalid(t *testing.T) {
 		{gateIdxProbe, -1, "maybe", "probe_enabled 要用 0/1 / on/off / 开/关"},
 		{0, before, "abc", "出队间隔 要非负秒数 (可小数)"},
 		{gateIdxPeak, -1, "0", "低吞吐峰值 要正整数 (t/s)"},
+		{gateIdxRel, -1, "0", "低吞吐历史比 要 1-100 的整数百分比"},
 	}
 	for _, c := range cases {
 		e.gateDirty = false
@@ -93,5 +94,9 @@ func TestSetGatePromptInvalid(t *testing.T) {
 	e.setGatePrompt(gateIdxPeak, "7")
 	if e.gate.LowPerfPeakMax != 7 {
 		t.Errorf("峰值门槛应为 7, 得到 %d", e.gate.LowPerfPeakMax)
+	}
+	e.setGatePrompt(gateIdxRel, "35")
+	if e.gate.LowPerfRelMax != 0.35 {
+		t.Errorf("历史比门槛应为 0.35, 得到 %v", e.gate.LowPerfRelMax)
 	}
 }

@@ -88,12 +88,12 @@ func TestModelRowsDecodeAndByteRates(t *testing.T) {
 func TestTUISettingsWindowsEditAndSave(t *testing.T) {
 	_, cfg := prioFixture(t)
 	e := newTuiEditor(cfg)
-	e.gateSel = 12 // rate_window_sec (gateLabels 下标)
+	e.gateSel = 13 // rate_window_sec (gateLabels 下标)
 	e.adjustGate(1)
 	if e.rateWinMs != 3600000+600000 {
 		t.Fatalf("rate +10min 应到 %d, 得到 %d", 3600000+600000, e.rateWinMs)
 	}
-	e.gateSel = 13
+	e.gateSel = 14
 	e.adjustGate(1)
 	if e.blockWinMs != 35000+5000 {
 		t.Fatalf("block +5s 应到 %d, 得到 %d", 35000+5000, e.blockWinMs)
@@ -131,7 +131,7 @@ func TestTUISettingsStickyTtlEditAndSave(t *testing.T) {
 	if e.gate.StickyTTLMs != 300000 {
 		t.Fatalf("缺省粘性失效窗口应为 300000ms (5min), 实为 %d", e.gate.StickyTTLMs)
 	}
-	e.gateSel = 14 // sticky_ttl_sec (gateLabels 下标)
+	e.gateSel = 15 // sticky_ttl_sec (gateLabels 下标)
 	e.adjustGate(1)
 	if e.gate.StickyTTLMs != 300000+60000 {
 		t.Fatalf("粘性失效窗口 +1 应到 %d, 实为 %d", 300000+60000, e.gate.StickyTTLMs)

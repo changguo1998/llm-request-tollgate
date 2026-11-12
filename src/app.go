@@ -37,7 +37,12 @@ type App struct {
 	connectNs   atomic.Int64 // 建连超时 (纳秒)
 	streamIdlNs atomic.Int64 // 流空闲超时 (纳秒)
 
-	gatePath string // 定时锁状态文件 (var/gate-state.json)
+	gatePath string // 定时锁与历史性能样本的状态文件 (var/gate-state.json)
+	// perfSaved 是历史性能样本上次落盘的时刻 (写盘节流; 零值 = 还没存过)。
+	perfMu    sync.Mutex
+	perfSaved time.Time
+	// gateSaveMu 串行化状态文件写入: 锁事件与历史样本落盘可能并发调用。
+	gateSaveMu sync.Mutex
 
 	logMu  sync.Mutex
 	logW   *os.File

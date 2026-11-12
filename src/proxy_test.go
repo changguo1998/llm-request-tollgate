@@ -830,6 +830,24 @@ func TestLoadConfigLowPerfExempt(t *testing.T) {
 	}
 }
 
+// 低吞吐相对门槛 (扁平顶层键 lowperf_rel_max): 原样读入并透传到 GateCfg。
+func TestLoadConfigLowPerfRelMax(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "rel.json")
+	if err := os.WriteFile(p, []byte(`{
+	  "lowperf_rel_max": 0.35,
+	  "upstreams": [{"id": "u1", "base_url": "http://x"}]
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(p)
+	if err != nil {
+		t.Fatalf("应照常加载: %v", err)
+	}
+	if cfg.LowPerfRelMax != 0.35 || cfg.gate().LowPerfRelMax != 0.35 {
+		t.Fatalf("lowperf_rel_max 应透传 0.35, 得到 %v / %v", cfg.LowPerfRelMax, cfg.gate().LowPerfRelMax)
+	}
+}
+
 // 旧字段 group / billing_group 兼容: 新字段缺省时回落采用, 加载后归一化到
 // Alias / Billing 并清空旧字段.
 func TestLoadConfigLegacyModelFields(t *testing.T) {

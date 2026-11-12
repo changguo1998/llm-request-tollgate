@@ -13,6 +13,7 @@
   "lowperf_window_sec": 600,
   "lowperf_peak_max": 5,
   "lowperf_avg_max": 1,
+  "lowperf_rel_max": 0.2,
   "lowperf_ttfb_max_sec": 30,
   "lowperf_lock_sec": 300,
   "lowperf_exempt": [],

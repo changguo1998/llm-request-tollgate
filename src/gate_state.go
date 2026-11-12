@@ -20,10 +20,20 @@ type gateLockRec struct {
 	Path     string `json:"path,omitempty"`
 }
 
-// gateState 是 gate-state.json 的内容: 只存未到期的定时锁 (组锁与模型锁)。
+// gatePerfRec 是落盘的历史解码速率: N 是样本笔数, Sum 是各笔 tok/dur 速率之和;
+// 历史平均 = Sum/N (各笔速率的算术平均)。
+type gatePerfRec struct {
+	Upstream string  `json:"upstream"`
+	Model    string  `json:"model"`
+	N        int64   `json:"n"`
+	Sum      float64 `json:"sum"`
+}
+
+// gateState 是 gate-state.json 的内容: 未到期的定时锁 (组锁与模型锁) 与历史性能样本。
 type gateState struct {
 	UpdatedAt string                 `json:"updated_at"`
 	Locks     map[string]gateLockRec `json:"locks"`
+	Perf      map[string]gatePerfRec `json:"perf,omitempty"`
 }
 
 // recordGenericFailure 记一次通用兜底失败: 该模型连续错误计数 +1 并按 retry_backoff_ms
@@ -110,14 +120,21 @@ func (c *cand) locks() (out []gateLockRec) {
 	return out
 }
 
-// saveGateState 把未到期的定时锁落盘 (先写临时文件再改名)。
-// 键只求唯一, 归属看记录自己的 upstream / group / model。
+// saveGateState 把未到期的定时锁与历史性能样本落盘 (先写临时文件再改名)。
+// 锁的键只求唯一, 归属看记录自己的 upstream / group / model; 性能记录按 upstream/model
+// 聚合, 用于重启后继续算低吞吐的历史平均。
 func (a *App) saveGateState() {
 	if a.gatePath == "" {
 		return
 	}
+	a.gateSaveMu.Lock()
+	defer a.gateSaveMu.Unlock()
 	now := time.Now()
-	st := gateState{UpdatedAt: now.Format(time.RFC3339Nano), Locks: map[string]gateLockRec{}}
+	st := gateState{
+		UpdatedAt: now.Format(time.RFC3339Nano),
+		Locks:     map[string]gateLockRec{},
+		Perf:      map[string]gatePerfRec{},
+	}
 	a.mu.RLock()
 	cands := make([]*cand, 0, len(a.cands))
 	for _, c := range a.cands {
@@ -134,6 +151,9 @@ func (a *App) saveGateState() {
 			}
 			st.Locks[key] = rec
 		}
+		for _, p := range c.perfStats() {
+			st.Perf[p.Upstream+"/"+p.Model] = p
+		}
 	}
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
@@ -149,7 +169,38 @@ func (a *App) saveGateState() {
 	}
 }
 
-// loadGateState 启动时恢复未到期的定时锁 (组锁与模型锁); 已过期的直接丢掉。
+// perfStats 取该候选各模型的历史性能样本 (锁内快照), 供落盘。
+func (c *cand) perfStats() []gatePerfRec {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]gatePerfRec, 0, len(c.modelGates))
+	for model, g := range c.modelGates {
+		if g.perfN > 0 {
+			out = append(out, gatePerfRec{Upstream: c.id, Model: model, N: g.perfN, Sum: g.perfSum})
+		}
+	}
+	return out
+}
+
+// perfSaveInterval 是历史性能样本的落盘节流: 成功请求很频繁, 不必每笔都重写状态文件。
+const perfSaveInterval = 10 * time.Second
+
+// savePerfState 按节流把历史性能样本写盘 (与锁共用 gate-state.json)。
+func (a *App) savePerfState() {
+	if a.gatePath == "" {
+		return
+	}
+	a.perfMu.Lock()
+	if time.Since(a.perfSaved) < perfSaveInterval {
+		a.perfMu.Unlock()
+		return
+	}
+	a.perfSaved = time.Now()
+	a.perfMu.Unlock()
+	a.saveGateState()
+}
+
+// loadGateState 启动时恢复未到期的定时锁与历史性能样本; 过期的锁直接丢掉。
 func (a *App) loadGateState() {
 	if a.gatePath == "" {
 		return
@@ -159,13 +210,13 @@ func (a *App) loadGateState() {
 		return
 	}
 	var st gateState
-	if json.Unmarshal(b, &st) != nil || st.Locks == nil {
+	if json.Unmarshal(b, &st) != nil {
 		return
 	}
 	now := time.Now()
-	restored := 0
 	a.mu.RLock()
 	defer a.mu.RUnlock()
+	restored := 0
 	for _, rec := range st.Locks {
 		upID, group, model := rec.Upstream, rec.Group, rec.Model
 		c, ok := a.cands[upID]
@@ -192,7 +243,22 @@ func (a *App) loadGateState() {
 		}
 		restored++
 	}
-	if restored > 0 {
-		log.Printf("gate: restored %d timed locks from %s", restored, a.gatePath)
+	perf := 0
+	for _, p := range st.Perf {
+		if p.N <= 0 || p.Model == "" {
+			continue
+		}
+		c, ok := a.cands[p.Upstream]
+		if !ok {
+			continue
+		}
+		c.mu.Lock()
+		mg := c.gate(p.Model)
+		mg.perfN, mg.perfSum = p.N, p.Sum
+		c.mu.Unlock()
+		perf++
+	}
+	if restored > 0 || perf > 0 {
+		log.Printf("gate: restored %d timed locks and %d perf records from %s", restored, perf, a.gatePath)
 	}
 }

@@ -315,6 +315,7 @@ LiteLLM 形 / 方舟形 / CLIProxyAPI 形；第五家 `deepseek` 是官方直连
     "lowperf_window_ms": 600000,
     "lowperf_peak_max": 5,
     "lowperf_avg_max": 1,
+    "lowperf_rel_max": 0.2,
     "lowperf_ttfb_max_ms": 30000,
     "lowperf_lock_ms": 300000,
     "retry_backoff_ms": [10000, 20000, 30000]

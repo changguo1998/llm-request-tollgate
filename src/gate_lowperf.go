@@ -28,14 +28,14 @@ const (
 )
 
 // notePerf 记一笔成功响应的性能样本并判低性能锁。tp 非 nil = 有解码吞吐样本 (流式),
-// ttfbMs > 0 = 有首字节时延样本 (任何成功响应)。窗口内样本够数且「低吞吐 (峰值与平均
-// 都低于门槛) 或 高延迟 (平均首字节时延超过阈值)」任一命中时返回 (peak, avg, latAvg,
-// true), 由调用方加锁并落盘。
-// 触发后清空样本: 锁到期从新样本重判, 不至于被旧样本立刻再锁一次。
-func (c *cand) notePerf(model string, tp *tokPoint, ttfbMs int64, g GateCfg) (peak, avg, latAvg float64, low bool) {
+// ttfbMs > 0 = 有首字节时延样本 (任何成功响应)。低吞吐 = 峰值与平均都低于绝对门槛,
+// 且当前平均 / 历史平均低于 lowperf_rel_max; 历史样本不足时不判低吞吐。高延迟 = 窗口内
+// 平均首字节时延超过阈值; 两个分支任一命中即返回 low=true, 由调用方加锁。sampled 表示
+// 这笔是否记入了历史解码速率 (供落盘节流)。触发后清空窗口样本。
+func (c *cand) notePerf(model string, tp *tokPoint, ttfbMs int64, g GateCfg) (peak, avg, latAvg float64, low, sampled bool) {
 	// 豁免名单 (lowperf_exempt): 名单内的模型禁止触发低性能锁, 也不收集样本。
 	if g.lowPerfExempt(model) {
-		return 0, 0, 0, false
+		return 0, 0, 0, false, false
 	}
 	now := time.Now()
 	window := g.lowPerfWindow()
@@ -43,22 +43,30 @@ func (c *cand) notePerf(model string, tp *tokPoint, ttfbMs int64, g GateCfg) (pe
 	defer c.mu.Unlock()
 	mg := c.gate(model)
 	if l := mg.lock; l.active(now) && l.reason == lowPerfReason {
-		return 0, 0, 0, false // 已经在低性能锁里: 等解锁后从新样本重判
+		return 0, 0, 0, false, false // 已经在低性能锁里: 等解锁后从新样本重判
 	}
 	if tp != nil {
 		mg.tps = append(mg.tps, *tp)
 		mg.tps = trimSamples(mg.tps, now, window)
+		mg.perfN++
+		mg.perfSum += float64(tp.tok) / (float64(tp.dur) / 1000)
+		sampled = true
 	}
 	if ttfbMs > 0 {
 		mg.lat = append(mg.lat, latPoint{ts: now, ms: ttfbMs})
 		mg.lat = trimLat(mg.lat, now, window)
 	}
-	// 低吞吐分支: 需能拆出解码段的流式成功样本, 且峰值与平均都低于门槛。
+	// 低吞吐分支: 绝对门槛 (峰值与平均都低于门槛) 且相对历史平均也明显变慢。
+	// 历史样本不足时不判: 新模型 / 重启后要先积累历史。
 	if len(mg.tps) >= minPerfSamples {
 		avg, peak, ok := tokRate(mg.tps, now, window)
-		if ok && peak < float64(g.LowPerfPeakMax) && avg < float64(g.LowPerfAvgMax) {
-			mg.tps, mg.lat = nil, nil
-			return peak, avg, latAvg, true
+		if ok && peak < float64(g.LowPerfPeakMax) && avg < float64(g.LowPerfAvgMax) &&
+			mg.perfN >= minPerfSamples && mg.perfSum > 0 {
+			histAvg := mg.perfSum / float64(mg.perfN)
+			if avgRate(mg.tps)/histAvg < g.LowPerfRelMax {
+				mg.tps, mg.lat = nil, nil
+				return peak, avg, latAvg, true, sampled
+			}
 		}
 	}
 	// 高延迟分支: 仅当配置了非零阈值, 窗口内平均首字节时延超过它才判。
@@ -66,10 +74,10 @@ func (c *cand) notePerf(model string, tp *tokPoint, ttfbMs int64, g GateCfg) (pe
 		latAvg = avgLat(mg.lat)
 		if latAvg > float64(thr.Milliseconds()) {
 			mg.tps, mg.lat = nil, nil
-			return peak, avg, latAvg, true
+			return peak, avg, latAvg, true, sampled
 		}
 	}
-	return peak, avg, latAvg, false
+	return peak, avg, latAvg, false, sampled
 }
 
 // relockDur 是低性能锁的重锁时长: 距上次恢复解锁不足一个观察窗口就又锁上, 说明性能
@@ -143,8 +151,10 @@ func (a *App) notePerfRequest(upID, model string, tok int, decodeMs, ttfbMs int6
 	if decodeMs > 0 && tok > 0 {
 		tp = &tokPoint{ts: time.Now(), tok: tok, dur: decodeMs}
 	}
-	peak, avg, latAvg, low := c.notePerf(model, tp, ttfbMs, g)
+	peak, avg, latAvg, low, sampled := c.notePerf(model, tp, ttfbMs, g)
 	if low {
 		a.addLockLowPerf(c, model, peak, avg, latAvg, g.lowPerfLock(), path)
+	} else if sampled {
+		a.savePerfState()
 	}
 }
