@@ -45,7 +45,7 @@ func TestMergedEventRows(t *testing.T) {
 	sec := time.Now().Truncate(time.Second)
 	m.events = append(m.events,
 		routeEvent{Ts: sec, Req: 1, Logical: "a", Kind: "stage", Msg: "new(a) → sem(u1)"},
-		routeEvent{Ts: sec, Req: 0, Logical: "", Kind: "lock", Upstream: "ustc", Msg: "lock(quota 默认 05:00)"},
+		routeEvent{Ts: sec, Req: 0, Logical: "", Kind: "lock", Upstream: "ustc", Msg: "lock(quota def 05:00)"},
 		routeEvent{Ts: sec, Req: 2, Logical: "b", Kind: "stage", Msg: "new(b) → sem(u2)"},
 		routeEvent{Ts: sec, Req: 1, Logical: "a", Kind: "stage", Msg: "sem(u1) → freq(u1)"},
 		routeEvent{Ts: sec, Req: 2, Logical: "b", Kind: "stage", Msg: "sem(u2) → freq(u2)"},
@@ -61,7 +61,7 @@ func TestMergedEventRows(t *testing.T) {
 	for _, r := range rows {
 		if r.Req == 0 {
 			lockRows++
-			if r.Msg != "lock(quota 默认 05:00)" {
+			if r.Msg != "lock(quota def 05:00)" {
 				t.Errorf("锁事件应原样一行, 得到 %q", r.Msg)
 			}
 			continue

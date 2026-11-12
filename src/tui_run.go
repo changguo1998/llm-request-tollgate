@@ -89,16 +89,16 @@ func startTUIProxy(cfgPath string, m *tuiModel) *App {
 			m.errf("服务退出: %v", err)
 		}
 	}()
-	app.evAdd("start", "", "", "", "tollgate 启动, 监听 "+cfg.Listen)
+	app.evAdd("start", "", "", "", "start "+cfg.Listen)
 	// 热加载: settings 页的 h 键与 SIGHUP 走同一条路 (同进程不需要 systemd)。
 	m.reloadFn = func() error {
 		c, err := loadConfig(cfgPath)
 		if err != nil {
-			app.evAdd("reload", "", "", "", "热加载失败: "+err.Error())
+			app.evAdd("reload", "", "", "", "reload fail: "+err.Error())
 			return err
 		}
 		app.applyConfig(c)
-		app.evAdd("reload", "", "", "", "热加载成功: "+cfgPath)
+		app.evAdd("reload", "", "", "", "reload ok: "+cfgPath)
 		return nil
 	}
 	// SIGHUP 热加载别名与上游 (与常驻模式同一语义)。

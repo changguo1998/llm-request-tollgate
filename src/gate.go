@@ -11,14 +11,14 @@ import (
 // minSoftCap 是并发上限的起点: 每次重启从 1 重新爬。
 const minSoftCap = 1
 
-// defaultGroup 是没写 billing 的模型所属的额度组: 键是空串, 屏幕上写作「默认」。
+// defaultGroup 是没写 billing 的模型所属的额度组: 键是空串, 事件文案里写作 def。
 // 一个上游一个默认组: 不写 models 时别名引用的模型都归默认组, 额度锁覆盖该上游的全部模型。
 const defaultGroup = ""
 
-// groupLabel 把组名写成屏幕上好读的形态 (空串是内部键, 不能直出)。
+// groupLabel 把组名写成事件文案里的短词 (空串是内部键, 不能直出)。
 func groupLabel(group string) string {
 	if group == defaultGroup {
-		return "默认"
+		return "def"
 	}
 	return group
 }

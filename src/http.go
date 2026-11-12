@@ -221,7 +221,7 @@ func (a *App) serveSticky(w http.ResponseWriter, r *http.Request) {
 // stickyClear 清除某逻辑名的偏好 (不带 upstream 时的路径)。
 func (a *App) stickyClear(w http.ResponseWriter, logical string) {
 	n := a.sticky.reset(logical)
-	a.evAdd("sticky", logical, "", "", "人工清除偏好 "+strconv.Itoa(n)+" 条")
+	a.evAdd("sticky", logical, "", "", "sticky clr "+strconv.Itoa(n))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"cleared": n})
 }
@@ -260,7 +260,7 @@ func (a *App) stickySet(w http.ResponseWriter, logical, upstream, model string) 
 		return
 	}
 	at := list[idx]
-	a.evAdd("sticky", logical, at.Upstream, at.Model, "人工置偏好 (置一次, 自动迁移照旧)")
+	a.evAdd("sticky", logical, at.Upstream, at.Model, "sticky set")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"logical": logical, "upstream": at.Upstream, "model": at.Model,

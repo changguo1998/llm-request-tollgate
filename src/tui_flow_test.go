@@ -11,7 +11,7 @@ import (
 // 已结束且不足 1s 的段不写耗时; 链尾按需追加卡住原因与结局词。
 func TestStageChainBuild(t *testing.T) {
 	m := newTUIModel("cfg")
-	f := flow{Logical: "lg", Gate: "额度锁 05:00", Stage: stageRecv}
+	f := flow{Logical: "lg", Gate: "quota 05:00", Stage: stageRecv}
 	tr := flowTry{Up: "u1", Model: "mm", Cur: stageRecv, Segs: make([]float64, stageCount)}
 	tr.Segs[stageParse] = 2
 	tr.Segs[stageSem] = 3
@@ -21,7 +21,7 @@ func TestStageChainBuild(t *testing.T) {
 	tr.Segs[stageRecv] = 4
 	got := stripANSI(m.stageChain(f, tr))
 	// 已取过信号量: 解析段由 sem 代表, new 不再单独出现。
-	want := "sem(u1) 3s → freq 5s → queue(mm) 10s → send → recv 4s 额度锁 05:00"
+	want := "sem(u1) 3s → freq 5s → queue(mm) 10s → send → recv 4s quota 05:00"
 	if got != want {
 		t.Fatalf("阶段链应为 %q, 得到 %q", want, got)
 	}
@@ -52,5 +52,26 @@ func TestStageChainBuild(t *testing.T) {
 	}
 	if got := stripANSI(failRaw); !strings.HasSuffix(got, "send 0s fail(502)") {
 		t.Errorf("链尾应为 send 0s fail(502), 得到 %q", got)
+	}
+}
+
+// 链尾只留「为什么卡住」的四个短词; interval (排队必然在等) 与 sent (发送阶段已说明)
+// 不进链尾。
+func TestGateDetailShortWords(t *testing.T) {
+	cases := []struct {
+		gate string
+		want bool
+	}{
+		{"quota 05:00", true},
+		{"breaker 05:00", true},
+		{"lowperf 05:00", true},
+		{"backoff 8s", true},
+		{"interval 1s", false},
+		{"sent", false},
+	}
+	for _, c := range cases {
+		if got := isGateDetail(c.gate); got != c.want {
+			t.Errorf("isGateDetail(%q) 应为 %v, 得到 %v", c.gate, c.want, got)
+		}
 	}
 }

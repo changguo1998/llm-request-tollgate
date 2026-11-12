@@ -12,7 +12,7 @@ import (
 // stageSep 是阶段链里两个阶段词之间的箭头: 一个字符宽 (比 "->" 省一列), 两侧各留一个空格。
 const stageSep = " → "
 
-// evAdd 记一条不挂在某笔请求上的事件 (锁 / 探测 / 解锁 / 启动 / 热载)。
+// evAdd 记一条不挂在某笔请求上的事件 (锁 / 探测 / 解锁 / start / reload)。
 func (a *App) evAdd(kind, logical, upstream, model, msg string) {
 	a.evAddReq(0, kind, logical, upstream, model, msg)
 }
@@ -319,33 +319,27 @@ func (o *flowObs) outcome(from int, word, param string) {
 	o.a.flowFail(o.id, from, word, param)
 }
 
-// gateNow 是「这一笔现在卡在哪一步」: 模型锁 / 组额度锁 / 退避 / 出队节拍 / 已发出。
+// gateNow 是「这一笔现在卡在哪一步」: 锁 / 退避 / 出队节拍 / 已发出。文案用与事件页
+// 同一套短词 (quota / breaker / lowperf / backoff), 不在这里写中文。
 func (o *flowObs) gateNow() string {
 	c := o.a.candOf(o.up)
 	if c == nil {
-		return "已发出"
+		return "sent"
 	}
 	now := time.Now()
 	if locked, left, reason := c.locked(o.model, o.group); locked {
-		why := "额度"
-		switch reason {
-		case "breaker":
-			why = "熔断"
-		case lowPerfReason:
-			why = "低性能"
-		}
-		return why + "锁 " + durStr(left)
+		return lockParam(reason, left)
 	}
 	c.mu.Lock()
 	paused, next := c.pauseOf(o.model), c.nextSend
 	c.mu.Unlock()
 	if paused.After(now) {
-		return "退避 " + durStr(paused.Sub(now))
+		return "backoff " + durStr(paused.Sub(now))
 	}
 	if next.After(now) {
-		return "等节拍 " + durStr(next.Sub(now))
+		return "interval " + durStr(next.Sub(now))
 	}
-	return "已发出"
+	return "sent"
 }
 
 func (a *App) candOf(id string) *cand {

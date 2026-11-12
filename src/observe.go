@@ -42,7 +42,7 @@ type flow struct {
 	Model     string    `json:"backend,omitempty"`  // 该候选的真实模型 id
 	Stage     int       `json:"stage"`
 	Attempt   int       `json:"attempt,omitempty"`    // 已试过的候选数 (含当前)
-	Gate      string    `json:"gate,omitempty"`       // 在等什么 (屏幕上那句话): 已发出 / 等节拍 … / 退避 … / 额度锁 …
+	Gate      string    `json:"gate,omitempty"`       // 在等什么 (屏幕上那句话): sent / interval … / backoff … / quota …
 	RecvTok   int       `json:"recv_tok,omitempty"`   // 接收中: 已收到的输出 token 数 (流式估算)
 	RecvBytes int64     `json:"recv_bytes,omitempty"` // 接收中: 已转发的响应字节数 (流式)
 	RecvStart int64     `json:"recv_start,omitempty"` // 接收中: 首字节到达时刻 (Unix 毫秒)
@@ -134,10 +134,10 @@ type pulse struct {
 	Sticky map[string]stickyView `json:"sticky,omitempty"`
 }
 
-// isGateDetail 判断 Gate 是不是值得写在链尾的细节: 锁与退避是「为什么卡住」的
-// 原因; 等节拍 (在队列里必然在等) 与 已发出 (发送阶段本身已说明) 不写。
+// isGateDetail 判断 Gate 是不是值得写在链尾的细节: quota / breaker / lowperf / backoff
+// 是「为什么卡住」的原因; interval (在队列里必然在等) 与 sent (发送阶段本身已说明) 不写。
 func isGateDetail(g string) bool {
-	for _, p := range []string{"额度锁", "熔断锁", "低性能锁", "退避"} {
+	for _, p := range []string{"quota ", "breaker ", "lowperf ", "backoff "} {
 		if strings.HasPrefix(g, p) {
 			return true
 		}
