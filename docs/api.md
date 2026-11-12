@@ -125,11 +125,11 @@ key):
 - 锁的粒度: 额度锁该模型所属的记账组 (`quota_lock_ms`, 缺省 10min, 额度按组共享,
   一个上游可以有多组); 熔断只锁出错的 `上游/模型` (`breaker_lock_ms`, 缺省 5min);
   低性能锁 (`lowperf_lock_ms`, 缺省 5min) 同样只锁 `上游/模型` —— 最近
-  `lowperf_window_ms` (缺省 10min) 内, 低吞吐 或 高延迟 任一命中即触发:
-  低吞吐 = 解码吞吐的峰值低于 `lowperf_peak_max` (缺省 5 t/s), 体积加权平均低于
-  `lowperf_avg_max` (缺省 1 t/s) (平均 = 输出 token 总量 / 解码段总时长, 峰值 = 单笔最高),
-  且窗口内各笔速率的算术平均 / 历史算术平均低于 `lowperf_rel_max` (缺省 0.2); 历史平均随
-  `gate-state.json` 落盘 (与锁共用, 最多每 10s 合并写一次), 重启不清零; 样本只取能拆出
+  `perf_window_sec` (缺省 5min) 内, 低吞吐 或 高延迟 任一命中即触发:
+  低吞吐 = 每请求性能值 r* = (c/d)·(c/b)^g (缺响应字节或缺参数退原始解码速率) 的窗口
+  峰值低于 `lowperf_peak_max` (缺省 5) 且窗口平均低于 `lowperf_avg_max` (缺省 1),
+  且窗口 r* 平均 / 历史 r* 平均低于 `lowperf_rel_max` (缺省 0.2); 历史 = 各笔 r* 的
+  累加平均, 随 `gate-state.json` 落盘 (与锁共用, 最多每 10s 合并写一次), 重启不清零; 样本只取能拆出
   解码段的流式成功请求, 窗口或历史不足 2 笔都不判低吞吐; 高延迟 = 窗口内平均首字节
   时延超过 `lowperf_ttfb_max_ms` (ms; 缺省 0 = 关闭该项, 同样不足 2 笔不判). 豁免名单
   `lowperf_exempt` (真实模型 id 数组) 内的模型不参与判定, 永不触发低性能锁. 同家别的
@@ -230,8 +230,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 - `active` 每笔: `id` / `logical` / `source` / `path` / `stream` / `start` / `upstream` /
   `backend` / `stage` / `attempt` / `gate`; 接收中的流式请求另带 `recv_tok` (已收到的
   输出 token 估计数)、`recv_bytes` (已转发的响应字节数) 与 `recv_start` (首字节到达时刻,
-  Unix 毫秒), 后三个用来算这笔的实时吞吐 (解码 / 总 / 下载三种, 不加前缀: 解码与下载从
-  首字节起算, 总用请求开始时刻 `start`); `tries` 是这笔请求的每一次尝试 (换候选 / 同候选
+  Unix 毫秒), 后三个用来算这笔的实时性能 (r*, 按当前参数表现算; 缺响应字节或缺参数退原始解码速率); `tries` 是这笔请求的每一次尝试 (换候选 / 同候选
   重试就多一段), 每段带 `upstream` / `backend` / `segs` (该段各阶段已结算耗时, 秒, 下标 =
   `stage`) / `cur` (当前阶段, `-1` = 该段已结束) / `cur_at` (当前阶段进入时刻, Unix 毫秒,
   TUI 用它现算正在走的那一格) / `stop` (失败停在哪个阶段) / `fail` (结局词

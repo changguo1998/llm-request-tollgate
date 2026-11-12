@@ -241,7 +241,7 @@ python3 scripts/gen_tollgate_config.example.py
 | 文件 | 内容 | 生命周期 |
 |---|---|---|
 | `requests.jsonl` 与归档 | 每笔请求明细 | 永久保留, 外部清理 |
-| `gate-state.json` | 定时锁 (额度 / 熔断 / 低性能) 的到期时间与原因, 以及低性能锁的历史解码速率 | 锁内存在或历史样本 > 0, 重启恢复 |
+| `gate-state.json` | 定时锁 (额度 / 熔断 / 低性能) 的到期时间与原因, 以及低性能锁的历史性能值 (各笔 r* 累加平均) | 锁内存在或历史样本 > 0, 重启恢复 |
 | `tui-pulse.json` | 每秒观测快照 (同进程 `-tui` 时) | 仅 `-tui` 时 |
 
 `/state` 的 HTTP 面是只读输出, 见 [api.md](api.md) §6.

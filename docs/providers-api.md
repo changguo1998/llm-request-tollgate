@@ -312,7 +312,7 @@ LiteLLM 形 / 方舟形 / CLIProxyAPI 形；第五家 `deepseek` 是官方直连
     "concurrency_lock_ms": 3600000,
     "quota_lock_ms": 600000,
     "breaker_lock_ms": 300000,
-    "lowperf_window_ms": 600000,
+    "perf_window_ms": 300000,
     "lowperf_peak_max": 5,
     "lowperf_avg_max": 1,
     "lowperf_rel_max": 0.2,
