@@ -365,11 +365,11 @@ func TestLowPerfLockRelockResetsAfterWindow(t *testing.T) {
 	}
 }
 
-// 有参数表 + 响应字节时, 低性能样本按该请求的 r* 记: 样本值 = (c/d)*(c/b)^g。
+// 有参数表 + 响应字节时, 低性能样本按该请求的 r* 记: 样本值 = (c/d)*(c/b)^(-g)。
 func TestLowPerfRequestRecordsPerfValue(t *testing.T) {
 	a, c := newPerfApp(normGate(GateCfg{}))
 	a.perfRef = &PerfRef{byModel: map[string]perfParam{"u1/m1": {G: 1}}}
-	// rate = 10/1000*1000 = 10 t/s; c/b = 10/1000 = 0.01; ^1 -> 0.1
+	// rate = 10/1000*1000 = 10 t/s; c/b = 10/1000 = 0.01; ^(-1) -> 10/0.01 = 1000
 	a.notePerfRequest("u1", "m1", 10, 1000, 0, 1000, "")
 	c.mu.Lock()
 	n := len(c.gate("m1").tps)
@@ -379,7 +379,7 @@ func TestLowPerfRequestRecordsPerfValue(t *testing.T) {
 	}
 	hist := c.gate("m1").perfSum
 	c.mu.Unlock()
-	if n != 1 || v < 0.099 || v > 0.101 || hist < 0.099 || hist > 0.101 {
-		t.Fatalf("样本应按 r* 记 0.1: n=%d v=%v hist=%v", n, v, hist)
+	if n != 1 || v < 999 || v > 1001 || hist < 999 || hist > 1001 {
+		t.Fatalf("样本应按 r* 记 1000: n=%d v=%v hist=%v", n, v, hist)
 	}
 }

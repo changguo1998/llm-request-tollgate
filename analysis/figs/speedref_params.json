@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "2026-11",
-    "generated_at": "2026-11-12T21:40:10"
+    "generated_at": "2026-11-12T23:34:37"
   },
   "group/gpt-6-sol": {
     "g": 0.2263,
@@ -14,9 +14,9 @@
     "n_typical": 129,
     "frac": 0.6,
     "flatness_short_mid_long": [
-      0.522,
-      0.84,
-      1.442
+      0.949,
+      1.046,
+      0.995
     ],
     "flatness_target": "ideal-sample c-tercile r* medians, ~1.0 expected"
   },
@@ -36,9 +36,9 @@
     "n_typical": 1383,
     "frac": 0.6,
     "flatness_short_mid_long": [
-      0.888,
-      0.968,
-      1.118
+      0.792,
+      0.982,
+      1.268
     ],
     "flatness_target": "ideal-sample c-tercile r* medians, ~1.0 expected"
   },
@@ -56,25 +56,9 @@
     "n_typical": 534,
     "frac": 0.6,
     "flatness_short_mid_long": [
-      1.115,
-      0.944,
-      0.903
-    ],
-    "flatness_target": "ideal-sample c-tercile r* medians, ~1.0 expected"
-  },
-  "ustc/deepseek-v4-flash": {
-    "g": 0.3427,
-    "a": 6.5277,
-    "ref_hours": [
-      22
-    ],
-    "n_ideal": 238,
-    "n_typical": 159,
-    "frac": 0.6,
-    "flatness_short_mid_long": [
-      1.568,
-      1.069,
-      0.711
+      1.008,
+      0.996,
+      0.996
     ],
     "flatness_target": "ideal-sample c-tercile r* medians, ~1.0 expected"
   },
@@ -90,9 +74,9 @@
     "n_typical": 341,
     "frac": 0.6,
     "flatness_short_mid_long": [
-      1.191,
-      0.931,
-      0.807
+      1.141,
+      0.983,
+      0.911
     ],
     "flatness_target": "ideal-sample c-tercile r* medians, ~1.0 expected"
   },
@@ -107,9 +91,9 @@
     "n_typical": 233,
     "frac": 0.6,
     "flatness_short_mid_long": [
-      0.567,
-      0.956,
-      1.372
+      0.935,
+      0.968,
+      1.053
     ],
     "flatness_target": "ideal-sample c-tercile r* medians, ~1.0 expected"
   }

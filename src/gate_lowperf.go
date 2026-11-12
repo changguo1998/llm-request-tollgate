@@ -169,7 +169,7 @@ func (a *App) notePerfRequest(upID, model string, tok int, decodeMs, ttfbMs, byt
 	if c == nil {
 		return
 	}
-	// 每请求性能值: 有解码段 (流式) 才算; 响应字节齐全时按当前参数表算 r* = (c/d)*(c/b)^g,
+	// 每请求性能值: 有解码段 (流式) 才算; 响应字节齐全时按当前参数表算 r* = (c/d)*(c/b)^(-g),
 	// 缺字节或缺参数退原始解码速率。
 	var perf float64
 	if tok > 0 && decodeMs > 0 {

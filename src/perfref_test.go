@@ -34,7 +34,7 @@ func TestPerfRefLoadAndIndex(t *testing.T) {
 	// 已知参数: c=100, d=5000ms, b=6000, g=0.7937
 	c, d, b := int64(100), int64(5000), int64(6000)
 	got := p.index("ustc", "deepseek-flash", c, d, b)
-	want := 20.0 * math.Pow(float64(c)/float64(b), 0.7937)
+	want := 20.0 * math.Pow(float64(c)/float64(b), -0.7937)
 	if math.Abs(got-want) > 1e-9 {
 		t.Errorf("index = %v, want %v", got, want)
 	}
@@ -71,7 +71,7 @@ func TestPerfRefNegativeG(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := p.index("group", "gpt-6-sol", 100, 5000, 6000)
-	want := 20.0 * math.Pow(100.0/6000.0, -0.2)
+	want := 20.0 * math.Pow(100.0/6000.0, 0.2)
 	if math.Abs(got-want) > 1e-9 {
 		t.Errorf("index = %v, want %v", got, want)
 	}
@@ -124,7 +124,7 @@ func TestPerfRefMissingANoNormalization(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := p.index("group", "kimi-k3.1-pro", 100, 5000, 6000)
-	want := 20.0 * math.Pow(100.0/6000.0, 0.2223)
+	want := 20.0 * math.Pow(100.0/6000.0, -0.2223)
 	if math.Abs(got-want) > 1e-9 {
 		t.Errorf("缺 a 应不归一, got %v want %v", got, want)
 	}

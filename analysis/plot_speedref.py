@@ -129,7 +129,7 @@ def flatness(ideal, g):
 
     idx = []
     for _h, _t, d, c, by in ideal:
-        r = math.log((c / (d / 1000)) * (c / by) ** g)
+        r = math.log((c / (d / 1000)) * (c / by) ** (-g))  # 定稿 r* = (c/d)*(c/b)^(-g)
         idx.append(r)
     m = median(idx)
 

@@ -1,6 +1,6 @@
 // perfref.go: 速度参考 (speed reference) 参数加载与 r* 指标计算.
 //
-// 定稿口径见 docs/speed-metric.md §6: r* = (c/d) * (c/b)^g.
+// 定稿口径见 docs/speed-metric.md §6: r* = (c/d) * (c/b)^(-g).
 // 参数来自 analysis/plot_speedref.py 生成的 JSON (analysis/figs/speedref_params.json),
 // 键为 "upstream/model", 每个条目含 g/a; 顶层 _meta 元数据被忽略.
 //
@@ -63,10 +63,12 @@ func (p *PerfRef) g(up, model string) float64 {
 	return pr.G
 }
 
-// index 算一笔请求的速度参考指标 r* (性能): (c/d) * (c/b)^g.
-// c/d 用解码吞吐 (c 输出 token, d 毫秒), (c/b) 用字节密度的倒数. 典型状态附近数值
-// 即该模型典型速率 (约 e^a 量级), a 仅作参考不参与计算. 任一输入无效 (c<=0 / d<=0 /
-// b<=0) 时返回 0, 调用方应保证先行过滤; 参数表里没有该模型时退回原始速率 c/d.
+// index 算一笔请求的速度参考指标 r* (性能): (c/d) * (c/b)^(-g).
+// c/d 用解码吞吐 (c 输出 token, d 毫秒), (c/b) 用字节密度的倒数. 为什么是 -g: 归一目标是
+// 让 r* 与密度无关 — 拟合 log(c/d) = a + g*log(c/b) 给出 g 后, log r* = log(c/d) - g*log(c/b)
+// 沿拟合线恒等于 a, 即任一密度的请求归一后都落回该模型典型速率 e^a (典型状态附近数值即该
+// 模型典型速率, 约 e^a 量级); a 仅作参考不参与计算. 任一输入无效 (c<=0 / d<=0 / b<=0) 时
+// 返回 0, 调用方应保证先行过滤; 参数表里没有该模型时退回原始速率 c/d.
 func (p *PerfRef) index(up, model string, c, d, b int64) float64 {
 	if c <= 0 || d <= 0 || b <= 0 {
 		return 0
@@ -76,7 +78,7 @@ func (p *PerfRef) index(up, model string, c, d, b int64) float64 {
 	if !ok {
 		return rate // 无参考参数: 退回原始速率
 	}
-	// perf (性能, r*): (c/d) * (c/b)^g; c/b 恒为正, 无定义域问题
-	perf := rate * math.Pow(float64(c)/float64(b), pr.G)
+	// perf (性能, r*): (c/d) * (c/b)^(-g); c/b 恒为正, 无定义域问题
+	perf := rate * math.Pow(float64(c)/float64(b), -pr.G)
 	return perf
 }

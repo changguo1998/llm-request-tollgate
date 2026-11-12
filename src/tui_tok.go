@@ -13,7 +13,7 @@ const (
 )
 
 // perfPoint 是一笔速度参考样本 (r* 的原始输入: 输出 token / 解码毫秒 / 响应字节)。
-// 性能列展示时按当前参数表 (perfIdx) 现算 r* = (c/d)*(c/b)^g, 参数重算后自动跟随。
+// 性能列展示时按当前参数表 (perfIdx) 现算 r* = (c/d)*(c/b)^(-g), 参数重算后自动跟随。
 type perfPoint struct {
 	ts      time.Time
 	c, d, b int64

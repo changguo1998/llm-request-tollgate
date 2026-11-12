@@ -32,7 +32,7 @@
     请求在它的队列里白等)。另有一把**低性能锁** (同样按 `上游/模型`): 最近
     `perf_window_sec` (5min) 内, **低吞吐** 或 **高延迟** 任一命中即锁
     `gate.lowperf_lock_ms` (5min) ——
-    低吞吐 = 每请求性能值 r* = (c/d)·(c/b)^g (缺响应字节或缺参数退原始解码速率 c/d)
+    低吞吐 = 每请求性能值 r* = (c/d)·(c/b)^(-g) (缺响应字节或缺参数退原始解码速率 c/d)
     的窗口峰值低于 `gate.lowperf_peak_max` (5) 且窗口平均低于 `gate.lowperf_avg_max` (1),
     且窗口 r* 平均 / 历史 r* 平均低于 `gate.lowperf_rel_max` (0.2); 历史 = 各笔 r* 的
     累加平均, 随 `var/gate-state.json` 落盘, 重启不清零;
