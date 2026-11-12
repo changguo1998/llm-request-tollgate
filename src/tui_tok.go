@@ -15,8 +15,15 @@ const (
 // 模型/路由表的吞吐窗口: 最近 1h (算法见 rate.go, 分母是整笔请求耗时)。
 const tuiTokWindow = time.Hour
 
-// addTok 追加一个采样, 并裁掉超出 win 窗口的过期样本。
-func addTok(pts []tokPoint, p tokPoint, now time.Time, win time.Duration) []tokPoint {
+// perfPoint 是一笔速度参考样本 (r* 的原始输入: 输出 token / 解码毫秒 / 响应字节)。
+// 性能列展示时按当前参数表 (perfIdx) 现算 r* = (c/d)*(c/b)^g, 参数重算后自动跟随。
+type perfPoint struct {
+	ts      time.Time
+	c, d, b int64
+}
+
+// addPerf 追加一笔性能样本并裁掉超出 win 窗口的过期样本。
+func addPerf(pts []perfPoint, p perfPoint, now time.Time, win time.Duration) []perfPoint {
 	pts = append(pts, p)
 	start := 0
 	for start < len(pts) && now.Sub(pts[start].ts) > win {
@@ -89,10 +96,8 @@ type routeRow struct {
 	Reqs, Errs, Fallbacks    int
 	Prompt, Cached, Total    int
 	TtfbPts                  []ttfbPoint // 窗口内各请求的首字节时延样本 (平均/谷值用)
-	// 三种速度的样本 (rateShow 平均/峰值): 分子/分母各不相同。
-	DecodeRate  []tokPoint // completion / decode_ms  (缺 decode 不记)
-	TotalRate   []tokPoint // (prompt+completion) / duration_ms
-	ByteRate    []tokPoint // response bytes / duration_ms
+	// 性能样本: 窗口内每笔流式请求的 (c, d, b), 展示时按参数表算 r* 的算术平均。
+	PerfPts     []perfPoint
 	First, Last time.Time
 }
 

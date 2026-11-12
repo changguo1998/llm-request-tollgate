@@ -9,7 +9,7 @@ import (
 )
 
 // 一条日志同时进聚合行与事件流: 请求 / 错误 / 换候选 / token 总量 (total 缺省时
-// prompt+completion 兜底) / cached / 首字节 / 三种速率样本 / 首末时间。
+// prompt+completion 兜底) / cached / 首字节 / 性能样本 / 首末时间。
 func TestAbsorbAggregatesRoute(t *testing.T) {
 	m := newTUIModel("cfg")
 	m.window, m.rateWin = 3*time.Hour, time.Hour
@@ -30,9 +30,8 @@ func TestAbsorbAggregatesRoute(t *testing.T) {
 	if row.Prompt != 100 || row.Cached != 30 || row.Total != 150 {
 		t.Errorf("token 汇总不对 (total 应兜底成 prompt+completion): %+v", row)
 	}
-	if len(row.TtfbPts) != 1 || len(row.DecodeRate) != 1 ||
-		len(row.TotalRate) != 1 || len(row.ByteRate) != 1 {
-		t.Errorf("四类样本应各记一条: %+v", row)
+	if len(row.TtfbPts) != 1 || len(row.PerfPts) != 1 {
+		t.Errorf("首字节与性能样本应各记一条: %+v", row)
 	}
 	if row.First.IsZero() || row.Last.IsZero() || row.First.After(row.Last) {
 		t.Errorf("首末时间应填上: first=%v last=%v", row.First, row.Last)

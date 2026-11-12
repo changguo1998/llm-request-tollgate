@@ -78,6 +78,7 @@ func startTUIProxy(cfgPath string, m *tuiModel) *App {
 	if app.logPath() != "" {
 		app.startPulseLoop(pulsePathFor(app.logPath()))
 	}
+	m.perfIdx = app.perfIndex // 性能列用同一个每小时重算的参数表
 	// 先显式 bind: 端口被占要立刻说清楚, 不能画着一个没起来的服务的状态。
 	ln, lerr := net.Listen("tcp", cfg.Listen)
 	if lerr != nil {

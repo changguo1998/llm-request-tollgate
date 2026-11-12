@@ -61,11 +61,11 @@ func TestConfigWindowDefaults(t *testing.T) {
 	}
 }
 
-// 聚合: 日志带 decode_ms / bytes 时, 解码与字节速率各记样本 (TUI 模型路由表三列的依据)。
-func TestModelRowsDecodeAndByteRates(t *testing.T) {
+// 聚合: 日志带 decode_ms + bytes + completion 时记一笔性能样本 (性能列依据)。
+func TestModelRowsPerfSamples(t *testing.T) {
 	m := newTUIModel("cfg")
 	now := time.Now()
-	// completion=100, decode=500ms -> 200 t/s; bytes=2000, duration=2000ms -> 1000 B/s
+	// completion=100, decode=500ms, bytes=2000 -> 样本 (c=100, d=500, b=2000)
 	line := fmt.Sprintf(`{"ts":%q,"logical":"m1","upstream":"up1","model":"real-m1","path":"/v1/chat/completions","duration_ms":2000,"decode_ms":500,"bytes":2000,"usage":{"prompt":10,"completion":100,"total":110}}`,
 		now.Format(time.RFC3339Nano))
 	m.absorb([]byte(line))
@@ -74,13 +74,12 @@ func TestModelRowsDecodeAndByteRates(t *testing.T) {
 		t.Fatalf("应有一行, 得到 %d", len(rows))
 	}
 	r := rows[0]
-	davg, dpeak, dok := tokRate(r.DecodeRate, now.Add(time.Minute), time.Hour)
-	if !dok || davg != 200 || dpeak != 200 {
-		t.Errorf("解码速率应 avg/peak=200 t/s, 得到 (%v,%v,%v)", davg, dpeak, dok)
+	if len(r.PerfPts) != 1 {
+		t.Fatalf("应有 1 笔性能样本, 得到 %d", len(r.PerfPts))
 	}
-	bavg, bpeak, bok := tokRate(r.ByteRate, now.Add(time.Minute), time.Hour)
-	if !bok || bavg != 1000 || bpeak != 1000 {
-		t.Errorf("字节速率应 avg/peak=1000 B/s, 得到 (%v,%v,%v)", bavg, bpeak, bok)
+	p := r.PerfPts[0]
+	if p.c != 100 || p.d != 500 || p.b != 2000 {
+		t.Errorf("性能样本应为 (100,500,2000), 得到 %+v", p)
 	}
 }
 

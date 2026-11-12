@@ -41,7 +41,7 @@ func TestModelRowsQueueForAllOwners(t *testing.T) {
 }
 
 // 模型表的格子按同一口径拼: Token = cached/total, 首字节 = 平均/谷值,
-// 三种速度 = 平均/峰值; 熔断锁红、退避黄。
+// 性能 = 每笔请求 r* 的算术平均 (无参数时退原始速率); 熔断锁红、退避黄。
 func TestDrawModelsRouteCells(t *testing.T) {
 	m := newTUIModel("cfg")
 	m.cols = 200
@@ -53,10 +53,8 @@ func TestDrawModelsRouteCells(t *testing.T) {
 			Cached: 1000, Total: 2000,
 			TtfbPts: []ttfbPoint{{ts: now.Add(-5 * time.Minute), ms: 100},
 				{ts: now.Add(-15 * time.Minute), ms: 300}},
-			DecodeRate: []tokPoint{{ts: now.Add(-time.Minute), tok: 500, dur: 1000}},
-			TotalRate:  []tokPoint{{ts: now.Add(-time.Minute), tok: 300, dur: 2000}},
-			ByteRate:   []tokPoint{{ts: now.Add(-time.Minute), tok: 5120, dur: 1000}},
-			Last:       now,
+			PerfPts: []perfPoint{{ts: now.Add(-time.Minute), c: 500, d: 1000, b: 2000}},
+			Last:    now,
 		},
 	}
 	m.pulse.Cands = []candView{{
@@ -73,7 +71,6 @@ func TestDrawModelsRouteCells(t *testing.T) {
 		t.Fatalf("模型行没画出来:\n%s", out)
 	}
 	// Token 一格: cached/total。
-	dec, decPeak, _ := rateShow(m.routes["a\x00ustc\x00m1"].DecodeRate, now, m.rateWin, m.window)
 	avg, ok := ttfbAvg(m.routes["a\x00ustc\x00m1"].TtfbPts, now, m.rateWin)
 	if !ok {
 		t.Fatal("首字节样本应在窗口内")
@@ -82,8 +79,7 @@ func TestDrawModelsRouteCells(t *testing.T) {
 		humanTokens(1000) + "/" + humanTokens(2000),
 		durStr(time.Duration(avg)*time.Millisecond) + "/" +
 			durStr(time.Duration(ttfbMin(m.routes["a\x00ustc\x00m1"].TtfbPts))*time.Millisecond),
-		humanTPS(dec) + "/" + humanTPS(decPeak),
-		humanByte(5120) + "/" + humanByte(5120),
+		humanTPS(500), // 性能: 无参数源退原始速率 c/d = (500/1000)*1000 = 500 t/s
 		tuiYell + "8s" + tuiReset,
 		tuiRed + "05:00" + tuiReset,
 	} {

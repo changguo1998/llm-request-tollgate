@@ -1,5 +1,4 @@
-// rate.go: 令牌速率口径 —— 平均 = 窗口内总输出 token 除以这些请求的耗时之和 (空闲不计),
-// 峰值 = 单笔最高的那笔 (同一口径)。TUI 的聚合表与调度器的低性能锁共用这一份算法。
+// 峰值 = 单笔最高的那笔 (同一口径)。调度器的低性能锁用 tokRate (体积加权) 与 avgRate。
 
 package main
 
@@ -58,29 +57,4 @@ func avgRate(pts []tokPoint) float64 {
 		return 0
 	}
 	return sum / float64(n)
-}
-
-// rateShow 是 TUI 显示口径 (tokens/s): 平均 = avgWin 窗口内各样本速率 (tok/dur) 的
-// 算术平均, 峰值 = peakWin 窗口内单笔最高。与调度器低性能锁的 tokRate (体积加权,
-// 单一窗口) 分开: 显示口径的平均只看短期窗口、峰值看回看窗口。窗口内没有样本时 ok=false。
-func rateShow(pts []tokPoint, now time.Time, avgWin, peakWin time.Duration) (avg, peak float64, ok bool) {
-	var sum float64
-	var n int
-	for _, p := range pts {
-		if p.dur <= 0 {
-			continue
-		}
-		v := float64(p.tok) / (float64(p.dur) / 1000)
-		if now.Sub(p.ts) <= avgWin {
-			sum += v
-			n++
-		}
-		if now.Sub(p.ts) <= peakWin && v > peak {
-			peak = v
-		}
-	}
-	if n == 0 {
-		return 0, 0, false
-	}
-	return sum / float64(n), peak, true
 }

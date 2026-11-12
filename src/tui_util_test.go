@@ -85,20 +85,6 @@ func TestHumanTPS(t *testing.T) {
 	}
 }
 
-// humanByte: 1024 进制 B/K/M, 整数缩写 + 4 字符宽; 四舍五入到 1024 进位成 M。
-func TestHumanByte(t *testing.T) {
-	cases := map[float64]string{
-		0: "  0B", 969: "969B", 1024: "  1K",
-		1126.4: "  1K", 8704: "  9K", 123_456: "121K",
-		1 << 20: "  1M", 1_048_575: "  1M", 2_621_440: "  3M",
-	}
-	for in, want := range cases {
-		if got := humanByte(in); got != want {
-			t.Errorf("humanByte(%v) 应为 %q, 得到 %q", in, want, got)
-		}
-	}
-}
-
 // humanRate: KB/s / MB/s 整数缩写 (不保留小数), B/s 原样取整。
 func TestHumanRate(t *testing.T) {
 	cases := map[float64]string{

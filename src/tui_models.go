@@ -190,9 +190,7 @@ func (m *tuiModel) modelRouteRows() [][]string {
 			// 缓存命中与总 token 合成一格 (cached/total)。
 			humanTokens(r.Cached) + "/" + humanTokens(r.Total),
 			ttfbCell(r.TtfbPts, now, m.rateWin),
-			rateCell(r.DecodeRate, now, m.rateWin, m.window, humanTPS),
-			rateCell(r.TotalRate, now, m.rateWin, m.window, humanTPS),
-			rateCell(r.ByteRate, now, m.rateWin, m.window, humanByte),
+			perfCell(r.PerfPts, now, m.window, r.up, r.model, m.perfIdx),
 			mages(r.Last),
 		})
 	}
@@ -212,18 +210,31 @@ func ttfbCell(pts []ttfbPoint, now time.Time, rateWin time.Duration) string {
 		durStr(time.Duration(ttfbMin(pts))*time.Millisecond)
 }
 
-// rateCell 拼速率格: 平均/峰值; human 决定单位写法 (t/s 或 B/s), 没样本时 "-"。
-func rateCell(pts []tokPoint, now time.Time, rateWin, window time.Duration, human func(float64) string) string {
-	if avg, peak, ok := rateShow(pts, now, rateWin, window); ok {
-		return human(avg) + "/" + human(peak)
+// perfCell 拼性能格: 窗口内每笔请求 r* 的算术平均 (单值, t/s); 没样本时 "-"。
+// perfIdx 为空 (远端模式无参数表) 时退化为原始速率 c/d 的算术平均。
+func perfCell(pts []perfPoint, now time.Time, win time.Duration, up, model string, perfIdx func(string, string, int64, int64, int64) float64) string {
+	var sum float64
+	var n int
+	for _, p := range pts {
+		if now.Sub(p.ts) > win {
+			continue
+		}
+		if perfIdx == nil {
+			sum += float64(p.c) / float64(p.d) * 1000
+		} else {
+			sum += perfIdx(up, model, p.c, p.d, p.b)
+		}
+		n++
 	}
-	return "-"
+	if n == 0 {
+		return "-"
+	}
+	return humanTPS(sum / float64(n))
 }
 
 // modelCols 是第 1 页模型/路由聚合表的列: 按类别从左到右排, 同类相邻 ——
-// 调度状态 (排队 / 退避 / 熔断锁), 流量 (Token = cached/total / 首字节 / 三种速度:
-// 解码=completion/decode, 总=(prompt+completion)/duration, 字节=bytes/duration), 时间 (最近一次)。
-// 三种速度各自一列, 都写 平均/峰值; 首字节写 平均/谷值 (同一套窗口口径)。
+// 调度状态 (排队 / 退避 / 熔断锁), 流量 (Token = cached/total / 首字节 / 性能),
+// 时间 (最近一次)。性能列是窗口内每笔请求 r* = (c/d)*(c/b)^g 的算术平均 (单值)。
 // 全部按内容成长 (grow=true), 基准宽只贴标题/内容的典型宽度, 不留大补白 ——
 // 这样与第 1 页和其它表一样, 列与列之间视觉上只隔 1 格。
 func modelCols() []tuiCol {
@@ -232,10 +243,8 @@ func modelCols() []tuiCol {
 		{"排队", 2, true, true, 0}, {"退避", 4, true, true, 4}, {"熔断", 5, true, true, 4},
 		// 首字节列写 最后一次/平均, 两个时长值加斜杠, 下限 9 不被压窄。
 		{"Token", 9, true, true, 3}, {"首字节", 9, true, true, 3},
-		// 三种速度各一列, 都写 平均/峰值: 带单位的数字整体 4 字符, 两个值加斜杠正好 9,
-		// 列宽下限 9 保证 "100K/101K" 这类格不被压窄。窄终端丢列时解码速率保住 (hide=4),
-		// 总速率与下载速率先丢 (hide=1)。
-		{"解码速率", 9, true, true, 4}, {"总速率", 9, true, true, 1}, {"下载速率", 9, true, true, 1},
+		// 性能列: 每笔请求 r* 的算术平均, 带单位数字整体 4 字符, 下限 9 不被压窄。
+		{"性能", 9, true, true, 4},
 		{"最近", 6, true, true, 2},
 	}
 }
@@ -243,17 +252,17 @@ func modelCols() []tuiCol {
 // modelRow 是第 1 页模型/路由聚合表的一行: 队列状态 (观测面) + 聚合统计 (日志,
 // 按 逻辑名/上游/模型 拆分, 同一上游/模型被多个逻辑名引用时各归各的组)。
 type modelRow struct {
-	logical, up, model              string
-	Queue, Fails                    int
-	PausedMs, LockMs                int64
-	LockWhy                         string // 模型锁原因 (breaker / lowperf): 倒计时按它分色
-	Reqs                            int
-	Errs                            int
-	Fallbacks                       int
-	Total, Cached                   int
-	TtfbPts                         []ttfbPoint // 窗口内各请求的首字节时延样本 (平均/谷值用)
-	DecodeRate, TotalRate, ByteRate []tokPoint
-	Last                            time.Time
+	logical, up, model string
+	Queue, Fails       int
+	PausedMs, LockMs   int64
+	LockWhy            string // 模型锁原因 (breaker / lowperf): 倒计时按它分色
+	Reqs               int
+	Errs               int
+	Fallbacks          int
+	Total, Cached      int
+	TtfbPts            []ttfbPoint // 窗口内各请求的首字节时延样本 (平均/谷值用)
+	PerfPts            []perfPoint // 窗口内各请求的性能样本 (r* 算术平均用)
+	Last               time.Time
 }
 
 // blank 判断这一行是否全无数据: 队列 / 退避 / 熔断 / 请求 / 错误 / 换候选 /
@@ -263,7 +272,7 @@ func (r *modelRow) blank() bool {
 	return r.Queue == 0 && r.PausedMs == 0 && r.LockMs == 0 &&
 		r.Reqs == 0 && r.Errs == 0 && r.Fallbacks == 0 &&
 		r.Total == 0 && r.Cached == 0 && len(r.TtfbPts) == 0 &&
-		len(r.DecodeRate) == 0 && len(r.TotalRate) == 0 && len(r.ByteRate) == 0 &&
+		len(r.PerfPts) == 0 &&
 		r.Last.IsZero()
 }
 
@@ -327,9 +336,7 @@ func (m *tuiModel) mergeRouteRows(by modelRowIndex) {
 		r.Total += rr.Total
 		r.Cached += rr.Cached
 		r.TtfbPts = append(r.TtfbPts, rr.TtfbPts...)
-		r.DecodeRate = append(r.DecodeRate, rr.DecodeRate...)
-		r.TotalRate = append(r.TotalRate, rr.TotalRate...)
-		r.ByteRate = append(r.ByteRate, rr.ByteRate...)
+		r.PerfPts = append(r.PerfPts, rr.PerfPts...)
 		if rr.Last.After(r.Last) {
 			r.Last = rr.Last
 		}

@@ -15,6 +15,8 @@ type tuiModel struct {
 	logPath  string
 	listen   string
 	stateURL string // 空 = 同进程直接读内存
+	// perfIdx 是性能列的参数来源 (同进程 = app.perfIndex; 远端模式为空时退原始速率)。
+	perfIdx func(up, model string, c, d, b int64) float64
 
 	start   time.Time
 	pulse   pulse

@@ -154,8 +154,8 @@ func (m *tuiModel) updateRoute(r logRec, ts time.Time) {
 	}
 }
 
-// addUsage 累加 token 与三类速率样本: token 总量缺省时用 prompt+completion 兜底,
-// 速率样本按回看窗口 (3h) 保留 (平均看 rateWin, 峰值看整窗口)。
+// addUsage 累加 token 与性能样本: token 总量缺省时用 prompt+completion 兜底;
+// 性能样本 (r*) 按回看窗口 (3h) 保留, 只记流式且有 bytes 的有效请求。
 func (m *tuiModel) addUsage(row *routeRow, r logRec, ts time.Time) {
 	if r.Usage == nil {
 		return
@@ -168,19 +168,9 @@ func (m *tuiModel) addUsage(row *routeRow, r logRec, ts time.Time) {
 	row.Prompt += r.Usage.Prompt
 	row.Cached += r.Usage.Cached
 	row.Total += total
-	if r.DurationMs > 0 {
-		if r.Usage.Prompt+r.Usage.Completion > 0 {
-			row.TotalRate = addTok(row.TotalRate,
-				tokPoint{ts: ts, tok: r.Usage.Prompt + r.Usage.Completion, dur: r.DurationMs}, now, m.window)
-		}
-		if r.Bytes > 0 {
-			row.ByteRate = addTok(row.ByteRate,
-				tokPoint{ts: ts, tok: int(r.Bytes), dur: r.DurationMs}, now, m.window)
-		}
-	}
-	if r.DecodeMs > 0 && r.Usage.Completion > 0 {
-		row.DecodeRate = addTok(row.DecodeRate,
-			tokPoint{ts: ts, tok: r.Usage.Completion, dur: r.DecodeMs}, now, m.window)
+	if r.DecodeMs > 0 && r.Usage.Completion > 0 && r.Bytes > 0 {
+		row.PerfPts = addPerf(row.PerfPts,
+			perfPoint{ts: ts, c: int64(r.Usage.Completion), d: r.DecodeMs, b: r.Bytes}, now, m.window)
 	}
 }
 

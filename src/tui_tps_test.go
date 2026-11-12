@@ -30,25 +30,6 @@ func TestTokRate(t *testing.T) {
 	}
 }
 
-// 显示口径 (rateShow): 平均 = avgWin 窗口内各样本速率的算术平均, 峰值 = peakWin 窗口内
-// 单笔最高; 两个窗口互相独立, 窗口外的样本不计。
-func TestRateShow(t *testing.T) {
-	now := time.Now()
-	pts := []tokPoint{
-		{ts: now.Add(-10 * time.Minute), tok: 1000, dur: 10000}, // 100 t/s, avgWin 内
-		{ts: now.Add(-30 * time.Minute), tok: 1000, dur: 10000}, // 100 t/s, avgWin 内
-		{ts: now.Add(-2 * time.Hour), tok: 5000, dur: 10000},    // 500 t/s, 只在 peakWin 内
-		{ts: now.Add(-4 * time.Hour), tok: 9999, dur: 10000},    // 两个窗口外, 不计
-	}
-	avg, peak, ok := rateShow(pts, now, time.Hour, 3*time.Hour)
-	if !ok || avg != 100 || peak != 500 {
-		t.Errorf("应为 平均 100 / 峰值 500, 得到 (%v, %v, %v)", avg, peak, ok)
-	}
-	if _, _, ok := rateShow(pts, now.Add(5*time.Hour), time.Hour, 3*time.Hour); ok {
-		t.Error("窗口内没有样本时应 ok=false")
-	}
-}
-
 // 首字节口口径: 平均 = win 窗口内算术平均, 谷值 = 全部样本中的最小一次。
 func TestTtfbAvgMin(t *testing.T) {
 	now := time.Now()
@@ -139,28 +120,20 @@ func TestRelayStreamCountsReasoning(t *testing.T) {
 	}
 }
 
-// 日志聚合层: 每笔请求的 (prompt+completion) token 与耗时进 1h 窗口 (总吞吐),
-// 非流式也算; 没带 decode/bytes 的日志, 解码与字节速率不记样本。
-func TestModelRowsOneHourTokens(t *testing.T) {
+// 日志聚合层: 没带 decode_ms / bytes 的日志不产生性能样本。
+func TestModelRowsNoPerfSamples(t *testing.T) {
 	m := newTUIModel("cfg")
 	now := time.Now()
-	durs := []int{1000, 3000}
 	for i, tok := range []int{100, 200} {
 		line := fmt.Sprintf(`{"ts":%q,"logical":"m1","upstream":"up1","model":"real-m1","path":"/v1/chat/completions","duration_ms":%d,"usage":{"prompt":10,"completion":%d,"total":%d}}`,
-			now.Add(-time.Duration(i)*time.Minute).Format(time.RFC3339Nano), durs[i], tok, tok+10)
+			now.Add(-time.Duration(i)*time.Minute).Format(time.RFC3339Nano), []int{1000, 3000}[i], tok, tok+10)
 		m.absorb([]byte(line))
 	}
 	rows := m.modelRows()
 	if len(rows) != 1 {
 		t.Fatalf("应有一行, 得到 %d", len(rows))
 	}
-	r := rows[0]
-	avg, peak, ok := tokRate(r.TotalRate, now.Add(2*time.Minute), tuiTokWindow)
-	if !ok || avg != 80 || peak != 110 {
-		t.Errorf("(110+210) token / 4s 应为 平均 80 / 峰值 110, 得到 (%v, %v, %v)", avg, peak, ok)
-	}
-	if len(r.DecodeRate) != 0 || len(r.ByteRate) != 0 {
-		t.Errorf("没有 decode_ms / bytes 的日志不该产生解码/字节样本: len=%d/%d",
-			len(r.DecodeRate), len(r.ByteRate))
+	if len(rows[0].PerfPts) != 0 {
+		t.Errorf("没有 decode_ms / bytes 的日志不该产生性能样本: len=%d", len(rows[0].PerfPts))
 	}
 }
