@@ -150,7 +150,7 @@ func TestLowPerfLockIgnoresExpiredSamples(t *testing.T) {
 
 	c.mu.Lock()
 	c.gate("m1").tps = append(c.gate("m1").tps,
-		tokPoint{ts: time.Now().Add(-2 * g.lowPerfWindow()), tok: 1, dur: 5000})
+		tokPoint{ts: time.Now().Add(-2 * g.perfWindow()), tok: 1, dur: 5000})
 	c.mu.Unlock()
 	a.notePerfRequest("u1", "m1", 1, 5000, 0, "")
 	if locked, _, _ := c.locked("m1", ""); locked {

@@ -20,26 +20,27 @@ import (
 var gateLabels = []string{
 	"interval_sec", "sem_wait_sec", "queue_wait_sec", "retry_backoff_sec",
 	"concurrency_lock_sec", "quota_lock_sec", "breaker_lock_sec", "lowperf_lock_sec",
-	"lowperf_window_sec", "lowperf_peak_max", "lowperf_avg_max", "lowperf_rel_max", "lowperf_ttfb_max_sec",
-	"rate_window_sec", "block_window_sec", "sticky_ttl_sec", "probe_enabled",
+	"perf_window_sec", "lowperf_peak_max", "lowperf_avg_max", "lowperf_rel_max", "lowperf_ttfb_max_sec",
+	"block_window_sec", "sticky_ttl_sec", "probe_enabled",
 }
 
 // gateCN 与 gateLabels 一一对应的中文显示名 (设置页用)。
 var gateCN = []string{
 	"出队间隔", "等并发槽位", "排队上限", "退避序列",
 	"并发锁时长", "额度锁时长", "熔断锁时长", "低性能锁时长",
-	"低性能窗口", "低吞吐峰值", "低吞吐平均", "低吞吐历史比", "高延迟阈值",
-	"速度窗口", "采样尺度", "粘性失效窗口", "恢复探测",
+	"性能窗口", "低吞吐峰值", "低吞吐平均", "低吞吐历史比", "高延迟阈值",
+	"采样尺度", "粘性失效窗口", "恢复探测",
 }
 
 // 特殊字段的下标 (code 里按下标分支, 集中在这些常量上, 重排顺序只改 gateLabels/gateCN)。
 const (
-	gateIdxRetry = 3  // 退避序列: 逗号秒串, 只能 = 输入
-	gateIdxPeak  = 9  // 低吞吐峰值门槛 (t/s)
-	gateIdxAvg   = 10 // 低吞吐平均门槛 (t/s)
-	gateIdxRel   = 11 // 低吞吐历史比门槛 (百分比)
-	gateIdxTtfb  = 12 // 高延迟阈值 (0 = 关闭该项)
-	gateIdxProbe = 16 // 恢复探测开关
+	gateIdxRetry   = 3  // 退避序列: 逗号秒串, 只能 = 输入
+	gateIdxPerfWin = 8  // 性能窗 (低性能样本 + TUI 展示共用)
+	gateIdxPeak    = 9  // 低吞吐峰值门槛 (t/s)
+	gateIdxAvg     = 10 // 低吞吐平均门槛 (t/s)
+	gateIdxRel     = 11 // 低吞吐历史比门槛 (百分比)
+	gateIdxTtfb    = 12 // 高延迟阈值 (0 = 关闭该项)
+	gateIdxProbe   = 15 // 恢复探测开关
 )
 
 // gateStep 是 +/- 一次调整的步长 (退避序列返回 0 = 不用加减键)。
@@ -52,25 +53,23 @@ func gateStep(i int) int {
 	case 3:
 		return 0 // retry: 用 = 按逗号输入
 	case 4, 5, 6, 7, 8:
-		return 60000 // 四把锁 + 低性能判定窗口
+		return 60000 // 四把锁 + 性能窗
 	case 9, 10, 11:
 		return 1 // 低吞吐门槛 t/s / 历史比 1%
 	case 12:
 		return 1000 // 高延迟阈值
 	case 13:
-		return 600000 // rate_window: 每次 10 分钟
-	case 14:
 		return 5000 // block_window: 每次 5 秒
-	case 15:
+	case 14:
 		return 60000 // sticky_ttl: 每次 1 分钟
-	case 16:
+	case 15:
 		return 1 // probe_enabled: 每次翻转 0/1
 	}
 	return 0
 }
 
 // gateField 取一个 gate 参数 (i 是 gateLabels 的下标);
-// 13/14 是扁平顶层窗口参数 (rate/block), 不走 GateCfg。
+// 13 是扁平顶层窗口参数 (block), 不走 GateCfg。
 func (e *tuiEditor) gateField(i int) int {
 	g := e.gate
 	switch i {
@@ -89,7 +88,7 @@ func (e *tuiEditor) gateField(i int) int {
 	case 7:
 		return g.LowPerfLockMs
 	case 8:
-		return g.LowPerfWindowMs
+		return g.PerfWindowMs
 	case 9:
 		return g.LowPerfPeakMax
 	case 10:
@@ -99,12 +98,10 @@ func (e *tuiEditor) gateField(i int) int {
 	case 12:
 		return g.LowPerfTtfbMaxMs
 	case 13:
-		return e.rateWinMs
-	case 14:
 		return e.blockWinMs
-	case 15:
+	case 14:
 		return g.StickyTTLMs
-	case 16:
+	case 15:
 		if e.probeOn {
 			return 1
 		}
@@ -171,7 +168,7 @@ func (e *tuiEditor) gateNumUnit(i int) (num, unit string) {
 // isSecField 是否时间类字段 (显示/输入都用秒)。
 func isSecField(i int) bool {
 	switch i {
-	case 0, 1, 2, 4, 5, 6, 7, 8, 12, 13, 14, 15:
+	case 0, 1, 2, 4, 5, 6, 7, 8, 12, 13, 14:
 		return true
 	}
 	return false
@@ -199,12 +196,7 @@ func (e *tuiEditor) loadGate() {
 		return
 	}
 	e.gate = normGate(c.gate())
-	// 扁平窗口 (秒 x1000 -> 毫秒): 0=缺省 (速度窗 1h, 分块采样 35s)。
-	if c.RateWindowSec > 0 {
-		e.rateWinMs = secToMs(c.RateWindowSec)
-	} else {
-		e.rateWinMs = 3600000
-	}
+	// 扁平分块采样尺度 (秒 x1000 -> 毫秒): 性能窗已由 gate()/normGate 读取。
 	if c.BlockWindowSec > 0 {
 		e.blockWinMs = secToMs(c.BlockWindowSec)
 	} else {
@@ -247,7 +239,7 @@ func gateBounds(i int) (lo, hi int) {
 		return 100, 60000
 	case 1, 2:
 		return 100, 600000
-	case 4, 5, 6, 7, 8, 14, 15:
+	case 4, 5, 6, 7, 8, 13, 14:
 		return 1000, 86400000
 	case 9, 10:
 		return 1, 100000
@@ -255,9 +247,7 @@ func gateBounds(i int) (lo, hi int) {
 		return 1, 100
 	case 12:
 		return 0, 86400000
-	case 13:
-		return 60000, 86400000
-	case 16:
+	case 15:
 		return 0, 1
 	}
 	return 0, 0
@@ -370,14 +360,12 @@ func (e *tuiEditor) setSecField(i, ms int) {
 	case 7:
 		e.gate.LowPerfLockMs = ms
 	case 8:
-		e.gate.LowPerfWindowMs = ms
+		e.gate.PerfWindowMs = ms
 	case 12:
 		e.gate.LowPerfTtfbMaxMs = ms // 0 = 关闭高延迟判定
 	case 13:
-		e.rateWinMs = ms
-	case 14:
 		e.blockWinMs = ms
-	case 15:
+	case 14:
 		e.gate.StickyTTLMs = ms
 	}
 }
@@ -462,14 +450,13 @@ func (e *tuiEditor) gateFlat(g GateCfg) map[string]any {
 		"concurrency_lock_sec": msToSec(g.ConcurrencyLockMs),
 		"quota_lock_sec":       msToSec(g.QuotaLockMs),
 		"breaker_lock_sec":     msToSec(g.BreakerLockMs),
-		"lowperf_window_sec":   msToSec(g.LowPerfWindowMs),
+		"perf_window_sec":      msToSec(g.PerfWindowMs),
 		"lowperf_peak_max":     g.LowPerfPeakMax,
 		"lowperf_avg_max":      g.LowPerfAvgMax,
 		"lowperf_rel_max":      g.LowPerfRelMax,
 		"lowperf_ttfb_max_sec": msToSec(g.LowPerfTtfbMaxMs),
 		"lowperf_lock_sec":     msToSec(g.LowPerfLockMs),
 		"retry_backoff_sec":    msListToSec(g.RetryBackoffMs),
-		"rate_window_sec":      msToSec(e.rateWinMs),
 		"block_window_sec":     msToSec(e.blockWinMs),
 		"sticky_ttl_sec":       msToSec(g.StickyTTLMs),
 		"probe_enabled":        e.probeOn,

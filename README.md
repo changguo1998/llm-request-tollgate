@@ -196,7 +196,7 @@ sum(exp(-((结束时刻-当前时刻)/10min)^2)); 按权重降序分配, 同权�
 - 门控参数同样平铺顶层 (`*_sec`): `interval_sec` 出队节拍 (缺省 0.5s), `sem_wait_sec`
   等信号量上限 (5s), `queue_wait_sec` 排队上限 (10s), `concurrency_lock_sec` /
   `quota_lock_sec` / `breaker_lock_sec` / `lowperf_lock_sec` 各把锁的时长
-  (1h / 10min / 5min / 5min), `lowperf_window_sec` 低性能锁的判定窗口 (10min) 与
+  (1h / 10min / 5min / 5min), `perf_window_sec` 性能窗 (缺省 300): 低性能锁的判定窗口与 TUI 性能/平均统计共用, 与
   低吞吐三道门槛 `lowperf_peak_max` (5) / `lowperf_avg_max` (1) / `lowperf_rel_max` (0.2) ——
   前两道单位 tokens/s: 峰值与体积加权平均都低于前两条, 且窗口内各笔速率的算术平均 /
   历史算术平均低于第三道才算低吞吐; 历史平均随 `gate-state.json` 落盘 (与锁共用, 最多每 10s
@@ -207,8 +207,7 @@ sum(exp(-((结束时刻-当前时刻)/10min)^2)); 按权重降序分配, 同权�
   `lowperf_exempt` 低性能锁豁免名单 (真实模型 id 数组, 缺省空): 名单内的模型禁止触发
   低性能锁; `retry_backoff_sec` 通用兜底的退避序列 ([10,20,30])。并发上限不在配置里
   (起点固定 1, 每次重启重新爬)。
-- `rate_window_sec` (缺省 3600) 与 `block_window_sec` (缺省 35): TUI 显示窗口 ——
-  速度平均/峰值统计窗, 与 settings 页的全局参数区可改; `block_window_sec` 目前只为兼容保留
+- `block_window_sec` (缺省 35): TUI 显示窗口 —— 目前只为兼容保留
   (第 1 页改成一张平表后不再按块定行高, 改它不影响版式)。
 - `probe_enabled` (缺省 `true`): 锁恢复探测开关。额度 / 熔断 / 低性能锁到期后不直接解锁,
   先发一笔内置的最小请求 (`max_tokens=1`) 验证可达性, 探测通过才真正解锁, 失败按原锁时长

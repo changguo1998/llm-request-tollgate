@@ -1,4 +1,4 @@
-// tui_windows_test.go: 扁平窗口配置 (rate_window_ms / block_window_ms) 相关测试。
+// tui_windows_test.go: 扁平窗口配置 (perf_window_sec / block_window_sec) 相关测试。
 
 package main
 
@@ -15,12 +15,12 @@ import (
 func TestTUIWindowConfig(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c.json")
-	if err := os.WriteFile(p, []byte(`{"rate_window_sec":7200,"block_window_sec":10}`), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte(`{"perf_window_sec":300,"block_window_sec":10}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	rate, block := tuiWindowConfig(p)
-	if rate != 2*time.Hour || block != 10*time.Second {
-		t.Fatalf("rate=%v block=%v, want 2h/10s", rate, block)
+	if rate != 300*time.Second || block != 10*time.Second {
+		t.Fatalf("rate=%v block=%v, want 5min/10s", rate, block)
 	}
 
 	p2 := filepath.Join(dir, "empty.json")
@@ -28,12 +28,12 @@ func TestTUIWindowConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	rate2, block2 := tuiWindowConfig(p2)
-	if rate2 != time.Hour || block2 != 35*time.Second {
-		t.Fatalf("缺省 rate=%v block=%v, want 1h/35s", rate2, block2)
+	if rate2 != 300*time.Second || block2 != 35*time.Second {
+		t.Fatalf("缺省 rate=%v block=%v, want 5min/35s", rate2, block2)
 	}
 }
 
-// loadConfig 给扁平顶层窗口键 (秒) 设缺省 (3600s / 35s), 也认显式值。
+// loadConfig 给扁平顶层窗口键 (秒) 设缺省 (300s / 35s), 也认显式值。
 func TestConfigWindowDefaults(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c.json")
@@ -44,20 +44,20 @@ func TestConfigWindowDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.RateWindowSec != 3600 || c.BlockWindowSec != 35 {
-		t.Fatalf("缺省 rate=%v block=%v, want 3600/35", c.RateWindowSec, c.BlockWindowSec)
+	if c.PerfWindowSec != 300 || c.BlockWindowSec != 35 {
+		t.Fatalf("缺省 perf=%v block=%v, want 300/35", c.PerfWindowSec, c.BlockWindowSec)
 	}
 
 	p2 := filepath.Join(dir, "c2.json")
-	if err := os.WriteFile(p2, []byte(`{"rate_window_sec":7200,"block_window_sec":10}`), 0o644); err != nil {
+	if err := os.WriteFile(p2, []byte(`{"perf_window_sec":300,"block_window_sec":10}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	c2, err := loadConfig(p2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c2.RateWindowSec != 7200 || c2.BlockWindowSec != 10 {
-		t.Fatalf("显式 rate=%v block=%v, want 7200/10", c2.RateWindowSec, c2.BlockWindowSec)
+	if c2.PerfWindowSec != 300 || c2.BlockWindowSec != 10 {
+		t.Fatalf("显式 perf=%v block=%v, want 300/10", c2.PerfWindowSec, c2.BlockWindowSec)
 	}
 }
 
@@ -83,16 +83,16 @@ func TestModelRowsPerfSamples(t *testing.T) {
 	}
 }
 
-// settings 页编辑两个扁平窗口项 (+/-), 保存写回配置顶层键。
+// settings 页编辑性能窗与分块采样项 (+/-), 保存写回配置顶层键。
 func TestTUISettingsWindowsEditAndSave(t *testing.T) {
 	_, cfg := prioFixture(t)
 	e := newTuiEditor(cfg)
-	e.gateSel = 13 // rate_window_sec (gateLabels 下标)
+	e.gateSel = 8 // perf_window_sec (gateLabels 下标)
 	e.adjustGate(1)
-	if e.rateWinMs != 3600000+600000 {
-		t.Fatalf("rate +10min 应到 %d, 得到 %d", 3600000+600000, e.rateWinMs)
+	if e.gate.PerfWindowMs != 300000+60000 {
+		t.Fatalf("性能窗 +1min 应到 %d, 得到 %d", 300000+60000, e.gate.PerfWindowMs)
 	}
-	e.gateSel = 14
+	e.gateSel = 13
 	e.adjustGate(1)
 	if e.blockWinMs != 35000+5000 {
 		t.Fatalf("block +5s 应到 %d, 得到 %d", 35000+5000, e.blockWinMs)
@@ -112,14 +112,14 @@ func TestTUISettingsWindowsEditAndSave(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got struct {
-		Rate  int `json:"rate_window_sec"`
+		Perf  int `json:"perf_window_sec"`
 		Block int `json:"block_window_sec"`
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Rate != 4200 || got.Block != 40 {
-		t.Fatalf("配置应写回 rate=%d block=%d, want 4200/40 (秒)", got.Rate, got.Block)
+	if got.Perf != 360 || got.Block != 40 {
+		t.Fatalf("配置应写回 perf=%d block=%d, want 360/40 (秒)", got.Perf, got.Block)
 	}
 }
 
@@ -130,7 +130,7 @@ func TestTUISettingsStickyTtlEditAndSave(t *testing.T) {
 	if e.gate.StickyTTLMs != 300000 {
 		t.Fatalf("缺省粘性失效窗口应为 300000ms (5min), 实为 %d", e.gate.StickyTTLMs)
 	}
-	e.gateSel = 15 // sticky_ttl_sec (gateLabels 下标)
+	e.gateSel = 14 // sticky_ttl_sec (gateLabels 下标)
 	e.adjustGate(1)
 	if e.gate.StickyTTLMs != 300000+60000 {
 		t.Fatalf("粘性失效窗口 +1 应到 %d, 实为 %d", 300000+60000, e.gate.StickyTTLMs)

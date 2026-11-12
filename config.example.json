@@ -10,7 +10,7 @@
   "concurrency_lock_sec": 3600,
   "quota_lock_sec": 600,
   "breaker_lock_sec": 300,
-  "lowperf_window_sec": 600,
+  "perf_window_sec": 300,
   "lowperf_peak_max": 5,
   "lowperf_avg_max": 1,
   "lowperf_rel_max": 0.2,
@@ -22,7 +22,6 @@
     20,
     30
   ],
-  "rate_window_sec": 3600,
   "block_window_sec": 35,
   "sticky_ttl_sec": 300,
   "probe_enabled": true,

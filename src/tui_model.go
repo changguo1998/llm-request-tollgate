@@ -110,22 +110,22 @@ func newTUIModel(cfgPath string) *tuiModel {
 }
 
 // tuiWindowConfig 从配置文件的扁平顶层键读 TUI 窗口 (不依赖 key_env, TUI 只读 display 参数)。
-// 读不到或非正数时用缺省: 速度窗 1h, 分块采样时间尺度 35s (后者只为兼容保留)。
+// 读不到或非正数时用缺省: 性能窗 5min (与低性能锁共用), 分块采样时间尺度 35s (后者只为兼容保留)。
 func tuiWindowConfig(cfgPath string) (rateWin, blockWin time.Duration) {
-	rateWin, blockWin = time.Hour, 35*time.Second
+	rateWin, blockWin = 300*time.Second, 35*time.Second
 	b, err := os.ReadFile(cfgPath)
 	if err != nil {
 		return
 	}
 	var raw struct {
-		RateWindowSec  float64 `json:"rate_window_sec"`
+		PerfWindowSec  float64 `json:"perf_window_sec"`
 		BlockWindowSec float64 `json:"block_window_sec"`
 	}
 	if json.Unmarshal(b, &raw) != nil {
 		return
 	}
-	if raw.RateWindowSec > 0 {
-		rateWin = time.Duration(secToMs(raw.RateWindowSec)) * time.Millisecond
+	if raw.PerfWindowSec > 0 {
+		rateWin = time.Duration(secToMs(raw.PerfWindowSec)) * time.Millisecond
 	}
 	if raw.BlockWindowSec > 0 {
 		blockWin = time.Duration(secToMs(raw.BlockWindowSec)) * time.Millisecond

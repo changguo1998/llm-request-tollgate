@@ -38,7 +38,7 @@ func (c *cand) notePerf(model string, tp *tokPoint, ttfbMs int64, g GateCfg) (pe
 		return 0, 0, 0, false, false
 	}
 	now := time.Now()
-	window := g.lowPerfWindow()
+	window := g.perfWindow()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	mg := c.gate(model)

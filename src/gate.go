@@ -75,7 +75,7 @@ type modelGate struct {
 	perfN   int64
 	perfSum float64
 	// 低性能锁的观察期 (纯内存, 不落盘): unlockAt 是最近一次恢复解锁时刻, recycle 是
-	// 一个观察窗口 (lowperf_window) 内「解锁 -> 重锁」的轮数。轮数越大重锁越长,
+	// 一个观察窗口 (perf_window) 内「解锁 -> 重锁」的轮数。轮数越大重锁越长,
 	// 让没真恢复的候选慢慢退成长期死锁, 抖动自衰减; 超过窗口未重锁则归零。
 	unlockAt time.Time
 	recycle  int

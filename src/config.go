@@ -75,7 +75,7 @@ type Config struct {
 	ConcurrencyLockSec float64 `json:"concurrency_lock_sec"`
 	QuotaLockSec       float64 `json:"quota_lock_sec"`
 	BreakerLockSec     float64 `json:"breaker_lock_sec"`
-	LowPerfWindowSec   float64 `json:"lowperf_window_sec"`
+	PerfWindowSec      float64 `json:"perf_window_sec"`      // 性能窗 (低性能锁样本与 TUI 展示共用); 0 = 取缺省 5min
 	LowPerfPeakMax     int     `json:"lowperf_peak_max"`     // tokens/s, 非时间
 	LowPerfAvgMax      int     `json:"lowperf_avg_max"`      // tokens/s, 非时间
 	LowPerfRelMax      float64 `json:"lowperf_rel_max"`      // 低吞吐相对门槛: 当前平均 / 历史平均 < 它 (0.2 = 20%)
@@ -87,8 +87,7 @@ type Config struct {
 	// StickyTtlSec 是粘性失效窗口 (秒, 可小数): 逻辑名空闲 (最后一次请求结束) 超过它,
 	// 粘性偏好作废, 下笔按优先级重选。缺省 5min (0 = 取缺省)。
 	StickyTtlSec float64 `json:"sticky_ttl_sec"`
-	// TUI 显示窗口 (秒, 可小数)
-	RateWindowSec  float64 `json:"rate_window_sec"`
+	// TUI 显示窗口 (秒, 可小数): 性能窗与低性能锁共用 perf_window_sec, 只剩分块采样。
 	BlockWindowSec float64 `json:"block_window_sec"`
 	// 锁恢复探测: 指针区分"未写"(缺省 true) 与显式 false。
 	ProbeEnabled *bool         `json:"probe_enabled"`
@@ -223,7 +222,7 @@ func (c *Config) gate() GateCfg {
 	return GateCfg{
 		IntervalMs: secToMs(c.IntervalSec), SemWaitMs: secToMs(c.SemWaitSec), QueueWaitMs: secToMs(c.QueueWaitSec),
 		ConcurrencyLockMs: secToMs(c.ConcurrencyLockSec), QuotaLockMs: secToMs(c.QuotaLockSec), BreakerLockMs: secToMs(c.BreakerLockSec),
-		LowPerfWindowMs: secToMs(c.LowPerfWindowSec), LowPerfPeakMax: c.LowPerfPeakMax, LowPerfAvgMax: c.LowPerfAvgMax,
+		PerfWindowMs: secToMs(c.PerfWindowSec), LowPerfPeakMax: c.LowPerfPeakMax, LowPerfAvgMax: c.LowPerfAvgMax,
 		LowPerfRelMax: c.LowPerfRelMax,
 		LowPerfLockMs: secToMs(c.LowPerfLockSec), LowPerfTtfbMaxMs: secToMs(c.LowPerfTtfbMaxSec),
 		LowPerfExempt:  c.LowPerfExempt,
@@ -236,7 +235,7 @@ func (c *Config) gate() GateCfg {
 func (c *Config) setGate(g GateCfg) {
 	c.IntervalSec, c.SemWaitSec, c.QueueWaitSec = msToSec(g.IntervalMs), msToSec(g.SemWaitMs), msToSec(g.QueueWaitMs)
 	c.ConcurrencyLockSec, c.QuotaLockSec, c.BreakerLockSec = msToSec(g.ConcurrencyLockMs), msToSec(g.QuotaLockMs), msToSec(g.BreakerLockMs)
-	c.LowPerfWindowSec = msToSec(g.LowPerfWindowMs)
+	c.PerfWindowSec = msToSec(g.PerfWindowMs)
 	c.LowPerfPeakMax, c.LowPerfAvgMax, c.LowPerfRelMax = g.LowPerfPeakMax, g.LowPerfAvgMax, g.LowPerfRelMax
 	c.LowPerfLockSec, c.LowPerfTtfbMaxSec = msToSec(g.LowPerfLockMs), msToSec(g.LowPerfTtfbMaxMs)
 	c.LowPerfExempt = g.LowPerfExempt
@@ -255,7 +254,7 @@ type GateCfg struct {
 	// 低性能锁: 覆盖两种「慢到没有实用价值」—— 低吞吐 (峰值与平均低于绝对门槛, 且
 	// 当前平均 / 历史平均低于 lowperf_rel_max) 或 高延迟 (窗口内平均首字节时延超过阈值),
 	// 任一命中即锁该 上游/模型。
-	LowPerfWindowMs  int     `json:"lowperf_window_ms"`
+	PerfWindowMs     int     `json:"perf_window_ms"`
 	LowPerfPeakMax   int     `json:"lowperf_peak_max"`    // 低吞吐峰值上限 (tokens/s)
 	LowPerfAvgMax    int     `json:"lowperf_avg_max"`     // 低吞吐平均上限 (tokens/s)
 	LowPerfRelMax    float64 `json:"lowperf_rel_max"`     // 低吞吐相对门槛: 当前平均 / 历史平均 < 它
@@ -294,8 +293,8 @@ func normGate(g GateCfg) GateCfg {
 	if g.BreakerLockMs <= 0 {
 		g.BreakerLockMs = 300000
 	}
-	if g.LowPerfWindowMs <= 0 {
-		g.LowPerfWindowMs = 600000
+	if g.PerfWindowMs <= 0 {
+		g.PerfWindowMs = 300000 // 5min
 	}
 	if g.LowPerfPeakMax <= 0 {
 		g.LowPerfPeakMax = 5
@@ -338,9 +337,9 @@ func (g GateCfg) breakerLock() time.Duration {
 	return time.Duration(g.BreakerLockMs) * time.Millisecond
 }
 
-// 低性能锁的窗口 / 门槛 / 高延迟阈值 / 锁时长。
-func (g GateCfg) lowPerfWindow() time.Duration {
-	return time.Duration(g.LowPerfWindowMs) * time.Millisecond
+// 性能窗 (低性能锁样本与 TUI 展示共用)。
+func (g GateCfg) perfWindow() time.Duration {
+	return time.Duration(g.PerfWindowMs) * time.Millisecond
 }
 func (g GateCfg) lowPerfLock() time.Duration {
 	return time.Duration(g.LowPerfLockMs) * time.Millisecond
@@ -408,9 +407,9 @@ func (c *Config) applyDefaults() {
 	if c.LogPath == "" {
 		c.LogPath = "var/requests.jsonl"
 	}
-	// TUI 显示窗口缺省: 速度窗 1h, active 分块采样时间尺度 35s (兼容保留)。
-	if c.RateWindowSec <= 0 {
-		c.RateWindowSec = 3600 // 1h
+	// 性能窗缺省: 低性能锁样本与 TUI 展示共用, 5min。
+	if c.PerfWindowSec <= 0 {
+		c.PerfWindowSec = 300 // 5min
 	}
 	if c.BlockWindowSec <= 0 {
 		c.BlockWindowSec = 35 // rowStatTau0 兜底
