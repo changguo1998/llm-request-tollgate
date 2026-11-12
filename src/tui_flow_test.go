@@ -26,13 +26,10 @@ func TestStageChainBuild(t *testing.T) {
 		t.Fatalf("阶段链应为 %q, 得到 %q", want, got)
 	}
 
-	// 当前阶段 (recv) 的耗时带进行中的青色; 已结束的各段不带。
+	// 耗时仍用前景色, 青色只给接收中的实时吞吐。
 	raw := m.stageChain(f, tr)
-	if !strings.Contains(raw, "recv "+tuiLive+"4s"+tuiReset) {
-		t.Errorf("当前阶段的耗时应带青色: %q", raw)
-	}
-	if strings.Contains(raw, tuiLive+"3s") || strings.Contains(raw, tuiLive+"10s") {
-		t.Errorf("已结束阶段的耗时不该带进行中色: %q", raw)
+	if strings.Contains(raw, tuiLive) {
+		t.Errorf("耗时不该带进行中色: %q", raw)
 	}
 
 	// 还没取信号量时解析段单独出现, 不写 sem。

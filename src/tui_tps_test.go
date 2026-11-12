@@ -84,6 +84,13 @@ func TestFlowCellLiveTps(t *testing.T) {
 	if !strings.Contains(got, "60.0 t/s") { // 6000 / 100s
 		t.Errorf("接收段的链尾应写解码速率 60.0 t/s, 实际 %q", got)
 	}
+	// 实时吞吐带青色, 同一行的耗时仍是前景色 (青色只出现一次)。
+	if !strings.Contains(got, tuiLive+"60.0 t/s"+tuiReset) {
+		t.Errorf("实时吞吐应带青色: %q", got)
+	}
+	if strings.Count(got, tuiLive) != 1 {
+		t.Errorf("青色只该出现在速率上: %q", got)
+	}
 	for _, unwanted := range []string{"12.0 t/s", "KB/s"} { // 总 / 下载都让位给解码
 		if strings.Contains(got, unwanted) {
 			t.Errorf("只该写一个速率, 不该出现 %q: %q", unwanted, got)

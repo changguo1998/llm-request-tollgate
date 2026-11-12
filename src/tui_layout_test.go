@@ -331,13 +331,13 @@ func TestFlowTryCells(t *testing.T) {
 	if got := rows[0][3]; got != want {
 		t.Errorf("首行的阶段链应为 %q, 得到 %q", want, got)
 	}
-	// 回退行: 从并发池重新开始, 当前在频率队列 (实时走); 实时耗时带进行中的青色。
+	// 回退行: 从并发池重新开始, 当前在频率队列 (实时走); 耗时用前景色。
 	raw := rows[1][3]
 	if !strings.HasPrefix(stripANSI(raw), "sem(u2) → freq 2s") {
 		t.Errorf("回退行应从并发池重新开始: %q", raw)
 	}
-	if !strings.Contains(raw, "freq "+tuiLive+"2s"+tuiReset) {
-		t.Errorf("当前阶段的实耗时应带青色: %q", raw)
+	if strings.Contains(raw, tuiLive) {
+		t.Errorf("耗时不该带进行中色: %q", raw)
 	}
 }
 
