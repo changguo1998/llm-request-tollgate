@@ -50,54 +50,67 @@ func TestTtfbAvgMin(t *testing.T) {
 	}
 }
 
-// 第 1 页阶段链在实时接收时按模型/路由表的同三个速度写实时吞吐, 只写一个, 不加前缀:
-// 优先解码 (已收到的输出 token / 首字节到达至今), 其次总 (同一份输出 token / 请求总耗时),
-// 最后下载 (已转发的响应字节 / 首字节到达至今)。
+// 第 1 页阶段链在实时接收时把链尾的实时吞吐写成性能 (r*), 用当前参数表现算;
+// 样本不齐 (没有 token 或字节) 时不写, 缺参数时退原始解码速率。
 func TestFlowCellLiveTps(t *testing.T) {
 	m := newTUIModel("cfg")
 	now := time.Now()
-	recv := flow{ID: 1, Logical: "m1", Stage: stageRecv, RecvTok: 6000, RecvBytes: 1_024_000,
+	m.perfIdx = func(up, model string, c, d, b int64) float64 {
+		if up == "ustc" && model == "real1" {
+			return float64(c) / float64(d) * 1000 * 2 // 模拟长度归一: 原始速率的 2 倍
+		}
+		return float64(c) / float64(d) * 1000
+	}
+	recv := flow{ID: 1, Logical: "m1", Up: "ustc", Model: "real1", Stage: stageRecv,
+		RecvTok: 6000, RecvBytes: 1_024_000,
 		RecvStart: now.Add(-100 * time.Second).UnixMilli(),
 		StartTime: now.Add(-500 * time.Second),
 		Tries: []flowTry{{Cur: stageRecv, Segs: make([]float64, stageCount),
 			CurAt: now.Add(-100 * time.Second).UnixMilli()}}}
 	got := m.stageChain(recv, recv.Tries[0])
-	if !strings.Contains(got, "60.0 t/s") { // 6000 / 100s
-		t.Errorf("接收段的链尾应写解码速率 60.0 t/s, 实际 %q", got)
+	if !strings.Contains(got, "120.0 t/s") { // 6000/100s=60 t/s, perfIdx 修正成 120
+		t.Errorf("接收段链尾应写性能 120.0 t/s, 实际 %q", got)
 	}
-	// 实时吞吐带青色, 同一行的耗时仍是前景色 (青色只出现一次)。
-	if !strings.Contains(got, tuiLive+"60.0 t/s"+tuiReset) {
-		t.Errorf("实时吞吐应带青色: %q", got)
+	// 实时性能带青色, 同一行的耗时仍是前景色 (青色只出现一次)。
+	if !strings.Contains(got, tuiLive+"120.0 t/s"+tuiReset) {
+		t.Errorf("实时性能应带青色: %q", got)
 	}
 	if strings.Count(got, tuiLive) != 1 {
-		t.Errorf("青色只该出现在速率上: %q", got)
+		t.Errorf("青色只该出现在性能上: %q", got)
 	}
-	for _, unwanted := range []string{"12.0 t/s", "KB/s"} { // 总 / 下载都让位给解码
+	for _, unwanted := range []string{"60.0 t/s", "KB/s"} { // 只写修正后的性能, 不再写原始/下载
 		if strings.Contains(got, unwanted) {
-			t.Errorf("只该写一个速率, 不该出现 %q: %q", unwanted, got)
+			t.Errorf("只该写一个性能值, 不该出现 %q: %q", unwanted, got)
 		}
 	}
-	// 只有字节 (没有可计的输出 token) 时只显示下载吞吐。
-	onlyBytes := flow{ID: 4, Logical: "m1", Stage: stageRecv, RecvBytes: 512_000,
+	// 只有字节 (没有可计的输出 token) 时性能不可算, 不写。
+	onlyBytes := flow{ID: 4, Logical: "m1", Up: "ustc", Model: "real1", Stage: stageRecv,
+		RecvBytes: 512_000,
 		RecvStart: now.Add(-100 * time.Second).UnixMilli(),
 		Tries: []flowTry{{Cur: stageRecv, Segs: make([]float64, stageCount),
 			CurAt: now.Add(-100 * time.Second).UnixMilli()}}}
-	if got := m.stageChain(onlyBytes, onlyBytes.Tries[0]); !strings.Contains(got, "5 KB/s") ||
-		strings.Contains(got, "t/s") {
-		t.Errorf("只有字节时应只写下载吞吐, 得到 %q", got)
+	if got := m.stageChain(onlyBytes, onlyBytes.Tries[0]); strings.Contains(got, "t/s") ||
+		strings.Contains(got, "KB/s") {
+		t.Errorf("只有字节时不该写速率/性能, 得到 %q", got)
 	}
-	// 还没收到任何东西 (非流式 / 刚开流) 时不写吞吐。
+	// 还没收到任何东西 (非流式 / 刚开流) 时不写性能。
 	fresh := flow{ID: 2, Logical: "m1", Stage: stageRecv, StartTime: now,
 		Tries: []flowTry{{Cur: stageRecv, Segs: make([]float64, stageCount)}}}
 	if got := m.stageChain(fresh, fresh.Tries[0]); strings.Contains(got, "t/s") {
-		t.Errorf("没有收到内容时不该写吞吐, 得到 %q", got)
+		t.Errorf("没有收到内容时不该写性能, 得到 %q", got)
 	}
-	// 只有接收中那一段才显示吞吐。
-	send := flow{ID: 3, Logical: "m1", Stage: stageSend, RecvTok: 6000, RecvBytes: 4096,
+	// 只有接收中那一段才显示性能。
+	send := flow{ID: 3, Logical: "m1", Up: "ustc", Model: "real1", Stage: stageSend,
+		RecvTok: 6000, RecvBytes: 4096,
 		RecvStart: now.Add(-100 * time.Second).UnixMilli(),
 		Tries:     []flowTry{{Cur: stageSend, Segs: make([]float64, stageCount)}}}
 	if got := m.stageChain(send, send.Tries[0]); strings.Contains(got, "t/s") {
-		t.Errorf("只有接收中才显示吞吐, 得到 %q", got)
+		t.Errorf("只有接收中才显示性能, 得到 %q", got)
+	}
+	// 缺参数 (远端模式) 时退原始解码速率。
+	m.perfIdx = nil
+	if got := m.stageChain(recv, recv.Tries[0]); !strings.Contains(got, "60.0 t/s") {
+		t.Errorf("无参数时应退原始速率 60.0 t/s, 得到 %q", got)
 	}
 }
 

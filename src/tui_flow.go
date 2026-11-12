@@ -115,14 +115,14 @@ func (m *tuiModel) stageTokens(f flow, tr flowTry) []string {
 	return toks
 }
 
-// stageTail 是链尾 (这条尝试走到的地方): 卡住原因 / 接收中的实时吞吐 (青色) / 结局词。
+// stageTail 是链尾 (这条尝试走到的地方): 卡住原因 / 接收中的实时性能 (青色) / 结局词。
 func (m *tuiModel) stageTail(f flow, tr flowTry) []string {
 	var tail []string
 	if tr.Cur >= 0 && isGateDetail(f.Gate) {
 		tail = append(tail, f.Gate)
 	}
 	if tr.Cur == stageRecv {
-		if s := liveTps(f); s != "" {
+		if s := m.livePerf(f); s != "" {
 			tail = append(tail, tuiLive+s+tuiReset)
 		}
 	}
@@ -132,27 +132,24 @@ func (m *tuiModel) stageTail(f flow, tr flowTry) []string {
 	return tail
 }
 
-// liveTps 是接收中这一笔的实时吞吐, 只写一个: 优先解码 (已收到的输出 token / 首字节
-// 到达至今), 其次总 (同一份输出 token / 请求总耗时), 最后下载 (已转发的响应字节 /
-// 首字节到达至今), 都不加前缀。还没收到东西时为空。
-func liveTps(f flow) string {
-	if f.Stage != stageRecv || f.RecvStart <= 0 || (f.RecvTok <= 0 && f.RecvBytes <= 0) {
+// livePerf 是接收中这一笔的实时性能 (r*): 用已收到的输出 token / 首字节到现在的毫秒 /
+// 已收到的字节, 按当前参数表现算 perf = (c/d)*(c/b)^g; 缺参数时退原始解码速率。
+// 样本不齐 (token / 字节 / 接收窗口任一缺失) 时为空。
+func (m *tuiModel) livePerf(f flow) string {
+	if f.Stage != stageRecv || f.RecvStart <= 0 || f.RecvTok <= 0 || f.RecvBytes <= 0 {
 		return ""
 	}
-	el := time.Since(time.UnixMilli(f.RecvStart)).Seconds()
-	// 解码: 接收窗口够长才算 (窗口刚开始时速率会虚高, 也无法除)。
-	if f.RecvTok > 0 && el > 0 {
-		return strings.TrimLeft(humanTPS(float64(f.RecvTok)/el), " ") + " t/s"
+	elMs := time.Since(time.UnixMilli(f.RecvStart)).Milliseconds()
+	if elMs <= 0 {
+		return ""
 	}
-	// 总: 解码不可用时退回按请求总耗时算。
-	if tot := time.Since(f.StartTime).Seconds(); f.RecvTok > 0 && tot > 0 {
-		return strings.TrimLeft(humanTPS(float64(f.RecvTok)/tot), " ") + " t/s"
+	var v float64
+	if m.perfIdx == nil {
+		v = float64(f.RecvTok) / float64(elMs) * 1000 // 无参数: 退原始解码速率
+	} else {
+		v = m.perfIdx(f.Up, f.Model, int64(f.RecvTok), elMs, f.RecvBytes)
 	}
-	// 下载: 没有 token 可计时 (非流式 / 只有思考块以外的字节) 时写字节速率。
-	if f.RecvBytes > 0 && el > 0 {
-		return humanRate(float64(f.RecvBytes) / el)
-	}
-	return ""
+	return strings.TrimLeft(humanTPS(v), " ") + " t/s"
 }
 
 // colorTryFail 给链尾的结局词上色: fail(...) 红字 (失败), reject(...) 黄字 (被挡)。
