@@ -100,3 +100,15 @@ func TestSetGatePromptInvalid(t *testing.T) {
 		t.Errorf("历史比门槛应为 0.35, 得到 %v", e.gate.LowPerfRelMax)
 	}
 }
+
+// block_window_sec 已清理: gate 编辑列表不再含它, 长度与中文名一一对应。
+func TestGateLabelsNoBlockWindow(t *testing.T) {
+	for _, k := range gateLabels {
+		if strings.Contains(k, "block_window") {
+			t.Errorf("gateLabels 不应含 block_window 键: %q", k)
+		}
+	}
+	if len(gateLabels) != 15 || len(gateCN) != len(gateLabels) {
+		t.Fatalf("gateLabels 应为 15 项且与 gateCN 等长, 实际 %d/%d", len(gateLabels), len(gateCN))
+	}
+}

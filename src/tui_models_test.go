@@ -172,3 +172,26 @@ func TestTtfbPerfCellEmptyShortWindow(t *testing.T) {
 		t.Errorf("性能短窗空应显示 -: %q", got)
 	}
 }
+
+// 四段统计的多样本: 老样本只在长窗时, 短均只算短窗内的部分; 最近/峰(谷) 按全部样本。
+func TestPerfTtfbFourValueStats(t *testing.T) {
+	now := time.Now()
+	tt := []ttfbPoint{
+		{ts: now.Add(-time.Minute), ms: 100},
+		{ts: now.Add(-2 * time.Minute), ms: 200},
+		{ts: now.Add(-10 * time.Minute), ms: 300}, // 短窗 (5min) 外, 长窗 (1h) 内
+	}
+	part := func(ms int64) string { return durStr(time.Duration(ms) * time.Millisecond) }
+	want := part(100) + "/" + part(150) + "/" + part(200) + "/" + part(100)
+	if got := ttfbCell(tt, now, 5*time.Minute, time.Hour); got != want {
+		t.Errorf("首字节四段应为 最近100/短均150/长均200/谷100 (%s), 得到 %q", want, got)
+	}
+	ps := []perfPoint{
+		{ts: now.Add(-time.Minute), c: 100, d: 1000, b: 1000},
+		{ts: now.Add(-2 * time.Minute), c: 200, d: 1000, b: 1000},
+		{ts: now.Add(-10 * time.Minute), c: 300, d: 1000, b: 1000},
+	}
+	if got := perfCell(ps, now, 5*time.Minute, time.Hour, "u", "m", nil); got != "100.0/150.0/200.0/300.0" {
+		t.Errorf("性能四段应为 最近100/短均150/长均200/峰300, 得到 %q", got)
+	}
+}

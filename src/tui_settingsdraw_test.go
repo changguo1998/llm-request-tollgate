@@ -168,3 +168,46 @@ func settingsManyModels(t *testing.T, n int) (string, string) {
 	}
 	return filepath.Join(dir, "llm-models.json"), filepath.Join(dir, "tollgate.json")
 }
+
+// settings 全局参数三区分组: 其他 (调度等待 + 粘性 + 探测) | 锁时长 | 低性能设置,
+// 区之间各空一行; 区内的键顺序与 gateLabels 一致。
+func TestSettingsGateSections(t *testing.T) {
+	_, cfg := prioFixture(t)
+	m := newTUIModel(cfg)
+	m.prio = newTuiEditor(cfg)
+	lines := m.settingsGateLines(m.prio, 40)
+	var seq []string
+	for _, l := range lines {
+		p := stripANSI(l)
+		if strings.HasPrefix(p, "全局参数") {
+			continue
+		}
+		seq = append(seq, p)
+	}
+	var want []string
+	for i := 0; i <= 5; i++ {
+		want = append(want, gateCN[i]) // 其他: 调度等待 + 粘性 + 探测
+	}
+	want = append(want, "")
+	for i := 6; i <= 9; i++ {
+		want = append(want, gateCN[i]) // 锁时长
+	}
+	want = append(want, "")
+	for i := 10; i < len(gateCN); i++ {
+		want = append(want, gateCN[i]) // 低性能设置
+	}
+	if len(seq) != len(want) {
+		t.Fatalf("全局参数应有 %d 行 (含 2 空行), 得到 %d:\n%v", len(want), len(seq), seq)
+	}
+	for i, name := range want {
+		if name == "" {
+			if strings.TrimSpace(seq[i]) != "" {
+				t.Errorf("第 %d 行应为空行, 得到 %q", i, seq[i])
+			}
+			continue
+		}
+		if !strings.HasPrefix(seq[i], "  "+name+": ") {
+			t.Errorf("第 %d 行应为 %q, 得到 %q", i, name, seq[i])
+		}
+	}
+}
