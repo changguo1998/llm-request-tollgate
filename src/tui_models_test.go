@@ -40,8 +40,8 @@ func TestModelRowsQueueForAllOwners(t *testing.T) {
 	}
 }
 
-// 模型表的格子按同一口径拼: Token = cached/total, 首字节 = 平均/谷值,
-// 性能 = 每笔请求 r* 的算术平均 (无参数时退原始速率); 熔断锁红、退避黄。
+// 模型表的格子按同一口径拼: Token = cached/total, 首字节 = 最近/短均/长均/谷 四段,
+// 性能 = 最近/短均/长均/峰 四段 (每请求 r*, 无参数时退原始速率); 熔断锁红、退避黄。
 func TestDrawModelsRouteCells(t *testing.T) {
 	m := newTUIModel("cfg")
 	m.cols = 200
@@ -70,16 +70,13 @@ func TestDrawModelsRouteCells(t *testing.T) {
 	if !strings.Contains(out, "ustc/m1") {
 		t.Fatalf("模型行没画出来:\n%s", out)
 	}
-	// Token 一格: cached/total。
-	avg, ok := ttfbAvg(m.routes["a\x00ustc\x00m1"].TtfbPts, now, m.rateWin)
-	if !ok {
-		t.Fatal("首字节样本应在窗口内")
-	}
+	// Token / 首字节 / 性能三格各自的四段/斜杠串 (首字节与性能的统计在 cell 里现算)。
 	for _, want := range []string{
 		humanTokens(1000) + "/" + humanTokens(2000),
-		durStr(time.Duration(avg)*time.Millisecond) + "/" +
-			durStr(time.Duration(ttfbMin(m.routes["a\x00ustc\x00m1"].TtfbPts))*time.Millisecond),
-		humanTPS(500), // 性能: 无参数源退原始速率 c/d = (500/1000)*1000 = 500 t/s
+		// 首字节四段: 最近 100ms / 短均 200ms / 长均 200ms / 谷 100ms。
+		"0.1s/0.2s/0.2s/0.1s",
+		// 性能四段: 单样本 (500 t/s, 无参数退原始速率) 四段同值。
+		"500.0/500.0/500.0/500.0",
 		tuiYell + "8s" + tuiReset,
 		tuiRed + "05:00" + tuiReset,
 	} {
@@ -160,5 +157,18 @@ func TestGroupCellNamesAndLocks(t *testing.T) {
 		if got := groupCell(c.g, c.def); got != c.want {
 			t.Errorf("%s: 期望 %q, 得到 %q", c.name, c.want, got)
 		}
+	}
+}
+
+// 性能窗 (短时) 内没有样本时, 对应段显示 -, 最近 / 长均 / 峰(谷) 仍照算 (除零防护)。
+func TestTtfbPerfCellEmptyShortWindow(t *testing.T) {
+	now := time.Now()
+	ts := []ttfbPoint{{ts: now.Add(-30 * time.Minute), ms: 400}}
+	if got := ttfbCell(ts, now, 5*time.Minute, 3*time.Hour); got != "0.4s/-/0.4s/0.4s" {
+		t.Errorf("首字节短窗空应显示 -: %q", got)
+	}
+	ps := []perfPoint{{ts: now.Add(-30 * time.Minute), c: 100, d: 1000, b: 1000}}
+	if got := perfCell(ps, now, 5*time.Minute, 3*time.Hour, "u", "m", nil); got != "100.0/-/100.0/100.0" {
+		t.Errorf("性能短窗空应显示 -: %q", got)
 	}
 }

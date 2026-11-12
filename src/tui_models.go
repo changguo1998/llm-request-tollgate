@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -189,47 +190,104 @@ func (m *tuiModel) modelRouteRows() [][]string {
 			strconv.Itoa(r.Queue), paused, lock,
 			// 缓存命中与总 token 合成一格 (cached/total)。
 			humanTokens(r.Cached) + "/" + humanTokens(r.Total),
-			ttfbCell(r.TtfbPts, now, m.rateWin),
-			perfCell(r.PerfPts, now, m.window, r.up, r.model, m.perfIdx),
+			ttfbCell(r.TtfbPts, now, m.rateWin, m.window),
+			perfCell(r.PerfPts, now, m.rateWin, m.window, r.up, r.model, m.perfIdx),
 			mages(r.Last),
 		})
 	}
 	return rows
 }
 
-// ttfbCell 拼首字节格: 平均/谷值 (平均看 rateWin, 谷值看整窗口); 没样本时 "-"。
-func ttfbCell(pts []ttfbPoint, now time.Time, rateWin time.Duration) string {
+// ttfbCell 拼首字节格 (四段斜杠): 最近一次 / 短时平均 (perfWin 性能窗) / 长时平均 (统计窗
+// 3h) / 谷值 (整窗最低); 整窗没样本时 "-"。各段窗口内没样本时各自显示 "-"。
+func ttfbCell(pts []ttfbPoint, now time.Time, shortWin, longWin time.Duration) string {
 	if len(pts) == 0 {
 		return "-"
 	}
-	avg, ok := ttfbAvg(pts, now, rateWin)
-	if !ok {
-		return "-"
+	shortSum, shortN := int64(0), 0
+	longSum, longN := int64(0), 0
+	for _, p := range pts {
+		if now.Sub(p.ts) <= shortWin {
+			shortSum += p.ms
+			shortN++
+		}
+		if now.Sub(p.ts) <= longWin {
+			longSum += p.ms
+			longN++
+		}
 	}
-	return durStr(time.Duration(avg)*time.Millisecond) + "/" +
-		durStr(time.Duration(ttfbMin(pts))*time.Millisecond)
+	shortAvg, longAvg := int64(0), int64(0)
+	shortOK, longOK := shortN > 0, longN > 0
+	if shortOK {
+		shortAvg = shortSum / int64(shortN)
+	}
+	if longOK {
+		longAvg = longSum / int64(longN)
+	}
+	last, lok := ttfbLast(pts)
+	part := func(ms int64, ok bool) string {
+		if !ok {
+			return "-"
+		}
+		return durStr(time.Duration(ms) * time.Millisecond)
+	}
+	return strings.Join([]string{
+		part(last, lok), part(shortAvg, shortOK),
+		part(longAvg, longOK), part(ttfbMin(pts), true),
+	}, "/")
 }
 
-// perfCell 拼性能格: 窗口内每笔请求 r* 的算术平均 (单值, t/s); 没样本时 "-"。
-// perfIdx 为空 (远端模式无参数表) 时退化为原始速率 c/d 的算术平均。
-func perfCell(pts []perfPoint, now time.Time, win time.Duration, up, model string, perfIdx func(string, string, int64, int64, int64) float64) string {
-	var sum float64
-	var n int
-	for _, p := range pts {
-		if now.Sub(p.ts) > win {
-			continue
-		}
-		if perfIdx == nil {
-			sum += float64(p.c) / float64(p.d) * 1000
-		} else {
-			sum += perfIdx(up, model, p.c, p.d, p.b)
-		}
-		n++
-	}
-	if n == 0 {
+// perfCell 拼性能格 (四段斜杠): 最近一次 / 短时平均 (perfWin 性能窗) / 长时平均 (统计窗 3h)
+// / 峰值 (整窗最高); 整窗没样本时 "-"。各段窗口内没样本时各自显示 "-"。perfIdx 为空 (远端
+// 模式无参数表) 时退化为原始速率 c/d。
+func perfCell(pts []perfPoint, now time.Time, shortWin, longWin time.Duration, up, model string, perfIdx func(string, string, int64, int64, int64) float64) string {
+	if len(pts) == 0 {
 		return "-"
 	}
-	return humanTPS(sum / float64(n))
+	val := func(p perfPoint) float64 {
+		if perfIdx == nil {
+			return float64(p.c) / float64(p.d) * 1000
+		}
+		return perfIdx(up, model, p.c, p.d, p.b)
+	}
+	var shortSum, longSum float64
+	var shortN, longN int
+	var lastT time.Time
+	var lastV, peak float64
+	for _, p := range pts {
+		v := val(p)
+		if v > peak {
+			peak = v
+		}
+		if p.ts.After(lastT) {
+			lastT, lastV = p.ts, v
+		}
+		if now.Sub(p.ts) <= shortWin {
+			shortSum += v
+			shortN++
+		}
+		if now.Sub(p.ts) <= longWin {
+			longSum += v
+			longN++
+		}
+	}
+	part := func(v float64, ok bool) string {
+		if !ok {
+			return "-"
+		}
+		return humanTPS(v)
+	}
+	shortAvg, longAvg := 0.0, 0.0
+	if shortN > 0 {
+		shortAvg = shortSum / float64(shortN)
+	}
+	if longN > 0 {
+		longAvg = longSum / float64(longN)
+	}
+	return strings.Join([]string{
+		part(lastV, true), part(shortAvg, shortN > 0),
+		part(longAvg, longN > 0), part(peak, true),
+	}, "/")
 }
 
 // modelCols 是第 1 页模型/路由聚合表的列: 按类别从左到右排, 同类相邻 ——
@@ -241,10 +299,10 @@ func modelCols() []tuiCol {
 	return []tuiCol{
 		{"上游/模型", 20, true, false, 4},
 		{"排队", 2, true, true, 0}, {"退避", 4, true, true, 4}, {"熔断", 5, true, true, 4},
-		// 首字节列写 最后一次/平均, 两个时长值加斜杠, 下限 9 不被压窄。
-		{"Token", 9, true, true, 3}, {"首字节", 9, true, true, 3},
-		// 性能列: 每笔请求 r* 的算术平均, 带单位数字整体 4 字符, 下限 9 不被压窄。
-		{"性能", 9, true, true, 4},
+		// 首字节列写 最近/短均/长均/谷 四段 (短 = perfWin 性能窗, 长 = 统计窗 3h)。
+		{"Token", 9, true, true, 3}, {"首字节", 22, true, true, 3},
+		// 性能列写 最近/短均/长均/峰 四段 (每笔请求 r*), 按内容放宽下限。
+		{"性能", 20, true, true, 4},
 		{"最近", 6, true, true, 2},
 	}
 }
