@@ -225,7 +225,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
   无偏好或缺省不出现; `remaining_ms` 是该偏好还能保持多久 (失效窗口剩余), 已过窗
   的偏好直接不列出 (无倒计时, 也无 `*`); 有请求进行中的逻辑名倒计时暂停并按设定值
   (TTL 满值) 满显, 请求结束才从满值开始倒,
-  TUI 用它给第 1 页模型/路由聚合表的偏好候选行标 `*`、粘性页画倒计时列),
+  TUI 用它给模型/路由聚合表与 settings 模型列表的偏好候选行标 `*`、画倒计时列),
   `max_seq`.
 - `active` 每笔: `id` / `logical` / `source` / `path` / `stream` / `start` / `upstream` /
   `backend` / `stage` / `attempt` / `gate`; 接收中的流式请求另带 `recv_tok` (已收到的
