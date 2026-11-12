@@ -1,19 +1,22 @@
 {
+  "_meta": {
+    "version": "2026-11",
+    "generated_at": "2026-11-12T21:40:10"
+  },
   "group/gpt-6-sol": {
-    "g": 0.2117,
-    "a": 5.2285,
+    "g": 0.2263,
+    "a": 5.3306,
     "ref_hours": [
       6,
-      8,
-      20
+      8
     ],
-    "n_ideal": 482,
-    "n_typical": 306,
+    "n_ideal": 210,
+    "n_typical": 129,
     "frac": 0.6,
     "flatness_short_mid_long": [
-      1.045,
-      1.009,
-      0.825
+      0.522,
+      0.84,
+      1.442
     ],
     "flatness_target": "ideal-sample c-tercile r* medians, ~1.0 expected"
   },

@@ -214,9 +214,15 @@ def main():
         print(line)
 
     if not args.no_json:
+        # 顶层 _meta 记版本与生成时间 (docs/speed-metric.md: 参数文件带版本与时间戳).
+        out = {"_meta": {
+            "version": "2026-11",  # 参考窗标签, 与 docs/speed-metric.md 表格一致
+            "generated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        }}
+        out.update(params)
         os.makedirs(os.path.dirname(JSON_OUT), exist_ok=True)
         with open(JSON_OUT, "w", encoding="utf-8") as fh:
-            json.dump(params, fh, ensure_ascii=False, indent=2)
+            json.dump(out, fh, ensure_ascii=False, indent=2)
         print(f"\n参数文件: {JSON_OUT}")
 
 
