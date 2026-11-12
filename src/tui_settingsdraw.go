@@ -136,13 +136,7 @@ func (m *tuiModel) settingsModelLines(e *tuiEditor, cs []tuiCand) ([]settingsLin
 	lines := make([]settingsLine, 0, len(cs)+8)
 	selLine := -1
 	last := ""
-	groupHead := false
 	for i, c := range cs {
-		if c.isGroup && !groupHead { // 进入组区: 先插一节省标题, 与别名区分
-			lines = append(lines, settingsLine{row: -1, text: tuiBold + "组 (别名的别名)" + tuiReset})
-			groupHead = true
-			last = ""
-		}
 		if c.logical != last {
 			lines = append(lines, settingsLine{row: -1, text: m.settingsLogicalHeader(c.isGroup, c.logical)})
 			last = c.logical
@@ -152,13 +146,13 @@ func (m *tuiModel) settingsModelLines(e *tuiEditor, cs []tuiCand) ([]settingsLin
 			attr = tuiRev
 		}
 		mark := " "
-		if p, ok := m.pulse.Sticky[c.logical]; ok && p.Upstream == c.provider && p.Model == c.model {
+		if p, ok := m.pulse.Sticky[c.logical]; ok && stickyCandHit(c, p) {
 			mark = "*"
 		}
 		var text string
 		if c.isGroup {
-			// 组候选行: 只有 上游/模型, 不带 M/P 权重 (组不是权重条目, 只置偏好)。
-			text = "  " + mark + " " + m.upNameAttr(c.provider, attr) + "/" + c.model
+			// 组候选行: 只显示成员逻辑名, 不带 M/P 权重 (组不是权重条目, 只置偏好)。
+			text = "  " + mark + " " + c.member
 		} else {
 			rows := e.filtered()
 			if c.row < len(rows) {
@@ -176,20 +170,34 @@ func (m *tuiModel) settingsModelLines(e *tuiEditor, cs []tuiCand) ([]settingsLin
 	return lines, selLine
 }
 
-// settingsLogicalHeader 拼逻辑名分组标题 (别名加粗 / 组名加粗带「组」字区分), 该逻辑名
-// 有粘性偏好时标题后带剩余时长 (与 sticky 页同款倒计时列)。
+// settingsLogicalHeader 拼逻辑名分组标题: 别名加粗 / 组名加粗换黄色 (不带「组」字
+// 区分, 靠颜色): 该逻辑名有粘性偏好时标题后带剩余时长 (与 sticky 页同款倒计时列)。
 func (m *tuiModel) settingsLogicalHeader(isGroup bool, logical string) string {
-	name := logical
+	attr := tuiBold
 	if isGroup {
-		name = "组 " + logical
+		attr = tuiBold + tuiYell
 	}
-	hdr := tuiBold + name + tuiReset
+	hdr := attr + logical + tuiReset
 	if p, ok := m.pulse.Sticky[logical]; ok {
 		if rem := time.Duration(p.RemainingMs) * time.Millisecond; rem > 0 {
 			hdr += "  " + tuiDim + durStr(rem) + tuiReset
 		}
 	}
 	return hdr
+}
+
+// stickyCandHit 判断某候选行是否是当前偏好目标: 别名行精确匹配 (上游/模型),
+// 组行匹配成员候选链里的任一项 (组偏好可能迁到成员的非首候选)。
+func stickyCandHit(c tuiCand, p stickyView) bool {
+	if c.isGroup {
+		for _, tgt := range c.chain {
+			if tgt[0] == p.Upstream && tgt[1] == p.Model {
+				return true
+			}
+		}
+		return false
+	}
+	return p.Upstream == c.provider && p.Model == c.model
 }
 
 // settingsScrollWindow 按显示行算滚动窗口: 模型列表横向分两栏, 一屏 = 2*window 个

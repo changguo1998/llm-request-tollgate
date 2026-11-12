@@ -105,12 +105,17 @@ func TestSettingsStickyIncludeGroups(t *testing.T) {
 	m.tab = tabSettings
 	m.pulse.Sticky = map[string]stickyView{"g1": {Upstream: "u2", Model: "real-2"}}
 	frame := m.draw()
-	// 组区与别名区分开显示: 组名标题带「组」字, 组候选行可选中。
-	if !strings.Contains(frame, "组 g1") {
-		t.Errorf("组名标题应有组字区分: %q", frame)
+	s := stripANSI(frame)
+	// 组名标题不带「组」字 (靠黄色区分), 组候选只列成员逻辑名 (不展开上游),
+	// 偏好目标落在成员候选链里时该成员行标 * (g1 偏好 u2/real-2 属 m1 的链)。
+	if !strings.Contains(s, "g1") || strings.Contains(s, "组 g1") {
+		t.Errorf("组名标题不应带组字: %q", s)
 	}
-	if !strings.Contains(frame, "u2/real-2") {
-		t.Errorf("组候选链应含 u2/real-2: %q", frame)
+	if !strings.Contains(s, "m2") || !strings.Contains(s, "m1") {
+		t.Errorf("组候选应列成员逻辑名: %q", s)
+	}
+	if !strings.Contains(s, "* m1") {
+		t.Errorf("偏好落在成员链里应标星: %q", s)
 	}
 }
 

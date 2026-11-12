@@ -38,8 +38,10 @@ type tuiCand struct {
 	logical  string // 逻辑名 (别名或组名), 粘性偏好记在它名下
 	provider string
 	model    string
+	member   string // 组候选行: 显示的组成员逻辑名 (不展开到上游)
 	isGroup  bool
 	row      int
+	chain    [][2]string // 组行: 该成员的完整候选链 (星号命中判断用); 别名行 nil
 }
 
 // cands 返回模型面板全部可选行: 先别名模型行 (filtered, 可调优先级), 再组候选行
@@ -50,7 +52,7 @@ func (e *tuiEditor) cands() []tuiCand {
 	rows := e.filtered()
 	out := make([]tuiCand, 0, len(rows)+8)
 	for i, r := range rows {
-		out = append(out, tuiCand{r.alias, r.provider, modelID(r.model), false, i})
+		out = append(out, tuiCand{r.alias, r.provider, modelID(r.model), "", false, i, nil})
 	}
 	cm, err := os.Stat(e.config)
 	if err == nil {
@@ -77,8 +79,12 @@ func (e *tuiEditor) buildGroupCands() []tuiCand {
 	sort.Strings(names)
 	var out []tuiCand
 	for _, g := range names {
-		for _, tgt := range ex[g] {
-			out = append(out, tuiCand{g, tgt[0], tgt[1], true, -1})
+		for _, member := range c.Groups[g] {
+			chain := ex[member]
+			if len(chain) == 0 {
+				continue
+			}
+			out = append(out, tuiCand{g, chain[0][0], chain[0][1], member, true, -1, chain})
 		}
 	}
 	return out
