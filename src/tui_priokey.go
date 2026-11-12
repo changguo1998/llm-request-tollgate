@@ -4,10 +4,14 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func (e *tuiEditor) saveWeights() {
@@ -194,7 +198,7 @@ func (e *tuiEditor) moveFocus(d int) {
 		e.provSel = clampInt(e.provSel+d, 0, max(0, len(e.providers)-1))
 		return
 	}
-	e.modelSel = clampInt(e.modelSel+d, 0, max(0, len(e.filtered())-1))
+	e.modelSel = clampInt(e.modelSel+d, 0, max(0, len(e.cands())-1))
 }
 
 func (e *tuiEditor) jump(to int) {
@@ -206,13 +210,85 @@ func (e *tuiEditor) jump(to int) {
 		e.provSel = clampInt(to, 0, max(0, len(e.providers)-1))
 		return
 	}
-	e.modelSel = clampInt(to, 0, max(0, len(e.filtered())-1))
+	e.modelSel = clampInt(to, 0, max(0, len(e.cands())-1))
 }
 
-// visibleRows 是模型列表当前能显示的行数 (翻页步长), draw 每帧刷新。
 func (e *tuiEditor) visibleRows() int {
 	if e.vis > 0 {
 		return e.vis
 	}
 	return 10
+}
+
+// settingsStickySet / settingsStickyClear 是 settings 页模型面板的粘性偏好写入
+// (Enter 置一次 / c 清除): 光标落在哪个候选行 (别名或组名) 就写哪个逻辑名。写入走
+// POST /sticky, 语义与旧 sticky 页一致 (置后立即生效, 自动迁移照旧)。
+func (m *tuiModel) settingsStickySet(e *tuiEditor) {
+	p := e.pickAt(e.modelSel)
+	if p == nil {
+		e.message = "没有可选行"
+		return
+	}
+	q := url.Values{}
+	q.Set("logical", p.logical)
+	q.Set("upstream", p.provider)
+	q.Set("model", p.model)
+	if err := m.stickyPost(q); err != nil {
+		e.message = "置偏好失败: " + err.Error()
+		return
+	}
+	e.message = "已置 " + p.logical + " -> " + p.provider + "/" + p.model
+}
+
+func (m *tuiModel) settingsStickyClear(e *tuiEditor) {
+	p := e.pickAt(e.modelSel)
+	if p == nil {
+		e.message = "没有可选行"
+		return
+	}
+	q := url.Values{}
+	q.Set("logical", p.logical)
+	if err := m.stickyPost(q); err != nil {
+		e.message = "清除失败: " + err.Error()
+		return
+	}
+	e.message = "已清除 " + p.logical + " 的偏好 (回落配置首候选)"
+}
+
+// stickyBase 是写入地址: 远程看 -tui-state 给的 base, 同进程用自己的监听地址。
+func (m *tuiModel) stickyBase() string {
+	if m.stateURL != "" {
+		return m.stateURL
+	}
+	if m.listen == "" {
+		return ""
+	}
+	return "http://" + m.listen
+}
+
+// stickyPost 发 POST /sticky (参数走 query), 非 200 时带上响应片段。
+func (m *tuiModel) stickyPost(q url.Values) error {
+	base := m.stickyBase()
+	if base == "" {
+		return fmt.Errorf("没有服务地址 (配置缺 listen)")
+	}
+	req, err := http.NewRequest(http.MethodPost, base+"/sticky?"+q.Encode(), nil)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	if resp.StatusCode != http.StatusOK {
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = http.StatusText(resp.StatusCode)
+		}
+		return fmt.Errorf("状态码 %d: %s", resp.StatusCode, msg)
+	}
+	return nil
 }

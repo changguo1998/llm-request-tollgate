@@ -1,7 +1,7 @@
 // tui_run.go: 状态台主循环与按键处理。
 //
-// 状态台以观测为主, 不参与转发、调度与记账; settings / sticky 两页可写 (前者改配置源头,
-// 后者经 POST /sticky 改运行时偏好)。观测数据看三件事:
+// 状态台以观测为主, 不参与转发、调度与记账; settings 页可写 (改配置源头, 模型面板
+// 还能经 POST /sticky 改运行时粘性偏好)。观测数据看三件事:
 //  1. active  正在活跃的请求 + 它此刻走的是哪个后端 (上游 + 真实模型), 以及每个上游的
 //     队列 / 并发上限 / 锁 / 退避。数据来自服务的内存观测面: 同进程看内存 (-tui),
 //     另进程看 GET /state (-tui-state [base])。
@@ -193,7 +193,7 @@ func readKeys(keys chan<- byte) {
 // handleKey 处理一个输入字节; 返回 true = 退出。
 //
 // settings 页把编辑键留给自己 (s = 保存并重生成, h = 热加载, m/p/g = 换面板), events 页
-// 把筛选键留给自己 (f / t / c), 状态页的 h/l 仍是切页; 切页统一走 1-4 / 左右方向键 /
+// 把筛选键留给自己 (f / t / c), 状态页的 h/l 仍是切页; 切页统一走 1-3 / 左右方向键 /
 // l (settings 页的 h 被编辑键占了)。
 func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 	e := m.prio
@@ -219,10 +219,6 @@ func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 	switch {
 	case m.tab == tabSettings && e != nil:
 		return m.settingsKey(b, e)
-	case m.tab == tabSticky:
-		if quit, handled := m.stickyKey(b); handled {
-			return quit
-		}
 	case m.tab == tabEvents:
 		if quit, handled := m.eventsKey(b); handled {
 			return quit
@@ -266,8 +262,6 @@ func (m *tuiModel) escapeKey(p []byte) (quit, complete bool) {
 	switch {
 	case m.tab == tabSettings && m.prio != nil:
 		m.prio.moveFocus(d)
-	case m.tab == tabSticky:
-		m.stickyMove(d)
 	default:
 		m.move(d)
 	}
@@ -285,33 +279,24 @@ func (m *tuiModel) settingsKey(b byte, e *tuiEditor) bool {
 		m.saveSettings()
 	case 'h':
 		m.prioHup()
+	case '\r', '\n':
+		if e.focus == 0 {
+			m.settingsStickySet(e) // 模型面板: Enter 置偏好
+			return false
+		}
+		return false
+	case 'c':
+		if e.focus == 0 {
+			m.settingsStickyClear(e)
+			return false
+		}
+		return false
 	case 'l', '\t':
 		m.switchTab(1)
-	case '1', '2', '3', '4':
+	case '1', '2', '3':
 		m.switchTabTo(int(b - '1'))
 	}
 	return false
-}
-
-// stickyKey 是偏好页的专属键: Enter 置偏好, c 清除, j/k/g/G 移动光标。
-func (m *tuiModel) stickyKey(b byte) (quit, handled bool) {
-	switch b {
-	case 'j':
-		m.stickyMove(1)
-	case 'k':
-		m.stickyMove(-1)
-	case 'g':
-		m.stickyJump(false)
-	case 'G':
-		m.stickyJump(true)
-	case '\r', '\n':
-		m.stickyApply()
-	case 'c':
-		m.stickyClear()
-	default:
-		return false, false
-	}
-	return false, true
 }
 
 // eventsKey 是事件页的筛选键: f 文本筛选, t 时间范围, c 清除全部筛选。
@@ -334,7 +319,7 @@ func (m *tuiModel) commonKey(b byte) bool {
 	switch b {
 	case 'q', 0x03, 0x04: // q / Ctrl-C / Ctrl-D
 		return true
-	case '1', '2', '3', '4':
+	case '1', '2', '3':
 		m.switchTabTo(int(b - '1'))
 	case 'h', 0x1b:
 		m.switchTab(-1)

@@ -5,6 +5,7 @@ package main
 import (
 	"strconv"
 	"strings"
+	"time"
 )
 
 // drawSettings 画设置页: 三列并排 —— 第 1 列 全局参数 + 供应商, 第 2 / 3 列是模型
@@ -102,6 +103,7 @@ func (m *tuiModel) settingsProviderLine(e *tuiEditor, i int, name string) string
 // 模型列独立铺满内容区: 标题 1 行 + 底部消息行 1 行, 其余行全部给模型 (可滚动),
 // 不再被第 1 列的高度公式压短。
 func (m *tuiModel) settingsModelCols(e *tuiEditor, body int) ([]string, []string) {
+	cs := e.cands()
 	rows := e.filtered()
 	col2 := make([]string, 0, body)
 	hidden := len(e.droplist())
@@ -109,10 +111,10 @@ func (m *tuiModel) settingsModelCols(e *tuiEditor, body int) ([]string, []string
 	if flt == "" {
 		flt = "-"
 	}
-	t := "模型 (过滤: " + flt + ", " + strconv.Itoa(len(rows)) + " 个, 黑名单剔除 " + strconv.Itoa(hidden) + ")"
+	t := "模型+组 (过滤: " + flt + ", " + strconv.Itoa(len(rows)+len(e.groupCands)) + " 行, 黑名单剔除 " + strconv.Itoa(hidden) + ")"
 	col2 = append(col2, settingsTitle(t, e.focus == 0))
-	lines, selLine := m.settingsModelLines(e, rows)
-	window := settingsScrollWindow(e, len(lines), len(rows), body, selLine)
+	lines, selLine := m.settingsModelLines(e, cs)
+	window := settingsScrollWindow(e, len(lines), len(cs), body, selLine)
 	// 两栏都从 e.scrollTop 开始连续铺: 左栏前 window 行, 右栏续后 window 行。
 	llen := min(e.scrollTop+window, len(lines))
 	rlen := min(e.scrollTop+2*window, len(lines))
@@ -121,44 +123,73 @@ func (m *tuiModel) settingsModelCols(e *tuiEditor, body int) ([]string, []string
 	return col2, col3
 }
 
-// settingsLine 是模型列表的一显示行: row >= 0 是模型行 (rows 下标), -1 是分组标题。
+// settingsLine 是模型列表的一显示行: row >= 0 是可选行 (cands 下标), -1 是分组标题。
 type settingsLine struct {
 	row  int
 	text string
 }
 
-// settingsModelLines 把过滤后的模型行摊成显示行: 逻辑名变化时先插一行加粗分组标题
-// (不可选, 只作分隔), 组内模型行缩进; 光标只落在模型行上。组 (别名的别名) 是手工
-// 维护的配置, 不进 store, 也不参与权重编辑 —— 只读列在末尾。返回选中行的显示下标。
-func (m *tuiModel) settingsModelLines(e *tuiEditor, rows []tuiPrioRow) ([]settingsLine, int) {
-	lines := make([]settingsLine, 0, len(rows)+8)
+// settingsModelLines 把模型面板的可选行摊成显示行: 逻辑名变化时插一行加粗分组标题
+// (别名或组名); 每行固定 1 列标记位, 是该逻辑名当前粘性偏好目标时标 *。组候选行不带
+// M/P 权重 (只置偏好), 与别名行视觉上分开。返回选中行的显示下标。
+func (m *tuiModel) settingsModelLines(e *tuiEditor, cs []tuiCand) ([]settingsLine, int) {
+	lines := make([]settingsLine, 0, len(cs)+8)
 	selLine := -1
 	last := ""
-	for i, row := range rows {
-		if row.alias != last {
-			lines = append(lines, settingsLine{row: -1, text: tuiBold + row.alias + tuiReset})
-			last = row.alias
+	groupHead := false
+	for i, c := range cs {
+		if c.isGroup && !groupHead { // 进入组区: 先插一节省标题, 与别名区分
+			lines = append(lines, settingsLine{row: -1, text: tuiBold + "组 (别名的别名)" + tuiReset})
+			groupHead = true
+			last = ""
+		}
+		if c.logical != last {
+			lines = append(lines, settingsLine{row: -1, text: m.settingsLogicalHeader(c.isGroup, c.logical)})
+			last = c.logical
 		}
 		attr := ""
 		if e.focus == 0 && i == e.modelSel {
 			attr = tuiRev
 		}
-		// M 后的模型优先级按 2 列右对齐 (负号也算 1 列), 与负数并排时不顶格。
-		text := "  M" + tuiPadLeft(strconv.Itoa(prioOf(row.model)), 2) + " P" + strconv.Itoa(prioOf(row.entry)) +
-			" " + m.upNameAttr(row.provider, attr) + "/" + modelID(row.model)
+		mark := " "
+		if p, ok := m.pulse.Sticky[c.logical]; ok && p.Upstream == c.provider && p.Model == c.model {
+			mark = "*"
+		}
+		var text string
+		if c.isGroup {
+			// 组候选行: 只有 上游/模型, 不带 M/P 权重 (组不是权重条目, 只置偏好)。
+			text = "  " + mark + " " + m.upNameAttr(c.provider, attr) + "/" + c.model
+		} else {
+			rows := e.filtered()
+			if c.row < len(rows) {
+				row := rows[c.row]
+				// M 后的模型优先级按 2 列右对齐 (负号也算 1 列), 与负数并排时不顶格。
+				text = "  " + mark + " M" + tuiPadLeft(strconv.Itoa(prioOf(row.model)), 2) + " P" + strconv.Itoa(prioOf(row.entry)) +
+					" " + m.upNameAttr(row.provider, attr) + "/" + modelID(row.model)
+			}
+		}
 		lines = append(lines, settingsLine{row: i, text: attr + text + tuiReset})
 		if i == e.modelSel {
 			selLine = len(lines) - 1
 		}
 	}
-	if groups, ok := e.groups(); ok && len(groups) > 0 {
-		lines = append(lines, settingsLine{row: -1, text: tuiBold + "组 (别名的别名, 只读)" + tuiReset})
-		for _, g := range groups {
-			lines = append(lines, settingsLine{row: -1,
-				text: "  " + tuiBold + g.name + tuiReset + " <- " + strings.Join(g.members, ", ")})
+	return lines, selLine
+}
+
+// settingsLogicalHeader 拼逻辑名分组标题 (别名加粗 / 组名加粗带「组」字区分), 该逻辑名
+// 有粘性偏好时标题后带剩余时长 (与 sticky 页同款倒计时列)。
+func (m *tuiModel) settingsLogicalHeader(isGroup bool, logical string) string {
+	name := logical
+	if isGroup {
+		name = "组 " + logical
+	}
+	hdr := tuiBold + name + tuiReset
+	if p, ok := m.pulse.Sticky[logical]; ok {
+		if rem := time.Duration(p.RemainingMs) * time.Millisecond; rem > 0 {
+			hdr += "  " + tuiDim + durStr(rem) + tuiReset
 		}
 	}
-	return lines, selLine
+	return hdr
 }
 
 // settingsScrollWindow 按显示行算滚动窗口: 模型列表横向分两栏, 一屏 = 2*window 个

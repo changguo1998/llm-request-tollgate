@@ -60,12 +60,6 @@ type tuiModel struct {
 	prio     *tuiEditor   // settings 页 (调度参数 + 权重编辑), runTUI 里装载
 	reloadFn func() error // 同进程模式的热加载回调; 空 = 走 deploy/tollgate.sh hup
 
-	// sticky 页: 光标在候选行里的位置、窗口第一行, 以及最近一次操作结果。
-	stickySel int
-	stickyTop int
-	stickyMsg string
-	stickyErr bool
-
 	// 第 1 页上游表的排序键 (provider 优先级), 按配置的 mtime 失效 (权重在配置文件里)。
 	provRank    map[string][2]int
 	provRankMod time.Time

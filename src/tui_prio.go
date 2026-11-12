@@ -3,6 +3,7 @@
 package main
 
 import (
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +30,67 @@ func (e *tuiEditor) buildAliases() []tuiAlias {
 		out = append(out, alias)
 	}
 	return out
+}
+
+// tuiCand 是模型面板的一个可选行: 别名模型候选 (可调优先级) 或组候选 (只置粘性偏好)。
+// row 是别名模型行在 e.filtered() 里的下标; 组候选行为 -1 (无权重可调)。
+type tuiCand struct {
+	logical  string // 逻辑名 (别名或组名), 粘性偏好记在它名下
+	provider string
+	model    string
+	isGroup  bool
+	row      int
+}
+
+// cands 返回模型面板全部可选行: 先别名模型行 (filtered, 可调优先级), 再组候选行
+// (只置偏好)。组候选 = 配置 expandedAliases 里组名的候选链, 与 sticky 页同口径;
+// 配置读不到时只回模型行。组候选行按配置 mtime 缓存 (groups 只随配置文件变), 免得
+// 每帧重读解析。
+func (e *tuiEditor) cands() []tuiCand {
+	rows := e.filtered()
+	out := make([]tuiCand, 0, len(rows)+8)
+	for i, r := range rows {
+		out = append(out, tuiCand{r.alias, r.provider, modelID(r.model), false, i})
+	}
+	cm, err := os.Stat(e.config)
+	if err == nil {
+		if e.groupCands == nil || !cm.ModTime().Equal(e.groupCandsMod) {
+			e.groupCands, e.groupCandsMod = e.buildGroupCands(), cm.ModTime()
+		}
+		out = append(out, e.groupCands...)
+	}
+	return out
+}
+
+// buildGroupCands 从配置 expandedAliases 展开组候选链 (组名 -> 上游/模型), 与 sticky
+// 页同口径; 配置读不到时返回 nil。
+func (e *tuiEditor) buildGroupCands() []tuiCand {
+	c, err := loadConfigOpt(e.config, true)
+	if err != nil {
+		return nil
+	}
+	ex := c.expandedAliases()
+	names := make([]string, 0, len(c.Groups))
+	for name := range c.Groups {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out []tuiCand
+	for _, g := range names {
+		for _, tgt := range ex[g] {
+			out = append(out, tuiCand{g, tgt[0], tgt[1], true, -1})
+		}
+	}
+	return out
+}
+
+// pickAt 取 cands 里第 i 个可选行 (越界夹紧), 空列表返回 nil。
+func (e *tuiEditor) pickAt(i int) *tuiCand {
+	cs := e.cands()
+	if len(cs) == 0 {
+		return nil
+	}
+	return &cs[clampInt(i, 0, len(cs)-1)]
 }
 
 // prioItem 是候选在逻辑名分组里的排序键与内容。
@@ -107,11 +169,11 @@ func (e *tuiEditor) rebuild() {
 			}
 		}
 	}
-	rows := e.filtered()
-	if len(rows) == 0 {
+	cs := e.cands()
+	if len(cs) == 0 {
 		e.modelSel = 0
-	} else if e.modelSel >= len(rows) {
-		e.modelSel = len(rows) - 1
+	} else if e.modelSel >= len(cs) {
+		e.modelSel = len(cs) - 1
 	}
 	if e.modelSel < 0 {
 		e.modelSel = 0
@@ -137,12 +199,15 @@ func (e *tuiEditor) filtered() []tuiPrioRow {
 }
 
 func (e *tuiEditor) selected() *tuiPrioRow {
-	rows := e.filtered()
-	if len(rows) == 0 {
+	p := e.pickAt(e.modelSel)
+	if p == nil || p.row < 0 { // 组候选行没有权重可调 (只置粘性偏好)
 		return nil
 	}
-	i := clampInt(e.modelSel, 0, len(rows)-1)
-	return &rows[i]
+	rows := e.filtered()
+	if p.row >= len(rows) {
+		return nil
+	}
+	return &rows[p.row]
 }
 
 // candsFor 取某别名的候选顺序 (右栏预览)。

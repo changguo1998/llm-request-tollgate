@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -106,10 +107,13 @@ type tuiEditor struct {
 	provSel  int
 	modelSel int
 	vis      int // 模型列表当前能显示的行数 (翻页步长, draw 里刷新)
-	filter   string
-	message  string
-	prompt   *tuiPrompt
-	err      string
+	// 组候选行缓存 (只置粘性偏好, 不参与权重编辑): 按配置 mtime 失效。
+	groupCands    []tuiCand
+	groupCandsMod time.Time
+	filter        string
+	message       string
+	prompt        *tuiPrompt
+	err           string
 
 	gate      GateCfg // 配置文件里的调度参数 (显示用 normGate 补齐后的值)
 	gateSel   int
