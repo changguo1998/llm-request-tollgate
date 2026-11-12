@@ -4,6 +4,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -18,9 +19,10 @@ func writePerfRef(t *testing.T, body string) string {
 }
 
 const perfRefSample = `{
-  "ustc/deepseek-flash": {"g": 0.7937},
-  "group/gpt-6-sol": {"g": -0.2},
-  "group/kimi-k3.1-pro": {"g": 0}
+  "_meta": {"version": "2026-11", "generated_at": "2026-11-12T21:40:10"},
+  "ustc/deepseek-flash": {"g": 0.7937, "a": 7.9505},
+  "group/gpt-6-sol": {"g": -0.2, "a": 2.0},
+  "group/kimi-k3.1-pro": {"g": 0, "a": 1.0}
 }`
 
 func TestPerfRefLoadAndIndex(t *testing.T) {
@@ -38,14 +40,14 @@ func TestPerfRefLoadAndIndex(t *testing.T) {
 	}
 }
 
-// g=0 的模型应退化为原始解码速率 c/d.
-func TestPerfRefGZeroFallsBackToRawRate(t *testing.T) {
+// g=0 且参数在表中: (c/b)^0=1, perf 等于原始速率 c/d.
+func TestPerfRefGZeroInTable(t *testing.T) {
 	p, err := loadPerfRef(writePerfRef(t, perfRefSample))
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := p.index("group", "kimi-k3.1-pro", 100, 5000, 6000)
-	if want := 100.0 / (5000.0 / 1000); math.Abs(got-want) > 1e-9 {
+	if want := 20.0; math.Abs(got-want) > 1e-9 {
 		t.Errorf("g=0 应返回原始速率 %v, 得到 %v", want, got)
 	}
 }
@@ -107,5 +109,108 @@ func TestPerfRefLoadErrors(t *testing.T) {
 	}
 	if _, err := loadPerfRef(writePerfRef(t, `{"x": [`)); err == nil {
 		t.Error("损坏 JSON 应报错")
+	}
+	if p, err := loadPerfRef(writePerfRef(t, `{"_meta": {"version": "x"}}`)); err != nil {
+		t.Error("仅含元数据应可加载")
+	} else if got := p.index("a", "b", 100, 5000, 6000); got != 20.0 {
+		t.Errorf("空表应退回原始速率 20, 得到 %v", got)
+	}
+}
+
+// 旧参数 JSON 无 a 字段也可正常计算 (a 仅参考, 不参与).
+func TestPerfRefMissingANoNormalization(t *testing.T) {
+	p, err := loadPerfRef(writePerfRef(t, `{"group/kimi-k3.1-pro": {"g": 0.2223}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := p.index("group", "kimi-k3.1-pro", 100, 5000, 6000)
+	want := 20.0 * math.Pow(100.0/6000.0, 0.2223)
+	if math.Abs(got-want) > 1e-9 {
+		t.Errorf("缺 a 应不归一, got %v want %v", got, want)
+	}
+}
+
+// perfRefTestLog 写一份 n 条同模型样本的日志 (确定性: 每样本同速率同密度).
+func perfRefTestLog(t *testing.T, dir string, n int) string {
+	t.Helper()
+	path := filepath.Join(dir, "requests-test.jsonl")
+	var sb strings.Builder
+	for i := 0; i < n; i++ {
+		sb.WriteString(`{"ts":"2026-11-05T10:00:00","upstream":"group","model":"gpt-6-sol",` +
+			`"stream":true,"status":200,"ttfb_ms":1000,"decode_ms":1000,` +
+			`"usage":{"completion":50},"bytes":200}` + "\n")
+	}
+	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// 恒定速率+恒定密度: 样本落同一点, 密度全保留, OLS 退化 g=0, a=ln(50).
+func TestPerfRecomputeFromLogs(t *testing.T) {
+	dir := t.TempDir()
+	perfRefTestLog(t, dir, 150)
+	p, skipped, err := recomputePerfRef(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skipped) != len(perfModels)-1 {
+		t.Errorf("应跳过 %d 个模型, 得到 %v", len(perfModels)-1, skipped)
+	}
+	for _, s := range skipped {
+		if s == "group/gpt-6-sol" {
+			t.Errorf("gpt-6-sol 不应被跳过")
+		}
+	}
+	pr, ok := p.param("group", "gpt-6-sol")
+	if !ok {
+		t.Fatal("参数表应含 group/gpt-6-sol")
+	}
+	if math.Abs(pr.G) > 1e-9 {
+		t.Errorf("恒定样本 g 应为 0, 得到 %v", pr.G)
+	}
+	if want := math.Log(50.0); math.Abs(pr.A-want) > 1e-9 {
+		t.Errorf("a 应为 ln(50)=%v, 得到 %v", want, pr.A)
+	}
+}
+
+// 空日志目录: 全部模型被跳过, 表为空, 不报错.
+func TestPerfRecomputeEmptyDir(t *testing.T) {
+	p, skipped, err := recomputePerfRef(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skipped) != len(perfModels) {
+		t.Errorf("应跳过全部 %d 个模型, 得到 %v", len(perfModels), skipped)
+	}
+	if len(p.byModel) != 0 {
+		t.Errorf("空日志应产生空表, 得到 %d 项", len(p.byModel))
+	}
+}
+
+// 最小二乘数值: y = 1 + 2z 应得 g=2, a=1.
+func TestPerfOLS(t *testing.T) {
+	z := []float64{1, 2, 3, 4}
+	y := []float64{3, 5, 7, 9}
+	g, a := perfOLS(z, y)
+	if math.Abs(g-2) > 1e-9 || math.Abs(a-1) > 1e-9 {
+		t.Errorf("OLS 应得 g=2,a=1, 得到 g=%v,a=%v", g, a)
+	}
+}
+
+// 恒定 z 时 OLS 应退化 (浮点误差下 sxx 非精确 0).
+func TestPerfOLSConstantZ(t *testing.T) {
+	z := make([]float64, 200)
+	y := make([]float64, 200)
+	for i := range z {
+		z[i] = -1.3862943611198906
+		y[i] = 3.912023005428146
+	}
+	g, a := perfOLS(z, y)
+	if math.Abs(g) > 1e-12 {
+		t.Errorf("恒定 z 应得 g=0, 得到 %v", g)
+	}
+	if math.Abs(a-3.912023005428146) > 1e-9 {
+		t.Errorf("a 应等于均值 y, 得到 %v", a)
 	}
 }
