@@ -87,8 +87,6 @@ type Config struct {
 	// StickyTtlSec 是粘性失效窗口 (秒, 可小数): 逻辑名空闲 (最后一次请求结束) 超过它,
 	// 粘性偏好作废, 下笔按优先级重选。缺省 5min (0 = 取缺省)。
 	StickyTtlSec float64 `json:"sticky_ttl_sec"`
-	// TUI 显示窗口 (秒, 可小数): 性能窗与低性能锁共用 perf_window_sec, 只剩分块采样。
-	BlockWindowSec float64 `json:"block_window_sec"`
 	// 锁恢复探测: 指针区分"未写"(缺省 true) 与显式 false。
 	ProbeEnabled *bool         `json:"probe_enabled"`
 	Upstreams    []UpstreamCfg `json:"upstreams"`
@@ -410,9 +408,6 @@ func (c *Config) applyDefaults() {
 	// 性能窗缺省: 低性能锁样本与 TUI 展示共用, 5min。
 	if c.PerfWindowSec <= 0 {
 		c.PerfWindowSec = 300 // 5min
-	}
-	if c.BlockWindowSec <= 0 {
-		c.BlockWindowSec = 35 // rowStatTau0 兜底
 	}
 	// 三项超时缺省: 旧配置/生成器可能没给扁平 `*_sec` (早期是嵌套 timeouts)。0 在
 	// idleConn 里会退化成"每次读写立即超时", 所以这里补回历史缺省, 不能留 0。

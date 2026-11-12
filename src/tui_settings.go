@@ -116,8 +116,6 @@ type tuiEditor struct {
 	gateDirty bool
 	gateErr   string
 
-	// 全局区 (gate 列表) 里的扁平顶层窗口参数: 分块采样时间尺度 (性能窗走 GateCfg.PerfWindowMs)。
-	blockWinMs int
 	// 锁恢复探测开关 (配置扁平顶层键, 本项目也用 gate 列表编辑)。
 	probeOn bool
 }

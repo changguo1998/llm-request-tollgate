@@ -34,8 +34,7 @@ type tuiModel struct {
 	evMsg    string     // 时间范围写法不对时的提示
 
 	window       time.Duration     // 回看窗口 (行只算窗口内的记录)
-	rateWin      time.Duration     // 速度平均/峰值窗口 (rate_window_ms)
-	blockWin     time.Duration     // 兼容保留 (第 1 页改成平表后不再按块定行高)
+	rateWin      time.Duration     // 短时 (性能窗) 窗口: 低性能锁样本与 TUI 平均统计共用
 	logPos       map[string]int64  // 每个日志文件读到哪
 	logRest      map[string][]byte // 每文件各自的半行缓冲 (读到一半的行)
 	scannedFiles map[string]bool   // 归档已整读, 不再重复扫
@@ -97,38 +96,34 @@ func (m *tuiModel) lastError() string {
 }
 
 func newTUIModel(cfgPath string) *tuiModel {
-	rateWin, blockWin := tuiWindowConfig(cfgPath)
+	rateWin := tuiWindowConfig(cfgPath)
 	m := &tuiModel{
 		cfgPath: cfgPath, start: time.Now(),
 		routes:  map[string]*routeRow{},
 		window:  tuiWindow,
-		rateWin: rateWin, blockWin: blockWin,
-		logPos: map[string]int64{}, logRest: map[string][]byte{}, scannedFiles: map[string]bool{},
+		rateWin: rateWin,
+		logPos:  map[string]int64{}, logRest: map[string][]byte{}, scannedFiles: map[string]bool{},
 		nameEnds: map[string][]time.Time{},
 	}
 	return m
 }
 
 // tuiWindowConfig 从配置文件的扁平顶层键读 TUI 窗口 (不依赖 key_env, TUI 只读 display 参数)。
-// 读不到或非正数时用缺省: 性能窗 5min (与低性能锁共用), 分块采样时间尺度 35s (后者只为兼容保留)。
-func tuiWindowConfig(cfgPath string) (rateWin, blockWin time.Duration) {
-	rateWin, blockWin = 300*time.Second, 35*time.Second
+// 读不到或非正数时用缺省: 性能窗 5min (与低性能锁共用)。
+func tuiWindowConfig(cfgPath string) (rateWin time.Duration) {
+	rateWin = 300 * time.Second
 	b, err := os.ReadFile(cfgPath)
 	if err != nil {
 		return
 	}
 	var raw struct {
-		PerfWindowSec  float64 `json:"perf_window_sec"`
-		BlockWindowSec float64 `json:"block_window_sec"`
+		PerfWindowSec float64 `json:"perf_window_sec"`
 	}
 	if json.Unmarshal(b, &raw) != nil {
 		return
 	}
 	if raw.PerfWindowSec > 0 {
 		rateWin = time.Duration(secToMs(raw.PerfWindowSec)) * time.Millisecond
-	}
-	if raw.BlockWindowSec > 0 {
-		blockWin = time.Duration(secToMs(raw.BlockWindowSec)) * time.Millisecond
 	}
 	return
 }

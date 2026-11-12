@@ -31,14 +31,14 @@ func TestDrawSettingsProviderCap(t *testing.T) {
 	m.drawSettings(c, body)
 	plain := stripANSI(c.b.String())
 
-	// provH = min(provider 数, 内容区 - 参数区 (标题 + 16 行) - 7)。
+	// provH = min(provider 数, 内容区 - 参数区 (标题 + gateLabels 行) - 7)。
 	want := min(10, max(1, body-(1+len(gateLabels))-7))
 	if got := strings.Count(plain, "priority="); got != want {
 		t.Fatalf("供应商行数应为 %d, 得到 %d:\n%s", want, got, plain)
 	}
-	for _, hidden := range []string{"p9", "p6"} {
-		if strings.Contains(plain, hidden+"  priority=") {
-			t.Errorf("超出高度的供应商 %s 不该画:\n%s", hidden, plain)
+	for i := want; i < len(e.providers); i++ {
+		if strings.Contains(plain, "p"+strconv.Itoa(i)+"  priority=") {
+			t.Errorf("超出高度的供应商 p%d 不该画:\n%s", i, plain)
 		}
 	}
 	if !strings.Contains(plain, "p0  priority=") {
