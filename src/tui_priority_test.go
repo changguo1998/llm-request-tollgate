@@ -589,9 +589,10 @@ func TestPrioTabScopedKeys(t *testing.T) {
 		t.Errorf("状态页的 r 应重读日志")
 	}
 	m.handleKey('h', &pending)
-	if m.tab != tabSticky {
-		t.Errorf("active 页按 h 应回绕到最后一个页签 (sticky), 得到 %d", m.tab)
+	if m.tab != tabSettings {
+		t.Errorf("active 页按 h 应回绕到最后一个页签 (settings), 得到 %d", m.tab)
 	}
+
 }
 
 // 渲染: 每行不越界、页签里有 settings、未保存可见; 没有编辑器也不能崩。

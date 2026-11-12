@@ -144,7 +144,7 @@ func TestRebuildAliasesFromModelsConfig(t *testing.T) {
 	}
 }
 
-// 组 (别名的别名) 在 settings 页只读列出: 组名 -> 成员逻辑名, 出现在模型列表末尾。
+// 组 (别名的别名) 在 settings 页模型列表的组区列出: 组名 -> 展开候选链 (可选中置偏好)。
 func TestSettingsShowsGroups(t *testing.T) {
 	dir := t.TempDir()
 	store := filepath.Join(dir, "llm-models.json")
@@ -173,9 +173,9 @@ func TestSettingsShowsGroups(t *testing.T) {
 	m.prio = newTuiEditor(cfg)
 	m.tab = tabSettings
 	frame := stripANSI(m.draw())
-	if !strings.Contains(frame, "组 (别名的别名") || !strings.Contains(frame, "worker") ||
-		!strings.Contains(frame, "a, b") {
-		t.Fatalf("settings 页应列出组与成员, 得到:\n%s", frame)
+	if !strings.Contains(frame, "组 worker") || !strings.Contains(frame, "组 (别名的别名") ||
+		!strings.Contains(frame, "p1/a") || !strings.Contains(frame, "p1/b") {
+		t.Fatalf("settings 页应列出组与候选链, 得到:\n%s", frame)
 	}
 }
 
