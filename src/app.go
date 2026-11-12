@@ -60,6 +60,9 @@ type App struct {
 	evMu   sync.Mutex
 	events [viewEvents]viewEvent
 	evNext uint64 // 累计事件序号 (TUI 拿它当起点, 只取新增的那部分)
+	// 速度参考参数表 (每小时重算, 驻内存): 只存不消费, 供观察面 / TUI / 告警后续使用。
+	perfRefMu sync.RWMutex
+	perfRef   *PerfRef
 }
 
 type aliasTarget struct {

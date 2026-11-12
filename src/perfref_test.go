@@ -214,3 +214,31 @@ func TestPerfOLSConstantZ(t *testing.T) {
 		t.Errorf("a 应等于均值 y, 得到 %v", a)
 	}
 }
+
+// 周期重算入口: 空目录应置空表, 有日志时应填参数表; perfIndex 线程安全读取.
+func TestPerfRuntimeRecompute(t *testing.T) {
+	dir := t.TempDir()
+	a := &App{cfg: &Config{LogPath: filepath.Join(dir, "requests.jsonl")}}
+	a.recomputePerf()
+	a.perfRefMu.RLock()
+	empty := a.perfRef != nil && len(a.perfRef.byModel) == 0
+	a.perfRefMu.RUnlock()
+	if !empty {
+		t.Fatalf("空目录重算应得空表")
+	}
+
+	perfRefTestLog(t, dir, 150)
+	a.recomputePerf()
+	a.perfRefMu.RLock()
+	pr, ok := a.perfRef.byModel["group/gpt-6-sol"]
+	a.perfRefMu.RUnlock()
+	if !ok {
+		t.Fatalf("有样本后应含 group/gpt-6-sol")
+	}
+	if math.Abs(pr.G) > 1e-9 {
+		t.Errorf("恒定样本 g 应为 0, 得到 %v", pr.G)
+	}
+	if got := a.perfIndex("group", "gpt-6-sol", 100, 5000, 200); got != 20.0 {
+		t.Errorf("perfIndex 应返回原始速率 20, 得到 %v", got)
+	}
+}

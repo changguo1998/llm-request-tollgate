@@ -202,6 +202,7 @@ func serveProxy(cfgPath string) {
 	if err != nil {
 		log.Fatalf("init: %v", err)
 	}
+	app.startPerfRecompute() // 速度参考参数每小时重算 (驻内存)
 	go func() {
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGHUP)
