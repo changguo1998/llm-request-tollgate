@@ -609,9 +609,9 @@ func TestFlowModelTables(t *testing.T) {
 			t.Errorf("active 页缺少 %q", s)
 		}
 	}
-	// 锁中的组用倒计时占位, 组名不再出现。
-	if strings.Contains(out, "g1") {
-		t.Error("锁中的记账组应显示倒计时, 不该再显示组名 g1")
+	// 锁中的组: 组名保留, 倒计时接在名字后面 (不再替换掉名字)。
+	if !strings.Contains(out, "g1 01:00") {
+		t.Error("锁中的记账组应写出组名与倒计时")
 	}
 	// 上游表与下面的模型表之间空一行 (两张表都不画标题)。
 	lines := strings.Split(out, "\r\n")
@@ -881,12 +881,12 @@ func TestColorStandard(t *testing.T) {
 	}
 	raw := m.draw()
 	for _, want := range []string{
-		tuiRedBright + "10:00" + tuiReset, // 记账组的额度锁 (浅红)
-		tuiGreen + "g2" + tuiReset,        // 没锁的记账组: 绿色组名
-		tuiYell + "8s" + tuiReset,         // 退避
-		tuiRed + "05:00" + tuiReset,       // 熔断锁 (红)
-		tuiYell + "05:00" + tuiReset,      // 低性能锁 (黄)
-		tuiYell + "(+1)" + tuiReset,       // 超发试探
+		tuiRedBright + "g1 10:00" + tuiReset, // 额度锁的记账组: 组名 + 倒计时同色
+		tuiGreen + "g2" + tuiReset,           // 没锁的记账组: 绿色组名
+		tuiYell + "8s" + tuiReset,            // 退避
+		tuiRed + "05:00" + tuiReset,          // 熔断锁 (红)
+		tuiYell + "05:00" + tuiReset,         // 低性能锁 (黄)
+		tuiYell + "(+1)" + tuiReset,          // 超发试探
 	} {
 		if !strings.Contains(raw, want) {
 			t.Errorf("缺少按标准上色的单元格 %q", want)

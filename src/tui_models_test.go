@@ -145,3 +145,24 @@ func TestDrawModelsUpstreamTable(t *testing.T) {
 		t.Errorf("u2 试探中应标 (+1): %q", u2)
 	}
 }
+
+// 记账组格: 未锁绿组名, 锁上组名与倒计时同色且名字不被倒计时替换;
+// 默认组平时写 -, 锁上时只写倒计时。
+func TestGroupCellNamesAndLocks(t *testing.T) {
+	cases := []struct {
+		name string
+		g    candGroup
+		def  bool
+		want string
+	}{
+		{"未锁命名组", candGroup{Name: "g1"}, false, tuiGreen + "g1" + tuiReset},
+		{"锁上命名组", candGroup{Name: "g1", LockMs: 300000}, false, tuiRedBright + "g1 05:00" + tuiReset},
+		{"未锁默认组", candGroup{Name: defaultGroup}, true, "-"},
+		{"锁上默认组", candGroup{Name: defaultGroup, LockMs: 600000}, true, tuiRedBright + "10:00" + tuiReset},
+	}
+	for _, c := range cases {
+		if got := groupCell(c.g, c.def); got != c.want {
+			t.Errorf("%s: 期望 %q, 得到 %q", c.name, c.want, got)
+		}
+	}
+}

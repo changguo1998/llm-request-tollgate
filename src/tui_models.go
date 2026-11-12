@@ -61,10 +61,16 @@ func namedGroupCount(groups []candGroup) int {
 	return n
 }
 
-// groupCell 画一个记账组: 未锁 = 绿色组名 (默认组写 -), 额度锁内 = 浅红倒计时。
+// groupCell 画一个记账组: 未锁 = 绿色组名 (默认组写 -), 额度锁内 = 组名后接同色倒计时
+// (先说明是哪个组, 再写还要等多久; 名字与倒计时都用额度锁的浅红)。默认组没有要写出的
+// 名字, 锁上时只写倒计时。
 func groupCell(g candGroup, isDefault bool) string {
 	if g.LockMs > 0 {
-		return colorDur(g.LockMs, tuiRedBright)
+		if isDefault {
+			return colorDur(g.LockMs, tuiRedBright)
+		}
+		return tuiRedBright + g.Name + " " +
+			durStr(time.Duration(g.LockMs)*time.Millisecond) + tuiReset
 	}
 	if isDefault {
 		return "-"
