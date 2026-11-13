@@ -14,7 +14,7 @@
 | `/v1/responses` | POST | 转发 Responses API, 同一链路 | 客户端, 即各 agent |
 | `/v1/models` | GET | 逻辑模型名清单 + 聚合后的模型参数 (不暴露真实上游 id) | 客户端与运维 |
 | `/state` | GET | 只读观测面: 进行中的请求 + 候选调度状态 + 事件 | 运维 (TUI) |
-| `/unlock` | POST | 调试用强制解锁: 清掉内存里的锁与失败计数 (query 可过滤 `upstream` / `model` / `group`) | 运维 (调试) |
+| `/unlock` | POST | 调试用强制解锁: 清掉内存里的锁与失败计数. query: `upstream` (+ `model`, 只清该 上游/模型 的熔断锁与退避) / `upstream` + `group` (只清该记账组的额度锁, `def` = 默认组; `group` 不能单独给, 否则 400) / `upstream` 单独 (清该上游全部锁) / 都不给 (清全部候选) | 运维 (调试) |
 | `/sticky` | POST | 人工改粘性偏好: query `logical` + `upstream` (+ `model`, 省略取该上游首个) 置一次; 不给 `upstream` 则清除 (`logical` 省略清全部) | 运维 |
 
 其余路径一律 404 `not_found`. base URL 是配置里的 `listen` (缺省
@@ -225,7 +225,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
   无偏好或缺省不出现; `remaining_ms` 是该偏好还能保持多久 (失效窗口剩余), 已过窗
   的偏好直接不列出 (无倒计时, 也无 `*`); 有请求进行中的逻辑名倒计时暂停并按设定值
   (TTL 满值) 满显, 请求结束才从满值开始倒,
-  TUI 用它给模型/路由聚合表与 settings 模型列表的偏好候选行标 `*`、画倒计时列),
+  TUI 用它给第 1 页模型表的分组标题画倒计时、给偏好候选行标 `*`),
   `max_seq`.
 - `active` 每笔: `id` / `logical` / `source` / `path` / `stream` / `start` / `upstream` /
   `backend` / `stage` / `attempt` / `gate`; 接收中的流式请求另带 `recv_tok` (已收到的
