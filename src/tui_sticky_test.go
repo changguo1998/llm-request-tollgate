@@ -415,3 +415,53 @@ func TestFlowCursorHighlight(t *testing.T) {
 		t.Errorf("选中的模型行应反显 上游/模型 格: %q", raw)
 	}
 }
+
+// 操作反馈单独占键位提示上方一行: 不与键位提示混排 (80 列下键位行也不会被反馈挤掉
+// 末尾的 q 退出), 没有反馈时不占行。
+func TestFlowMessageAboveHint(t *testing.T) {
+	openTestPTY(t, 30, 80)
+	m := flowFixture(t)
+	m.flowOK("已置 m1 -> u1/real-1")
+	raw := m.draw()
+	lines := strings.Split(strings.TrimRight(stripANSI(raw), "\r\n"), "\r\n")
+	hint, msg := -1, -1
+	for i, ln := range lines {
+		if strings.Contains(ln, "hjkl 光标") {
+			hint = i
+		}
+		if strings.Contains(ln, "已置 m1 -> u1/real-1") {
+			msg = i
+		}
+	}
+	if hint < 0 {
+		t.Fatalf("缺少键位行:\n%s", strings.Join(lines, "\n"))
+	}
+	if msg != hint-1 {
+		t.Errorf("反馈应在键位行正上方一行 (反馈行 %d, 键位行 %d):\n%s",
+			msg+1, hint+1, strings.Join(lines, "\n"))
+	}
+	if strings.Contains(lines[hint], "已置") {
+		t.Errorf("反馈不该混进键位行: %q", lines[hint])
+	}
+	if !strings.Contains(lines[hint], "q 退出") {
+		t.Errorf("80 列下键位行应保住 q 退出: %q", lines[hint])
+	}
+	if !strings.Contains(raw, tuiYell+tuiIndent+"已置 m1 -> u1/real-1") {
+		t.Errorf("成功反馈应是黄字:")
+	}
+
+	// 失败反馈红字; 清掉反馈后不再占行 (键位行回到最后一行)。
+	m.flowFail("置偏好失败: 测试")
+	lines = strings.Split(strings.TrimRight(stripANSI(m.draw()), "\r\n"), "\r\n")
+	if last := lines[len(lines)-1]; strings.Contains(last, "置偏好失败") {
+		t.Errorf("失败反馈也不该混进键位行: %q", last)
+	}
+	if !strings.Contains(lines[len(lines)-2], "置偏好失败") {
+		t.Errorf("失败反馈应在键位行上方一行: %q", lines[len(lines)-2])
+	}
+	m.flowMsg, m.flowErr = "", false
+	lines = strings.Split(strings.TrimRight(stripANSI(m.draw()), "\r\n"), "\r\n")
+	if !strings.Contains(lines[len(lines)-1], "hjkl 光标") {
+		t.Errorf("没有反馈时键位行就是最后一行: %q", lines[len(lines)-1])
+	}
+}

@@ -899,3 +899,39 @@ func TestColorStandard(t *testing.T) {
 		}
 	}
 }
+
+// 模型表的组名向外悬挂: 组名留在 tuiIndent (2 格), 列名行与数据行再往里多缩进 modelHang
+// 格, 分组的起止一眼能看出来。
+func TestModelTableHangingIndent(t *testing.T) {
+	openTestPTY(t, 40, 140)
+	m := flowFixture(t)
+	m.pulse.Sticky = map[string]stickyView{
+		"m1": {Upstream: "u1", Model: "real-1", RemainingMs: 272000},
+	}
+	lines := strings.Split(stripANSI(m.draw()), "\r\n")
+	headers, rows := 0, 0
+	for _, ln := range lines {
+		txt := strings.TrimSpace(ln)
+		switch {
+		case strings.HasPrefix(txt, "m1") && strings.Contains(txt, "04:32"), txt == "m2":
+			headers++
+			if !strings.HasPrefix(ln, tuiIndent) || strings.HasPrefix(ln, modelIndent) {
+				t.Errorf("组名应在 %d 格缩进 (悬挂在表体外面): %q", len(tuiIndent), ln)
+			}
+		case strings.Contains(txt, "上游/模型"):
+			rows++
+			if !strings.HasPrefix(ln, modelIndent) {
+				t.Errorf("列名行应在 %d 格缩进: %q", len(modelIndent), ln)
+			}
+		case strings.Contains(txt, "u1/real-1"), strings.Contains(txt, "u2/real-2"):
+			rows++
+			if !strings.HasPrefix(ln, modelIndent) {
+				t.Errorf("数据行应在 %d 格缩进: %q", len(modelIndent), ln)
+			}
+		}
+	}
+	if headers != 2 || rows != 3 {
+		t.Errorf("应有 2 个组名与 3 行表体 (列名行 + 2 行数据), 实为 %d / %d:\n%s",
+			headers, rows, strings.Join(lines, "\n"))
+	}
+}
