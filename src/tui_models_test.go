@@ -75,8 +75,9 @@ func TestDrawModelsRouteCells(t *testing.T) {
 		humanTokens(1000) + "/" + humanTokens(2000),
 		// 首字节四段: 最近 100ms / 短均 200ms / 长均 200ms / 谷 100ms。
 		"0.1s/0.2s/0.2s/0.1s",
-		// 性能四段: 单样本 (500 t/s, 无参数退原始速率) 四段同值。
-		"500.0/500.0/500.0/500.0",
+		// 性能四段: 单样本 (500 t/s, 无参数退原始速率) 四段同值; 千以内末位是灰色的
+		// 十分位数字, 读作 500.0。
+		strings.Repeat("500"+tuiDim+"0"+tuiReset+"/", 3) + "500" + tuiDim + "0" + tuiReset,
 		tuiYell + "8s" + tuiReset,
 		tuiRed + "05:00" + tuiReset,
 	} {
@@ -164,11 +165,12 @@ func TestGroupCellNamesAndLocks(t *testing.T) {
 func TestTtfbPerfCellEmptyShortWindow(t *testing.T) {
 	now := time.Now()
 	ts := []ttfbPoint{{ts: now.Add(-30 * time.Minute), ms: 400}}
-	if got := ttfbCell(ts, now, 5*time.Minute, 3*time.Hour); got != "0.4s/-/0.4s/0.4s" {
+	if got := ttfbCell(ts, now, 5*time.Minute, 3*time.Hour); got != "0.4s/ -- /0.4s/0.4s" {
 		t.Errorf("首字节短窗空应显示 -: %q", got)
 	}
 	ps := []perfPoint{{ts: now.Add(-30 * time.Minute), c: 100, d: 1000, b: 1000}}
-	if got := perfCell(ps, now, 5*time.Minute, 3*time.Hour, "u", "m", nil); got != "100.0/-/100.0/100.0" {
+	v := "100" + tuiDim + "0" + tuiReset // 100.0, 十分位是灰色数字
+	if got := perfCell(ps, now, 5*time.Minute, 3*time.Hour, "u", "m", nil); got != v+"/"+cellDash+"/"+v+"/"+v {
 		t.Errorf("性能短窗空应显示 -: %q", got)
 	}
 }
@@ -191,7 +193,9 @@ func TestPerfTtfbFourValueStats(t *testing.T) {
 		{ts: now.Add(-2 * time.Minute), c: 200, d: 1000, b: 1000},
 		{ts: now.Add(-10 * time.Minute), c: 300, d: 1000, b: 1000},
 	}
-	if got := perfCell(ps, now, 5*time.Minute, time.Hour, "u", "m", nil); got != "100.0/150.0/200.0/300.0" {
+	gray := func(d string) string { return tuiDim + d + tuiReset }
+	wantPerf := "100" + gray("0") + "/150" + gray("0") + "/200" + gray("0") + "/300" + gray("0")
+	if got := perfCell(ps, now, 5*time.Minute, time.Hour, "u", "m", nil); got != wantPerf {
 		t.Errorf("性能四段应为 最近100/短均150/长均200/峰300, 得到 %q", got)
 	}
 }

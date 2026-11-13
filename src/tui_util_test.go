@@ -55,13 +55,14 @@ func TestAppLogPath(t *testing.T) {
 	}
 }
 
-// humanTokens: 千 / 百万按整数缩写 (四舍五入, 不保留小数), 数字+单位整体右对齐到 4
-// 字符; 更小的原样输出。进位边界 (999999 -> 1M) 也验证。
+// humanTokens: 固定 4 字符 —— 3 位数字 + 单位 (K/M/G, 四舍五入不保留小数), 千以内左补
+// 空格; 进位边界 (999999 -> 1M) 与千进位 (G) 也验证。
 func TestHumanTokens(t *testing.T) {
 	cases := map[int]string{
-		0: "0", 999: "999",
+		0: "   0", 7: "   7", 999: " 999",
 		1000: "  1K", 1500: "  2K", 100_000: "100K", 100_100: "100K",
 		999_999: "  1M", 1_000_000: "  1M", 2_345_678: "  2M",
+		1_000_000_000: "  1G",
 	}
 	for in, want := range cases {
 		if got := humanTokens(in); got != want {
@@ -70,11 +71,14 @@ func TestHumanTokens(t *testing.T) {
 	}
 }
 
-// humanTPS: 千 / 百万整数缩写 + 4 字符宽 (平均/峰值拼列用), 千以内小值保留 1 位小数。
+// humanTPS: 也是固定 4 字符 (平均/峰值拼列用), 千以内第 4 格是灰色的十分位数字。
 func TestHumanTPS(t *testing.T) {
+	gray := func(s string) string { return tuiDim + s + tuiReset }
 	cases := map[float64]string{
-		100: "100.0", 999.94: "999.9",
-		1000: "  1K", 1234.5: "  1K", 1500: "  2K",
+		0: "  0" + gray("0"), 0.84: "  0" + gray("8"),
+		12.34: " 12" + gray("3"), 100: "100" + gray("0"),
+		999.94: "999" + gray("9"),
+		1000:   "  1K", 1234.5: "  1K", 1500: "  2K",
 		100_000: "100K", 987_654: "988K", 999_500: "  1M",
 		1_000_000: "  1M", 12_345_678: " 12M",
 	}
