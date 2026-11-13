@@ -145,7 +145,7 @@ func TestRebuildAliasesFromModelsConfig(t *testing.T) {
 }
 
 // 组 (别名的别名) 在 settings 页模型列表的组区列出: 组名标题不带「组」字, 组候选行
-// 只列成员逻辑名 (不展开上游/模型), 可选中置偏好。
+// 只列成员逻辑名 (不展开上游/模型), 不参与权重。
 func TestSettingsShowsGroups(t *testing.T) {
 	dir := t.TempDir()
 	store := filepath.Join(dir, "llm-models.json")

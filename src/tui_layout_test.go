@@ -682,25 +682,31 @@ func TestModelsGroupedByLogical(t *testing.T) {
 		t.Errorf("观测面状态应补到对应逻辑名行: %+v", rows[0])
 	}
 	out := stripANSI(m.draw())
-	// 同一 上游/模型 因两个逻辑名分成两组: 输出出现两次, 组与组之间隔空行。
+	// 同一 上游/模型 因两个逻辑名分成两组: 输出出现两次, 每组前是一行逻辑名标题。
 	lines := strings.Split(out, "\r\n")
-	seen, lastWasBlank := 0, false
+	seen := 0
 	for _, ln := range lines {
-		if strings.TrimSpace(ln) == "" {
-			lastWasBlank = true
-			continue
+		if strings.Contains(ln, "ustc/m1") {
+			seen++
 		}
-		if !strings.Contains(ln, "ustc/m1") {
-			continue
-		}
-		seen++
-		if seen == 2 && !lastWasBlank {
-			t.Errorf("两组之间应有空行分隔: %q", ln)
-		}
-		lastWasBlank = false
 	}
 	if seen != 2 {
 		t.Errorf("应有 2 行 ustc/m1 (两组各一行), 得到 %d", seen)
+	}
+	for _, name := range []string{"alias-b", "alias-a"} {
+		hdr := -1
+		for i, ln := range lines {
+			if strings.TrimSpace(ln) == name {
+				hdr = i
+			}
+		}
+		if hdr < 0 {
+			t.Errorf("缺少逻辑名标题 %q:\n%s", name, out)
+			continue
+		}
+		if hdr+1 >= len(lines) || !strings.Contains(lines[hdr+1], "ustc/m1") {
+			t.Errorf("逻辑名 %q 的标题后面应紧跟它的行:\n%s", name, out)
+		}
 	}
 }
 

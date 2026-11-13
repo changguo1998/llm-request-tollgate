@@ -581,16 +581,18 @@ func TestPrioTabScopedKeys(t *testing.T) {
 	if !strings.Contains(m.prio.message, "hup 失败") {
 		t.Errorf("hup 失败应写在消息行: %q", m.prio.message)
 	}
-	// 状态页: h 仍是"上一个页签", r 仍是重读日志。
+	// 状态页: 左右方向键仍是切页 (h/l 让给了行光标), r 仍是重读日志。
 	m.handleKey('1', &pending)
 	m.scanned = 7
 	m.handleKey('r', &pending)
 	if m.scanned != 0 {
 		t.Errorf("状态页的 r 应重读日志")
 	}
-	m.handleKey('h', &pending)
+	m.handleKey(0x1b, &pending)
+	m.handleKey('[', &pending)
+	m.handleKey('D', &pending)
 	if m.tab != tabSettings {
-		t.Errorf("active 页按 h 应回绕到最后一个页签 (settings), 得到 %d", m.tab)
+		t.Errorf("active 页按左键应回绕到最后一个页签 (settings), 得到 %d", m.tab)
 	}
 
 }
