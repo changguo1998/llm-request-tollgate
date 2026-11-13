@@ -16,7 +16,8 @@ func (m *tuiModel) draw() string {
 		m.cols = 60
 	}
 	c := &tuiCanvas{cols: m.cols}
-	// 版式: 标题 / 实时状态 / 统计状态 / 页签 / 内容 / ... / 键位 (贴底);
+	// 版式: 标题 / 实时状态 / 统计状态 / 页签 / 内容 / ... / 反馈 / 键位 (贴底); 反馈行只有
+	// 第 1 页有 (解锁与粘性的结果), 其余页没有反馈行。
 	// 上游状态并进第 1 页正文。上游专属色按上游表的固定顺序分配, 各页同色; 红黄绿的正色
 	// 留给状态, 上游用的是它们的亮色变体。
 	m.upColors = make(map[string]string, len(m.pulse.Cands))
@@ -33,6 +34,12 @@ func (m *tuiModel) draw() string {
 	m.drawHeader(c)
 	m.drawTabs(c)
 	body := m.bodyRows()
+	// 第 1 页的操作反馈 (解锁 / 粘性) 单独占键位提示上方一行: 屏幕底部从此是
+	// 内容 / 反馈 / 键位, 反馈不挤进本来就长的键位行。有反馈时内容区让出一行。
+	msg := m.flowMsgLine()
+	if msg != "" {
+		body = max(3, body-1)
+	}
 	switch m.tab {
 	case tabActive:
 		m.drawFlow(c, body)
@@ -41,18 +48,27 @@ func (m *tuiModel) draw() string {
 	case tabSettings:
 		m.drawSettings(c, body)
 	}
-	// 补空行把键位提示压到最后一行。注意别把 countLines() 写进循环条件:
-	// 它每轮都在长, 条件会自己收紧, 循环提前结束 (屏幕上就是"提示浮在中间")。
-	for c.countLines() < m.rows-1 {
+	// 补空行把键位提示压到最后一行 (有反馈行时把反馈压在键位行上面)。注意别把
+	// countLines() 写进循环条件: 它每轮都在长, 条件会自己收紧, 循环提前结束 (屏幕上
+	// 就是"提示浮在中间")。
+	last := m.rows - 1
+	if msg != "" {
+		last--
+	}
+	for c.countLines() < last {
 		c.line("")
+	}
+	if msg != "" {
+		c.line(msg)
 	}
 	c.last(m.hint())
 	// 万一体内容本身高过终端 (极小的窗口), 按行裁掉尾部, 别让提示被顶出屏幕。
 	return "\x1b[H" + c.clip(m.rows)
 }
 
-// bodyRows 是内容区行数: 固定区占 标题 + 实时状态 + 统计状态 + 页签 + 键位, 其余全部给内容。
-// 布局不用空行做分隔, 屏幕上每一行都是内容或键位。
+// bodyRows 是内容区行数: 固定区占 标题 + 实时状态 + 统计状态 + 页签 + 键位 (第 1 页有
+// 操作反馈时再让出一行), 其余全部给内容。布局不用空行做分隔, 屏幕上每一行都是内容、
+// 反馈或键位。
 func (m *tuiModel) bodyRows() int {
 	if body := m.rows - 3 - m.statusRows; body >= 3 {
 		return body
@@ -119,13 +135,6 @@ func (m *tuiModel) hint() string {
 				strconv.Itoa(min(m.pageTop+win, m.pageTotal)) + "/" + strconv.Itoa(m.pageTotal) + ", "
 		}
 		base += "窗口 " + durStr(m.window) + ")"
-		if m.flowMsg != "" {
-			col := tuiYell
-			if m.flowErr {
-				col = tuiRed
-			}
-			base = col + tuiIndent + m.flowMsg + tuiReset + base
-		}
 	case tabEvents:
 		base = "  f 筛选   t 时间范围   c 清除筛选   up/down/PgUp/PgDn 滚动   r 重读日志   q 退出"
 		if m.evMsg != "" {
@@ -134,6 +143,19 @@ func (m *tuiModel) hint() string {
 		base += "   (events: 最新的在最上面)"
 	}
 	return base
+}
+
+// flowMsgLine 是第 1 页的操作反馈行 (解锁 / 置偏好 / 清除偏好): 成功黄字, 失败红字;
+// 没有反馈时返回空串 (不占行)。它单独占键位提示上方一行。
+func (m *tuiModel) flowMsgLine() string {
+	if m.tab != tabActive || m.flowMsg == "" {
+		return ""
+	}
+	col := tuiYell
+	if m.flowErr {
+		col = tuiRed
+	}
+	return col + tuiIndent + m.flowMsg + tuiReset
 }
 
 // prioHint 是 settings 页提示行右侧那句: 改的是哪份 store。
