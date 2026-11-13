@@ -149,7 +149,7 @@ func (m *tuiModel) livePerf(f flow) string {
 	} else {
 		v = m.perfIdx(f.Up, f.Model, int64(f.RecvTok), elMs, f.RecvBytes)
 	}
-	return strings.TrimLeft(humanTPS(v), " ") + " t/s"
+	return plainTPS(v) + " t/s"
 }
 
 // colorTryFail 给链尾的结局词上色: fail(...) 红字 (失败), reject(...) 黄字 (被挡)。

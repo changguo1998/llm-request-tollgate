@@ -198,11 +198,15 @@ func (m *tuiModel) modelRouteRows() [][]string {
 	return rows
 }
 
+// cellDash 是四段统计里「这一段没有样本」的占位: 与数字段一样占 4 格 (两侧空格),
+// 四段的斜杠才不会被一个 1 字符的 "-" 顶歪。
+const cellDash = " -- "
+
 // ttfbCell 拼首字节格 (四段斜杠): 最近一次 / 短时平均 (perfWin 性能窗) / 长时平均 (统计窗
-// 3h) / 谷值 (整窗最低); 整窗没样本时 "-"。各段窗口内没样本时各自显示 "-"。
+// 3h) / 谷值 (整窗最低); 整窗没样本与各段窗口内没样本时都写 cellDash。
 func ttfbCell(pts []ttfbPoint, now time.Time, shortWin, longWin time.Duration) string {
 	if len(pts) == 0 {
-		return "-"
+		return cellDash
 	}
 	shortSum, shortN := int64(0), 0
 	longSum, longN := int64(0), 0
@@ -227,7 +231,7 @@ func ttfbCell(pts []ttfbPoint, now time.Time, shortWin, longWin time.Duration) s
 	last, lok := ttfbLast(pts)
 	part := func(ms int64, ok bool) string {
 		if !ok {
-			return "-"
+			return cellDash
 		}
 		return durStr(time.Duration(ms) * time.Millisecond)
 	}
@@ -238,11 +242,11 @@ func ttfbCell(pts []ttfbPoint, now time.Time, shortWin, longWin time.Duration) s
 }
 
 // perfCell 拼性能格 (四段斜杠): 最近一次 / 短时平均 (perfWin 性能窗) / 长时平均 (统计窗 3h)
-// / 峰值 (整窗最高); 整窗没样本时 "-"。各段窗口内没样本时各自显示 "-"。perfIdx 为空 (远端
+// / 峰值 (整窗最高); 整窗没样本与各段窗口内没样本时都写 cellDash。perfIdx 为空 (远端
 // 模式无参数表) 时退化为原始速率 c/d。
 func perfCell(pts []perfPoint, now time.Time, shortWin, longWin time.Duration, up, model string, perfIdx func(string, string, int64, int64, int64) float64) string {
 	if len(pts) == 0 {
-		return "-"
+		return cellDash
 	}
 	val := func(p perfPoint) float64 {
 		if perfIdx == nil {
@@ -273,7 +277,7 @@ func perfCell(pts []perfPoint, now time.Time, shortWin, longWin time.Duration, u
 	}
 	part := func(v float64, ok bool) string {
 		if !ok {
-			return "-"
+			return cellDash
 		}
 		return humanTPS(v)
 	}
@@ -299,10 +303,11 @@ func modelCols() []tuiCol {
 	return []tuiCol{
 		{"上游/模型", 20, true, false, 4},
 		{"排队", 2, true, true, 0}, {"退避", 4, true, true, 4}, {"熔断", 5, true, true, 4},
-		// 首字节列写 最近/短均/长均/谷 四段 (短 = perfWin 性能窗, 长 = 统计窗 3h)。
+		// Token 一格写 cached/total (两段各 4 字符); 首字节写 最近/短均/长均/谷 四段
+		// (短 = perfWin 性能窗, 长 = 统计窗 3h)。
 		{"Token", 9, true, true, 3}, {"首字节", 22, true, true, 3},
-		// 性能列写 最近/短均/长均/峰 四段 (每笔请求 r*), 按内容放宽下限。
-		{"性能", 20, true, true, 4},
+		// 性能列写 最近/短均/长均/峰 四段 (每笔请求 r*), 每段固定 4 字符, 四段加 3 个斜杠 = 19。
+		{"性能", 19, true, true, 4},
 		{"最近", 6, true, true, 2},
 	}
 }

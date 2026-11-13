@@ -427,25 +427,45 @@ func mages(t time.Time) string {
 	return durStr(time.Since(t))
 }
 
-// unit4 把带单位的数字右对齐到固定 4 字符 (如 "1K" -> "  1K", "100K" 不变), 表格列内
-// 数字对齐靠它 + 列自身的右对齐; 超过 4 字符的极端大值原样返回, 不截断。
-func unit4(s string) string {
-	if len(s) >= 4 {
+// padLeft 把 s 左补空格到 n 字宽 (表格列内数字对齐靠它 + 列自身的右对齐);
+// 比 n 宽的极端大值原样返回, 不截断。
+func padLeft(s string, n int) string {
+	if len(s) >= n {
 		return s
 	}
-	return strings.Repeat(" ", 4-len(s)) + s
+	return strings.Repeat(" ", n-len(s)) + s
 }
 
-// humanTokens 把 token 数写成短形式 (1000 进制): 千以上不保留小数, 四舍五入成整数 +
-// 单位 (K/M), 整体右对齐到 4 字符; 千以内的整数原样输出。
+// numUnits 是数值缩写的单位 (1000 进制), 下标 = 除过的次数; 数字位最多 3 格, 再大就进位。
+var numUnits = [...]string{"", "K", "M", "G", "T", "P"}
+
+// scaled 把量缩到 1000 以内并给出单位: 不到 1000 不缩 (单位空串, 千以内的十分位还能
+// 挤进 4 格); 已经缩过的量四舍五入后满 1000 时再进一级 (999999 -> 1M)。负数与 NaN 按 0
+// 处理 (计数与速率都不该出现), 超过最大单位 P 之后不再缩, 数字位自然变宽。
+func scaled(v float64) (float64, string) {
+	if math.IsNaN(v) || v < 0 {
+		return 0, ""
+	}
+	i := 0
+	for v >= 1000 && i < len(numUnits)-1 {
+		v /= 1000
+		i++
+	}
+	if i > 0 && int(math.Round(v)) >= 1000 && i < len(numUnits)-1 {
+		v /= 1000
+		i++
+	}
+	return v, numUnits[i]
+}
+
+// humanTokens 是 Token 列的写法: 固定 4 字符 —— 3 位数字 + 单位 (K/M/G/T/P), 四舍五入
+// 不保留小数; 千以内没有单位, 左补空格 (512 写成 " 512")。
 func humanTokens(n int) string {
-	if n < 1_000 {
-		return strconv.Itoa(n)
+	v, unit := scaled(float64(n))
+	if unit == "" {
+		return padLeft(strconv.Itoa(int(math.Round(v))), 4)
 	}
-	if k := int(math.Round(float64(n) / 1e3)); k < 1_000 {
-		return unit4(strconv.Itoa(k) + "K")
-	}
-	return unit4(strconv.Itoa(int(math.Round(float64(n)/1e6))) + "M")
+	return padLeft(strconv.Itoa(int(math.Round(v))), 3) + unit
 }
 
 func ftoa(f float64, prec int) string { return strconv.FormatFloat(f, 'f', prec, 64) }
@@ -464,19 +484,26 @@ func humanRate(bps float64) string {
 
 func itoa64(v int64) string { return strconv.FormatInt(v, 10) }
 
-// humanTPS 把吞吐 (tokens/s) 写成短形式: 千/百万进 K/M 且不保留小数 (四舍五入成整数,
-// 整体右对齐到 4 字符), 千以内的小值保留 1 位小数 (含输入的端到端速率动辄几万,
-// 不缩写会把列撑破)。
+// humanTPS 是性能列的写法: 同样固定 4 字符 —— 3 位数字 + 单位 (K/M/G/T/P); 千以内没有
+// 单位, 第 4 格写灰色的十分位数字 (12.3 写成 " 12" + 灰色 3), 与整数位一样占 1 格。
 func humanTPS(v float64) string {
-	switch {
-	case v >= 1_000_000:
-		return unit4(strconv.Itoa(int(math.Round(v/1e6))) + "M")
-	case v >= 1_000:
-		k := int(math.Round(v / 1e3))
-		if k >= 1_000 { // 四舍五入到 1000 就进位成 M
-			return unit4(strconv.Itoa(int(math.Round(v/1e6))) + "M")
+	n, unit := scaled(v)
+	if unit == "" {
+		d := int(math.Round(n * 10)) // 千以内放大 10 倍, 最多 4 位 (9999)
+		if d >= 10000 {              // 999.95 以上舍入到 1000.0: 进位成 1K
+			return padLeft("1", 3) + numUnits[1]
 		}
-		return unit4(strconv.Itoa(k) + "K")
+		return padLeft(strconv.Itoa(d/10), 3) + tuiDim + strconv.Itoa(d%10) + tuiReset
 	}
-	return ftoa(v, 1)
+	return padLeft(strconv.Itoa(int(math.Round(n))), 3) + unit
+}
+
+// plainTPS 是纯文本写法 (阶段链尾的实时速率用): 千以内保留一位小数, 千以上缩写,
+// 不补空格也不上色 —— 它夹在句子中间, 补齐与灰色位会被读成整数。
+func plainTPS(v float64) string {
+	n, unit := scaled(v)
+	if unit == "" {
+		return ftoa(n, 1)
+	}
+	return strconv.Itoa(int(math.Round(n))) + unit
 }
