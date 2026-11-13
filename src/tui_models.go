@@ -277,6 +277,13 @@ func (m *tuiModel) modelGroupHeader(logical string) string {
 	return hdr
 }
 
+// modelHang 是模型表表体比组名多缩进的宽度: 组名用 tuiIndent (向外悬挂), 列名行与数据行
+// 用 modelIndent, 分组一眼能看出哪几行属于谁。多占的宽度先从表宽里扣, 免得顶出屏幕。
+const (
+	modelHang   = 2
+	modelIndent = tuiIndent + "  "
+)
+
 // drawModelTable 画第 2 张表 (模型/路由聚合): 逻辑名标题行 + 该组的 上游/模型 行;
 // 光标行反显 上游/模型 那一格, 返回它的显示行 (绝对行号, -1 = 光标不在这张表)。
 func (m *tuiModel) drawModelTable(c *tuiCanvas, rows []*modelRow, cur flowCursor, has bool) int {
@@ -289,11 +296,11 @@ func (m *tuiModel) drawModelTable(c *tuiCanvas, rows []*modelRow, cur flowCursor
 	}
 	keep := colKeep(modelCols(), data)
 	cols := pickCols(modelCols(), keep)
-	cols, vis := tableLayout(cols, pickRows(keep, data), c.cols)
+	cols, vis := tableLayout(cols, pickRows(keep, data), c.cols-modelHang)
 	head := c.countLines()
-	c.line(tableHead(cols, vis))
+	c.line(tableHeadAt(modelIndent, cols, vis))
 	if len(lines) == 0 {
-		c.line(tuiDim + "  (空)" + tuiReset)
+		c.line(tuiDim + modelIndent + "(空)" + tuiReset)
 	}
 	curLine := -1
 	for i, ln := range lines {
@@ -306,7 +313,7 @@ func (m *tuiModel) drawModelTable(c *tuiCanvas, rows []*modelRow, cur flowCursor
 			cells = markCell(cells, 0)
 			curLine = head + 1 + i
 		}
-		c.line(tuiIndent + strings.Join(alignRow(cols, cells, vis), tuiColSep))
+		c.line(modelIndent + strings.Join(alignRow(cols, cells, vis), tuiColSep))
 	}
 	return curLine
 }

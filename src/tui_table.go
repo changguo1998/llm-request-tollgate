@@ -29,11 +29,17 @@ func tableLayout(cols []tuiCol, rows [][]string, width int) ([]tuiCol, []bool) {
 
 // tableHead 是表头那一行 (列名, 按可见列对齐)。
 func tableHead(cols []tuiCol, vis []bool) string {
+	return tableHeadAt(tuiIndent, cols, vis)
+}
+
+// tableHeadAt 同 tableHead, 缩进由调用方给: 组名悬挂的表把列名行与数据行一起往里挪,
+// 表头才不会和数据行错位。
+func tableHeadAt(indent string, cols []tuiCol, vis []bool) string {
 	head := make([]string, len(cols))
 	for i, col := range cols {
 		head[i] = tuiTrunc(col.title, col.w)
 	}
-	return tuiIndent + tuiBold + strings.Join(alignRow(cols, head, vis), tuiColSep) + tuiReset
+	return indent + tuiBold + strings.Join(alignRow(cols, head, vis), tuiColSep) + tuiReset
 }
 
 // tableTop 画标题行与列名行 (空表也画, 版式不跳)。
