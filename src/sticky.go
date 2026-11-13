@@ -145,9 +145,8 @@ func (s *sticky) prune(aliases map[string][]aliasTarget) {
 }
 
 // pairs 返回全部逻辑名的当前偏好候选 (逻辑名 -> 上游/真实模型) 与剩余保持时长 (ms),
-// 供观测面展示 (settings 模型列表倒计时)。已过失效窗口的偏好不返回 (倒计时归零即摘除,
-// 星号与倒计时随之消失)。aliases 由调用方按 a.mu -> s.mu 的锁序传入 (与
-// applyConfig 一致, 防死锁); 热加载后仍在下标内的保留, 越界的跳过。进行中 (inflight) 的
+// 供观测面展示 (第 1 页模型表的分组标题倒计时)。已过失效窗口的偏好不返回 (倒计时归零即
+// 摘除, 星号与倒计时随之消失)。aliases 由调用方按 a.mu -> s.mu 的锁序传入 (与
 // 逻辑名倒计时保持设定值: 请求进行期间窗口不启动, 请求结束才从满值开始倒。
 func (s *sticky) pairs(aliases map[string][]aliasTarget, ttl time.Duration, now time.Time, inflight map[string]bool) map[string]stickyView {
 	s.mu.Lock()

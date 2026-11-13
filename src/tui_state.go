@@ -97,7 +97,7 @@ func (m *tuiModel) mergeEvents(evs []viewEvent) {
 const (
 	tabActive   = 0 // 活动连接, 每笔请求按尝试一行、阶段成列; 下方接上游状态与模型/路由聚合
 	tabEvents   = 1
-	tabSettings = 2 // 设置: gate 参数 + 优先级 + 粘性偏好
+	tabSettings = 2 // 设置: gate 参数 + 优先级 (只管配置, 锁与粘性在第 1 页)
 )
 
 // 时长一律走 durStr (12s / 02:03 / 01:02:03), 屏幕上不再出现"分 / 秒 / 小时"这类汉字写法。

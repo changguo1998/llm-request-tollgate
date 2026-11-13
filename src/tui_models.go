@@ -79,22 +79,32 @@ func groupCell(g candGroup, isDefault bool) string {
 	return tuiGreen + g.Name + tuiReset
 }
 
-// drawModelsBody 把模型视角的两张表画在第 1 页最上面, 与下面的请求表一起滚动:
-// 先上游状态 (并发 / 排队 / 错误 / 记账组锁), 再列有过请求的 上游/模型 队列与路由聚合。
-// 两张表不画标题 (列名行保留), 表与表之间空一行; 只出现实际上游/模型, 不按配置候选铺开;
-// 第二张表的行按逻辑名分组, 组与组之间空一行。
-func (m *tuiModel) drawModelsBody(full *tuiCanvas) {
+// drawModelsBody 把模型视角的两张表画在第 1 页最上面, 与下面的请求表一起滚动: 先上游
+// 状态 (并发 / 排队 / 错误 / 记账组锁), 再列有过请求的 上游/模型 队列与路由聚合。两张表
+// 不画标题 (列名行保留), 表与表之间空一行; 只出现实际上游/模型, 不按配置候选铺开; 第二张
+// 表每个逻辑名先来一行标题 (逻辑名 + 粘性倒计时), 只列最近用过的逻辑名。返回光标所在的
+// 显示行 (从内容区第一行算起, -1 = 没有光标)。
+func (m *tuiModel) drawModelsBody(full *tuiCanvas) int {
+	cands := m.sortedCands()
+	rows := m.modelRows()
+	cur, has := flowNavFrom(cands, rows).resolve(m.cur)
+	if has {
+		m.cur = cur
+	}
 	full.line("") // 页顶空一行, 不顶在页签下面
-	m.drawUpstreamTable(full, m.sortedCands())
+	line := m.drawUpstreamTable(full, cands, cur, has)
 	full.line("") // 两张表之间空一行
-	mcols, mrows := dropEmptyCols(modelCols(), m.modelRouteRows())
-	drawTable(full, "", mcols, mrows, 0, len(mrows))
+	if l := m.drawModelTable(full, rows, cur, has); l >= 0 {
+		line = l
+	}
+	return line
 }
 
 // drawUpstreamTable 画第 1 张表: 上游状态 (并发 / 排队 / 错误 / 记账组锁)。
 // 记账列: 第一列固定是「记账」(默认组), 后面按各行自己声明的组铺开, 列标题留空;
-// 列数取各行组数的最大值, 组少的行后面留空。行与行之间互不占位。
-func (m *tuiModel) drawUpstreamTable(c *tuiCanvas, cands []candView) {
+// 列数取各行组数的最大值, 组少的行后面留空。光标格反显, 返回它的显示行 (本表在画布里
+// 的绝对行号, -1 = 光标不在这张表)。
+func (m *tuiModel) drawUpstreamTable(c *tuiCanvas, cands []candView, cur flowCursor, has bool) int {
 	maxNamed := 0
 	for _, cand := range cands {
 		if n := namedGroupCount(cand.Groups); n > maxNamed {
@@ -105,7 +115,54 @@ func (m *tuiModel) drawUpstreamTable(c *tuiCanvas, cands []candView) {
 	for _, cand := range cands {
 		rows = append(rows, m.upstreamRow(cand, maxNamed))
 	}
-	drawTable(c, "", upstreamCols(maxNamed), rows, 0, len(rows))
+	cols, vis := tableLayout(upstreamCols(maxNamed), rows, c.cols)
+	head := c.countLines()
+	c.line(tableHead(cols, vis))
+	if len(rows) == 0 {
+		c.line(tuiDim + "  (空)" + tuiReset)
+	}
+	curLine := -1
+	for i, r := range rows {
+		if has && cur.table == 0 && cur.up == cands[i].ID {
+			r = markCell(r, upstreamCell(cur, cands[i]))
+			curLine = head + 1 + i
+		}
+		c.line(tuiIndent + strings.Join(alignRow(cols, r, vis), tuiColSep))
+	}
+	return curLine
+}
+
+// upstreamCell 是光标在上游行里的格下标: 0 = 上游名, 4 = 默认组, 5+ = 命名的记账组
+// (中间三列并发 / 排队 / 错误不可选)。
+func upstreamCell(c flowCursor, cand candView) int {
+	if c.name {
+		return 0
+	}
+	if c.group == defaultGroup {
+		return 4
+	}
+	i := 1
+	for _, g := range cand.Groups {
+		if g.Name == defaultGroup {
+			continue
+		}
+		if g.Name == c.group {
+			return 4 + i
+		}
+		i++
+	}
+	return 0
+}
+
+// markCell 把第 i 格换成反显 (保留格内颜色: 每个 reset 后面补一次反显, 不然格内的
+// 颜色收尾会把反显一起关掉); 其他格保持原样, i 越界时原样返回。
+func markCell(row []string, i int) []string {
+	if i < 0 || i >= len(row) {
+		return row
+	}
+	out := append([]string(nil), row...)
+	out[i] = tuiRev + strings.ReplaceAll(row[i], tuiReset, tuiReset+tuiRev) + tuiReset
+	return out
 }
 
 // upstreamRow 拼上游表的一行: 并发 (试探另标 +1) / 排队 (带下一个发车时刻) /
@@ -157,14 +214,21 @@ func upstreamCols(maxNamed int) []tuiCol {
 	return cols
 }
 
-// modelRouteRows 把模型队列与聚合统计拼成第 2 张表的显示行: 行 = 逻辑名的
-// 上游/真实模型, 按逻辑名分组 (组与组之间插一空行), 不加逻辑名列。
-func (m *tuiModel) modelRouteRows() [][]string {
-	var rows [][]string
-	prevLogical := ""
-	first := true
+// modelLine 是模型/路由聚合表的一显示行: header 非空 = 逻辑名标题行 (整行已上色),
+// 否则是数据行 (cells 与 modelCols 一一对应)。
+type modelLine struct {
+	header             string
+	logical, up, model string
+	cells              []string
+}
+
+// modelRouteLines 把模型队列与聚合统计拼成第 2 张表的显示行: 每个逻辑名先来一行标题
+// (只列最近用过的逻辑名), 再列该组的 上游/模型 行 (不加逻辑名列)。
+func (m *tuiModel) modelRouteLines(rows []*modelRow) []modelLine {
+	lines := make([]modelLine, 0, len(rows)+4)
+	prev := ""
 	now := time.Now()
-	for _, r := range m.modelRows() {
+	for i, r := range rows {
 		// 队列的锁都画在队列表里: 退避 = 黄 (等待), 锁按原因分色 —— 熔断锁 = 红 (错误),
 		// 低性能锁 = 黄 (慢到降级, 与退避同为等待/降级一类, 但分属不同列)。
 		paused := colorDur(r.PausedMs, tuiYell)
@@ -179,13 +243,12 @@ func (m *tuiModel) modelRouteRows() [][]string {
 		if p, ok := m.pulse.Sticky[r.logical]; ok && p.Upstream == r.up && p.Model == r.model {
 			marker = "*"
 		}
-		// 与 modelCols 的顺序一一对应 (dropEmptyCols 按下标裁列)。
-		if !first && r.logical != prevLogical {
-			rows = append(rows, nil) // 组间隔一空行 (视觉分组, 不占列)
+		if i == 0 || r.logical != prev {
+			lines = append(lines, modelLine{header: m.modelGroupHeader(r.logical)})
+			prev = r.logical
 		}
-		first = false
-		prevLogical = r.logical
-		rows = append(rows, []string{
+		// 与 modelCols 的顺序一一对应 (colKeep 按下标裁列)。
+		cells := []string{
 			marker + m.upModel(r.up, r.model),
 			strconv.Itoa(r.Queue), paused, lock,
 			// 缓存命中与总 token 合成一格 (cached/total)。
@@ -193,9 +256,59 @@ func (m *tuiModel) modelRouteRows() [][]string {
 			ttfbCell(r.TtfbPts, now, m.rateWin, m.window),
 			perfCell(r.PerfPts, now, m.rateWin, m.window, r.up, r.model, m.perfIdx),
 			mages(r.Last),
-		})
+		}
+		lines = append(lines, modelLine{logical: r.logical, up: r.up, model: r.model, cells: cells})
 	}
-	return rows
+	return lines
+}
+
+// modelGroupHeader 是模型表的分组标题: 逻辑名 (专属色加粗) + 有粘性偏好时的剩余倒计时
+// (mm:ss, 不带文字); 配置里找不到归属的行写 (未归属)。
+func (m *tuiModel) modelGroupHeader(logical string) string {
+	if logical == "" {
+		return tuiDim + "(未归属)" + tuiReset
+	}
+	hdr := m.logicalName(logical)
+	if p, ok := m.pulse.Sticky[logical]; ok {
+		if rem := time.Duration(p.RemainingMs) * time.Millisecond; rem > 0 {
+			hdr += "  " + tuiDim + durStr(rem) + tuiReset
+		}
+	}
+	return hdr
+}
+
+// drawModelTable 画第 2 张表 (模型/路由聚合): 逻辑名标题行 + 该组的 上游/模型 行;
+// 光标行反显 上游/模型 那一格, 返回它的显示行 (绝对行号, -1 = 光标不在这张表)。
+func (m *tuiModel) drawModelTable(c *tuiCanvas, rows []*modelRow, cur flowCursor, has bool) int {
+	lines := m.modelRouteLines(rows)
+	data := make([][]string, 0, len(lines))
+	for _, ln := range lines {
+		if ln.header == "" {
+			data = append(data, ln.cells)
+		}
+	}
+	keep := colKeep(modelCols(), data)
+	cols := pickCols(modelCols(), keep)
+	cols, vis := tableLayout(cols, pickRows(keep, data), c.cols)
+	head := c.countLines()
+	c.line(tableHead(cols, vis))
+	if len(lines) == 0 {
+		c.line(tuiDim + "  (空)" + tuiReset)
+	}
+	curLine := -1
+	for i, ln := range lines {
+		if ln.header != "" {
+			c.line(tuiIndent + ln.header)
+			continue
+		}
+		cells := pickRow(keep, ln.cells)
+		if has && cur.table == 1 && cur.logical == ln.logical && cur.up == ln.up && cur.model == ln.model {
+			cells = markCell(cells, 0)
+			curLine = head + 1 + i
+		}
+		c.line(tuiIndent + strings.Join(alignRow(cols, cells, vis), tuiColSep))
+	}
+	return curLine
 }
 
 // cellDash 是四段统计里「这一段没有样本」的占位: 与数字段一样占 4 格 (两侧空格),

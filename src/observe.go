@@ -112,8 +112,8 @@ type candView struct {
 	LastTps  float64         `json:"-"`                // 保留: TPS 从日志读, 不在这里
 }
 
-// stickyView 是某个逻辑名当前的粘性偏好候选 (观测面只读, 参与 TUI 的 * 标记与
-// settings 模型列表倒计时)。RemainingMs 是该偏好还能保持多久 (ms, 0 = 已过失效窗口)。
+// stickyView 是某个逻辑名当前的粘性偏好候选 (观测面只读, 参与第 1 页的 * 标记与
+// 模型表分组标题倒计时)。RemainingMs 是该偏好还能保持多久 (ms, 0 = 已过失效窗口)。
 type stickyView struct {
 	Upstream    string `json:"upstream"`
 	Model       string `json:"model"`

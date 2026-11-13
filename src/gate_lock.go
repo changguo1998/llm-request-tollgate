@@ -345,3 +345,19 @@ func (c *cand) clearLocks(model, group string) int {
 	c.signal()
 	return n
 }
+
+// clearGroupLock 只清该候选某个记账组的额度锁 (默认组是空串), 不动模型锁、退避与
+// 并发试探锁; 返回清掉的锁数 (该组本来没锁就是 0)。
+func (c *cand) clearGroupLock(group string) int {
+	c.mu.Lock()
+	n := 0
+	if l, ok := c.groupLocks[group]; ok {
+		if l.reason != "" {
+			n++
+		}
+		delete(c.groupLocks, group)
+	}
+	c.mu.Unlock()
+	c.signal()
+	return n
+}

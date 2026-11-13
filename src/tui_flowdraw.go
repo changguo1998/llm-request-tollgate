@@ -10,12 +10,12 @@ import (
 const drawFlowChainCol = 3
 
 // drawFlow 是第 1 页: 自上而下依次是 上游状态表 / 模型-路由聚合表 / 请求表 (每笔请求
-// 按尝试一行, 最新请求在最上面; 原第 2、3 张表排到最前)。三张表一起滚动, 页面上没有
-// 固定表头; 请求表的阶段链与事件页一样在宽度不够时折行 (断在箭头之前, 续行相对链首
-// 缩进 eventWrapGap)。
+// 按尝试一行, 最新请求在最上面)。三张表一起滚动, 页面上没有固定表头; 请求表的阶段链与
+// 事件页一样在宽度不够时折行 (断在箭头之前, 续行相对链首缩进 eventWrapGap)。上面两张表
+// 带行光标 (h/j/k/l 移动, u/Enter/c 操作), 光标动过时窗口跟到光标行。
 func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 	full := &tuiCanvas{cols: c.cols}
-	m.drawModelsBody(full) // 原来的第 2、3 张表: 上游状态 + 模型/路由聚合, 排在最前
+	curLine := m.drawModelsBody(full) // 上游状态 + 模型/路由聚合, 排在最前
 	rows := m.flowRows()
 	cols, vis := tableLayout(activeCols, rows, c.cols)
 	cont := strings.Repeat(" ", colOffset(cols, vis, drawFlowChainCol)+eventWrapGap)
@@ -32,7 +32,28 @@ func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 	if len(rows) == 0 {
 		full.line(tuiDim + "  (没有进行中的请求)" + tuiReset)
 	}
+	m.followCursor(curLine, body)
 	m.drawWindow(c, full, max(1, body))
+}
+
+// followCursor 记下光标行; 光标刚移动过时把窗口滚到它 (用户用方向键 / PgUp / PgDn 自己
+// 滚开时不抢回 —— 只有光标动过才跟)。
+func (m *tuiModel) followCursor(line, body int) {
+	m.curLine = line
+	if !m.curFollow {
+		return
+	}
+	m.curFollow = false
+	if line < 0 || body < 1 {
+		return
+	}
+	top := m.scroll[tabActive]
+	switch {
+	case line < top:
+		m.scroll[tabActive] = line
+	case line >= top+body:
+		m.scroll[tabActive] = line - body + 1
+	}
 }
 
 // colKeep 标出哪些列在 rows 里至少有一个"有值"的格: 空串、0、- 都算空 ——
@@ -64,26 +85,24 @@ func pickCols(cols []tuiCol, keep []bool) []tuiCol {
 	return out
 }
 
-// pickRows 按 colKeep 的结果裁行; 与 pickCols 用同一份 keep, 下标保持一致。
-func pickRows(keep []bool, rows [][]string) [][]string {
-	out := make([][]string, 0, len(rows))
-	for _, r := range rows {
-		cell := make([]string, 0, len(keep))
-		for i := 0; i < len(keep) && i < len(r); i++ {
-			if keep[i] {
-				cell = append(cell, r[i])
-			}
+// pickRow 按 colKeep 的结果裁一行; pickRows 的单行版。
+func pickRow(keep []bool, r []string) []string {
+	out := make([]string, 0, len(keep))
+	for i := 0; i < len(keep) && i < len(r); i++ {
+		if keep[i] {
+			out = append(out, r[i])
 		}
-		out = append(out, cell)
 	}
 	return out
 }
 
-// dropEmptyCols 去掉整列都是空串的列 (例如这批请求都还没选中上游时)。
-// 单张表用这一对函数就够了; 一页多块共用一份表头时, 直接用 colKeep / pickRows。
-func dropEmptyCols(cols []tuiCol, rows [][]string) ([]tuiCol, [][]string) {
-	keep := colKeep(cols, rows)
-	return pickCols(cols, keep), pickRows(keep, rows)
+// pickRows 按 colKeep 的结果裁行; 与 pickCols 用同一份 keep, 下标保持一致。
+func pickRows(keep []bool, rows [][]string) [][]string {
+	out := make([][]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, pickRow(keep, r))
+	}
+	return out
 }
 
 // drawWindow 把画布按滚动位置裁一屏贴到 c (第 1 页: 三张表一起滚)。

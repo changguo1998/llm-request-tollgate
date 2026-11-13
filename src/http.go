@@ -291,15 +291,49 @@ func (a *App) forceUnlock(upID, model, group string) int {
 	return total
 }
 
+// forceUnlockGroup 只清某上游一个记账组的额度锁 (group 写作 def 时是默认组): 不动
+// 该上游的模型锁与并发试探锁。上游不存在或该组没锁时返回 0。同样落盘并记一条人工
+// 解锁事件。
+func (a *App) forceUnlockGroup(upID, group string) int {
+	a.mu.RLock()
+	c := a.cands[upID]
+	a.mu.RUnlock()
+	if c == nil {
+		return 0
+	}
+	if group == "def" {
+		group = defaultGroup
+	}
+	n := c.clearGroupLock(group)
+	a.saveGateState()
+	a.evAdd("unlock", "", upID, "", "unlock(manual "+strconv.Itoa(n)+")")
+	return n
+}
+
 // serveUnlock 处理 POST /unlock (调试用强制解锁)。可用 query 过滤:
-// upstream / model / group; 都不给 = 清掉所有候选的所有锁与退避。
+//   - upstream + model: 只清该 上游/模型 的熔断锁与退避;
+//   - upstream + group: 只清该上游该记账组的额度锁 (`def` = 默认组), 不动模型锁;
+//   - upstream 单独: 清该上游的全部锁 (记账组 + 模型 + 并发试探);
+//   - 都不给: 清掉所有候选的所有锁与退避。
+//
+// group 单独给没有意义 (不知道哪个上游), 直接拒绝, 不要退化成清全部。
 func (a *App) serveUnlock(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "only POST /unlock")
 		return
 	}
 	q := r.URL.Query()
-	total := a.forceUnlock(q.Get("upstream"), q.Get("model"), q.Get("group"))
+	up, model, group := q.Get("upstream"), q.Get("model"), q.Get("group")
+	var total int
+	switch {
+	case up == "" && model == "" && group != "":
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "group requires upstream or model")
+		return
+	case up != "" && model == "" && group != "":
+		total = a.forceUnlockGroup(up, group)
+	default:
+		total = a.forceUnlock(up, model, group)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"cleared": total})
 }

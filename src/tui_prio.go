@@ -32,27 +32,23 @@ func (e *tuiEditor) buildAliases() []tuiAlias {
 	return out
 }
 
-// tuiCand 是模型面板的一个可选行: 别名模型候选 (可调优先级) 或组候选 (只置粘性偏好)。
-// row 是别名模型行在 e.filtered() 里的下标; 组候选行为 -1 (无权重可调)。
+// tuiCand 是模型面板的一个可选行: 别名模型候选 (可调优先级) 或组候选行 (只展示成员,
+// 组不是权重条目)。row 是别名模型行在 e.filtered() 里的下标; 组候选行为 -1。
 type tuiCand struct {
-	logical  string // 逻辑名 (别名或组名), 粘性偏好记在它名下
-	provider string
-	model    string
-	member   string // 组候选行: 显示的组成员逻辑名 (不展开到上游)
-	isGroup  bool
-	row      int
-	chain    [][2]string // 组行: 该成员的完整候选链 (星号命中判断用); 别名行 nil
+	logical string // 逻辑名 (别名或组名)
+	member  string // 组候选行: 显示的成员逻辑名
+	isGroup bool
+	row     int // 别名模型行在 e.filtered() 里的下标; 组候选行为 -1
 }
 
 // cands 返回模型面板全部可选行: 先别名模型行 (filtered, 可调优先级), 再组候选行
-// (只置偏好)。组候选 = 配置 expandedAliases 里组名的候选链, 与 sticky 页同口径;
-// 配置读不到时只回模型行。组候选行按配置 mtime 缓存 (groups 只随配置文件变), 免得
-// 每帧重读解析。
+// (只展示组成员, 组是配置内容); 配置读不到时只回模型行。组候选行按配置 mtime 缓存
+// (groups 只随配置文件变), 免得每帧重读解析。
 func (e *tuiEditor) cands() []tuiCand {
 	rows := e.filtered()
 	out := make([]tuiCand, 0, len(rows)+8)
 	for i, r := range rows {
-		out = append(out, tuiCand{r.alias, r.provider, modelID(r.model), "", false, i, nil})
+		out = append(out, tuiCand{logical: r.alias, row: i})
 	}
 	cm, err := os.Stat(e.config)
 	if err == nil {
@@ -64,8 +60,8 @@ func (e *tuiEditor) cands() []tuiCand {
 	return out
 }
 
-// buildGroupCands 从配置 expandedAliases 展开组候选链 (组名 -> 上游/模型), 与 sticky
-// 页同口径; 配置读不到时返回 nil。
+// buildGroupCands 从配置 groups 展开组成员 (组名 -> 成员逻辑名, 不展开上游); 配置
+// 读不到时返回 nil。
 func (e *tuiEditor) buildGroupCands() []tuiCand {
 	c, err := loadConfigOpt(e.config, true)
 	if err != nil {
@@ -84,7 +80,7 @@ func (e *tuiEditor) buildGroupCands() []tuiCand {
 			if len(chain) == 0 {
 				continue
 			}
-			out = append(out, tuiCand{g, chain[0][0], chain[0][1], member, true, -1, chain})
+			out = append(out, tuiCand{logical: g, member: member, isGroup: true, row: -1})
 		}
 	}
 	return out
@@ -206,7 +202,7 @@ func (e *tuiEditor) filtered() []tuiPrioRow {
 
 func (e *tuiEditor) selected() *tuiPrioRow {
 	p := e.pickAt(e.modelSel)
-	if p == nil || p.row < 0 { // 组候选行没有权重可调 (只置粘性偏好)
+	if p == nil || p.row < 0 { // 组候选行没有权重可调 (只展示成员)
 		return nil
 	}
 	rows := e.filtered()

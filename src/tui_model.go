@@ -57,6 +57,15 @@ type tuiModel struct {
 	pageTop   int // 该页当前窗口的第一行
 	pageWin   int // 该页当前窗口的数据行数 (提示行里的 a-b 按它算)
 
+	// 第 1 页的行光标 (锚点是行内容, 行序变化后仍钉在同一行) 与操作反馈。
+	// curLine 是上一帧算出的光标行 (内容区里的下标, -1 = 没有); 光标动过时下一帧
+	// 把窗口滚到它 (curFollow), 用户自己用方向键滚开时不抢回。
+	cur       flowCursor
+	curLine   int
+	curFollow bool
+	flowMsg   string
+	flowErr   bool
+
 	prio     *tuiEditor   // settings 页 (调度参数 + 权重编辑), runTUI 里装载
 	reloadFn func() error // 同进程模式的热加载回调; 空 = 走 deploy/tollgate.sh hup
 

@@ -1,7 +1,7 @@
 // tui_run.go: 状态台主循环与按键处理。
 //
-// 状态台以观测为主, 不参与转发、调度与记账; settings 页可写 (改配置源头, 模型面板
-// 还能经 POST /sticky 改运行时粘性偏好)。观测数据看三件事:
+// 状态台以观测为主, 不参与转发、调度与记账; settings 页可写 (改配置源头), 第 1 页可
+// 解锁与置粘性偏好 (都写运行中的服务)。观测数据看三件事:
 //  1. active  正在活跃的请求 + 它此刻走的是哪个后端 (上游 + 真实模型), 以及每个上游的
 //     队列 / 并发上限 / 锁 / 退避。数据来自服务的内存观测面: 同进程看内存 (-tui),
 //     另进程看 GET /state (-tui-state [base])。
@@ -193,8 +193,8 @@ func readKeys(keys chan<- byte) {
 // handleKey 处理一个输入字节; 返回 true = 退出。
 //
 // settings 页把编辑键留给自己 (s = 保存并重生成, h = 热加载, m/p/g = 换面板), events 页
-// 把筛选键留给自己 (f / t / c), 状态页的 h/l 仍是切页; 切页统一走 1-3 / 左右方向键 /
-// l (settings 页的 h 被编辑键占了)。
+// 把筛选键留给自己 (f / t / c), 第 1 页把 h/j/k/l 留给行光标 (u / Enter / c 是行操作);
+// 切页统一走 1-3 / 左右方向键 / Tab。
 func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 	e := m.prio
 	if m.tab == tabSettings && e != nil && e.prompt != nil {
@@ -223,8 +223,36 @@ func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 		if quit, handled := m.eventsKey(b); handled {
 			return quit
 		}
+	case m.tab == tabActive:
+		if quit, handled := m.flowKey(b); handled {
+			return quit
+		}
 	}
 	return m.commonKey(b)
+}
+
+// flowKey 是第 1 页的行操作键: h/j/k/l 移动光标 (方向键仍走通用表滚动 / 切页), u 解锁
+// 光标处的锁, Enter 把光标所在模型行置为粘性偏好, c 清除该逻辑名的偏好。
+func (m *tuiModel) flowKey(b byte) (quit, handled bool) {
+	switch b {
+	case 'h':
+		m.flowCol(-1)
+	case 'l':
+		m.flowCol(1)
+	case 'j':
+		m.flowMove(1)
+	case 'k':
+		m.flowMove(-1)
+	case 'u':
+		m.flowUnlock()
+	case '\r', '\n':
+		m.flowStickySet()
+	case 'c':
+		m.flowStickyClear()
+	default:
+		return false, false
+	}
+	return false, true
 }
 
 // escapeKey 处理转义序列 (方向键 / PgUp / PgDn): 字节没收全时 complete=false,
@@ -279,18 +307,6 @@ func (m *tuiModel) settingsKey(b byte, e *tuiEditor) bool {
 		m.saveSettings()
 	case 'h':
 		m.prioHup()
-	case '\r', '\n':
-		if e.focus == 0 {
-			m.settingsStickySet(e) // 模型面板: Enter 置偏好
-			return false
-		}
-		return false
-	case 'c':
-		if e.focus == 0 {
-			m.settingsStickyClear(e)
-			return false
-		}
-		return false
 	case 'l', '\t':
 		m.switchTab(1)
 	case '1', '2', '3':

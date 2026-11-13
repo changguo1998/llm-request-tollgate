@@ -102,12 +102,13 @@ func (m *tuiModel) hint() string {
 	}
 	if m.tab == tabSettings {
 		return "  m/p/g 换面板   j/k 移动   +/- 调值   = 输入   s 保存并生成" +
-			"   h 热加载   Enter 置偏好   c 清除   q 退出   (" + m.prioHint() + ")"
+			"   h 热加载   q 退出   (" + m.prioHint() + ")"
 	}
 	base := "  1-3 或 Tab 切页   up/down/PgUp/PgDn 滚动   r 重读日志   q 退出"
 	switch m.tab {
 	case tabActive:
-		// 窗口信息放最前: 键位行本来就长, 放尾巴会被窄终端截掉。
+		// 80 列终端里也要保住末尾的 q 退出, 所以用 2 空格分隔; 窗口信息放尾巴。
+		base = "  hjkl 光标  u 解锁  Enter 置偏好  c 清除  ↑↓ 滚动  Tab 切页  r 重读  q 退出"
 		base += "   ("
 		if m.pageTotal > 0 {
 			win := m.pageWin
@@ -118,6 +119,13 @@ func (m *tuiModel) hint() string {
 				strconv.Itoa(min(m.pageTop+win, m.pageTotal)) + "/" + strconv.Itoa(m.pageTotal) + ", "
 		}
 		base += "窗口 " + durStr(m.window) + ")"
+		if m.flowMsg != "" {
+			col := tuiYell
+			if m.flowErr {
+				col = tuiRed
+			}
+			base = col + tuiIndent + m.flowMsg + tuiReset + base
+		}
 	case tabEvents:
 		base = "  f 筛选   t 时间范围   c 清除筛选   up/down/PgUp/PgDn 滚动   r 重读日志   q 退出"
 		if m.evMsg != "" {

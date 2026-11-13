@@ -5,11 +5,10 @@ package main
 import (
 	"strconv"
 	"strings"
-	"time"
 )
 
 // drawSettings 画设置页: 三列并排 —— 第 1 列 全局参数 + 供应商, 第 2 / 3 列是模型
-// 列表的两栏 (按逻辑名分组, 与 sticky 页同款: 组与组之间用逻辑名隔开, 两栏连续铺排),
+// 列表的两栏 (按逻辑名分组, 组与组之间用逻辑名隔开, 两栏连续铺排),
 // 底部消息行。各区标题中文, 焦点区用 [ 标题 ] 括起; 标题用 tuiTitle 色。列宽按内容算,
 // 模型两栏平分剩余宽度, 一直顶到终端右边界; 模型列顶到内容区底部 (消息行上方), 不留空白。
 // 供应商与模型列里的 provider 名沿用第 1 页上游表的专属色 (upNameAttr), 选中行反显保留。
@@ -130,35 +129,31 @@ type settingsLine struct {
 }
 
 // settingsModelLines 把模型面板的可选行摊成显示行: 逻辑名变化时插一行加粗分组标题
-// (别名或组名); 每行固定 1 列标记位, 是该逻辑名当前粘性偏好目标时标 *。组候选行不带
-// M/P 权重 (只置偏好), 与别名行视觉上分开。返回选中行的显示下标。
+// (别名或组名); 组候选行只列成员逻辑名, 不带 M/P 权重 (组不是权重条目)。返回选中行的
+// 显示下标。粘性偏好与锁状态不在配置页 (第 1 页管, 这里只管配置)。
 func (m *tuiModel) settingsModelLines(e *tuiEditor, cs []tuiCand) ([]settingsLine, int) {
 	lines := make([]settingsLine, 0, len(cs)+8)
 	selLine := -1
 	last := ""
 	for i, c := range cs {
 		if c.logical != last {
-			lines = append(lines, settingsLine{row: -1, text: m.settingsLogicalHeader(c.isGroup, c.logical)})
+			lines = append(lines, settingsLine{row: -1, text: settingsLogicalHeader(c.isGroup, c.logical)})
 			last = c.logical
 		}
 		attr := ""
 		if e.focus == 0 && i == e.modelSel {
 			attr = tuiRev
 		}
-		mark := " "
-		if p, ok := m.pulse.Sticky[c.logical]; ok && stickyCandHit(c, p) {
-			mark = "*"
-		}
 		var text string
 		if c.isGroup {
-			// 组候选行: 只显示成员逻辑名, 不带 M/P 权重 (组不是权重条目, 只置偏好)。
-			text = "  " + mark + " " + c.member
+			// 组候选行: 只显示成员逻辑名, 不带 M/P 权重 (组不是权重条目)。
+			text = "  " + c.member
 		} else {
 			rows := e.filtered()
 			if c.row < len(rows) {
 				row := rows[c.row]
 				// M 后的模型优先级按 2 列右对齐 (负号也算 1 列), 与负数并排时不顶格。
-				text = "  " + mark + " M" + tuiPadLeft(strconv.Itoa(prioOf(row.model)), 2) + " P" + strconv.Itoa(prioOf(row.entry)) +
+				text = "  M" + tuiPadLeft(strconv.Itoa(prioOf(row.model)), 2) + " P" + strconv.Itoa(prioOf(row.entry)) +
 					" " + m.upNameAttr(row.provider, attr) + "/" + modelID(row.model)
 			}
 		}
@@ -171,33 +166,13 @@ func (m *tuiModel) settingsModelLines(e *tuiEditor, cs []tuiCand) ([]settingsLin
 }
 
 // settingsLogicalHeader 拼逻辑名分组标题: 别名加粗 / 组名加粗换黄色 (不带「组」字
-// 区分, 靠颜色): 该逻辑名有粘性偏好时标题后带剩余时长 (与 sticky 页同款倒计时列)。
-func (m *tuiModel) settingsLogicalHeader(isGroup bool, logical string) string {
+// 区分, 靠颜色)。粘性倒计时在第 1 页模型表的分组标题上, 不在这里。
+func settingsLogicalHeader(isGroup bool, logical string) string {
 	attr := tuiBold
 	if isGroup {
 		attr = tuiBold + tuiYell
 	}
-	hdr := attr + logical + tuiReset
-	if p, ok := m.pulse.Sticky[logical]; ok {
-		if rem := time.Duration(p.RemainingMs) * time.Millisecond; rem > 0 {
-			hdr += "  " + tuiDim + durStr(rem) + tuiReset
-		}
-	}
-	return hdr
-}
-
-// stickyCandHit 判断某候选行是否是当前偏好目标: 别名行精确匹配 (上游/模型),
-// 组行匹配成员候选链里的任一项 (组偏好可能迁到成员的非首候选)。
-func stickyCandHit(c tuiCand, p stickyView) bool {
-	if c.isGroup {
-		for _, tgt := range c.chain {
-			if tgt[0] == p.Upstream && tgt[1] == p.Model {
-				return true
-			}
-		}
-		return false
-	}
-	return p.Upstream == c.provider && p.Model == c.model
+	return attr + logical + tuiReset
 }
 
 // settingsScrollWindow 按显示行算滚动窗口: 模型列表横向分两栏, 一屏 = 2*window 个

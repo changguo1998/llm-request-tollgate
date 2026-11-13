@@ -107,7 +107,7 @@ type tuiEditor struct {
 	provSel  int
 	modelSel int
 	vis      int // 模型列表当前能显示的行数 (翻页步长, draw 里刷新)
-	// 组候选行缓存 (只置粘性偏好, 不参与权重编辑): 按配置 mtime 失效。
+	// 组候选行缓存 (只展示组成员, 不参与权重编辑): 按配置 mtime 失效。
 	groupCands    []tuiCand
 	groupCandsMod time.Time
 	filter        string
