@@ -1,0 +1,47 @@
+{
+  "listen": "127.0.0.1:8787",
+  "upstreams": [
+    {
+      "id": "ustc",
+      "base_url": "https://litellm.example.com/v1",
+      "key_env": "USTC_API_KEY",
+      "priority": 5,
+      "models": [
+        {
+          "id": "deepseek-v4.1-flash",
+          "priority": 10,
+          "alias": "deepseek-v4.1-flash"
+        },
+        {
+          "id": "deepseek-flash",
+          "priority": 10,
+          "alias": "deepseek-flash"
+        }
+      ]
+    },
+    {
+      "id": "group",
+      "base_url": "https://cli-proxy.example.com/v1",
+      "key_env": "GROUP_API_KEY",
+      "priority": 3,
+      "models": [
+        {
+          "id": "deepseek-v4.1-flash",
+          "priority": 20,
+          "alias": "deepseek-v4.1-flash"
+        },
+        {
+          "id": "deepseek-flash",
+          "priority": 20,
+          "alias": "deepseek-flash"
+        }
+      ]
+    }
+  ],
+  "groups": {
+    "worker": [
+      "deepseek-v4.1-flash",
+      "deepseek-flash"
+    ]
+  }
+}
