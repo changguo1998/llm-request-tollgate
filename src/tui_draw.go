@@ -124,7 +124,7 @@ func (m *tuiModel) hint() string {
 	switch m.tab {
 	case tabActive:
 		// 80 列终端里也要保住末尾的 q 退出, 所以用 2 空格分隔; 窗口信息放尾巴。
-		base = "  hjkl 光标  u 解锁  Enter 置偏好  c 清除  ↑↓ 滚动  Tab 切页  r 重读  q 退出"
+		base = "  hjkl 光标  Esc 清光标  u 解锁  Enter 置偏好  c 清除  r 重读  Tab 切页  q 退出"
 		base += "   ("
 		if m.pageTotal > 0 {
 			win := m.pageWin

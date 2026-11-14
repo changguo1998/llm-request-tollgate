@@ -132,7 +132,7 @@ func enterTUI() (leave func(), ok bool) {
 func runTUILoop(m *tuiModel, app *App) {
 	resize := make(chan os.Signal, 1)
 	signal.Notify(resize, syscall.SIGWINCH)
-	keys := make(chan byte, 64)
+	keys := make(chan tuiKey, 64)
 	go readKeys(keys)
 
 	tick := time.NewTicker(time.Second)
@@ -164,11 +164,11 @@ func runTUILoop(m *tuiModel, app *App) {
 			render()
 		case <-resize:
 			render()
-		case b, ok := <-keys:
+		case k, ok := <-keys:
 			if !ok {
 				return
 			}
-			if quit := m.handleKey(b, &pending); quit {
+			if quit := m.handleKeyEv(k, &pending); quit {
 				return
 			}
 			refresh(false)
@@ -177,8 +177,21 @@ func runTUILoop(m *tuiModel, app *App) {
 	}
 }
 
-// readKeys 把标准输入的字节逐个送进 keys; 读到 EOF 就关闭通道。
-func readKeys(keys chan<- byte) {
+// tuiKey 是一个按键事件: b 是读到的字节; esc 为真表示单独按下的 Esc (后面没跟着转义
+// 序列的字节)。两者开头都是 0x1b, 只能靠 readKeys 等一下来分辨。
+type tuiKey struct {
+	b   byte
+	esc bool
+}
+
+// tuiEscWait 是「单独按下的 Esc」的判定时长: 方向键 / PgUp / PgDn 这些转义序列的后续
+// 字节几乎紧跟 0x1b 到达, 等这么久还没来就当成单独按下的 Esc。
+const tuiEscWait = 30 * time.Millisecond
+
+// readKeys 把标准输入的字节逐个送进 keys; 读到 EOF 就关闭通道。读到 0x1b 时先等一会儿
+// 看后面有没有字节: 有就是转义序列的开头 (照常送进去攒 pending), 没有就是单独按下的 Esc
+// (带 esc 标记送进去, 不留在 pending 里等一个永远不来的序列)。
+func readKeys(keys chan<- tuiKey) {
 	r := bufio.NewReader(os.Stdin)
 	for {
 		b, err := r.ReadByte()
@@ -186,7 +199,11 @@ func readKeys(keys chan<- byte) {
 			close(keys)
 			return
 		}
-		keys <- b
+		if b == 0x1b && r.Buffered() == 0 && !tuiInputReady(os.Stdin.Fd(), tuiEscWait) {
+			keys <- tuiKey{esc: true}
+			continue
+		}
+		keys <- tuiKey{b: b}
 	}
 }
 
@@ -229,6 +246,30 @@ func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 		}
 	}
 	return m.commonKey(b)
+}
+
+// handleKeyEv 分派一个按键事件: 单独按下的 Esc 走 escKey, 其余字节照旧走 handleKey。
+func (m *tuiModel) handleKeyEv(k tuiKey, pending *[]byte) bool {
+	if k.esc {
+		*pending = nil // 单独的 Esc: 没收全的转义序列作废, 不跟它拼
+		return m.escKey()
+	}
+	return m.handleKey(k.b, pending)
+}
+
+// escKey 是单独按下的 Esc: 输入态里取消输入 (与 Esc 字节进输入框同一条路), 第 1 页清掉
+// 行光标 (上方两张表全都不选中); 其余页不动。Esc 从不退出。
+func (m *tuiModel) escKey() bool {
+	e := m.prio
+	switch {
+	case m.tab == tabSettings && e != nil && e.prompt != nil:
+		e.promptKey(0x1b)
+	case m.tab == tabEvents && m.evPrompt != nil:
+		m.evPromptKey(0x1b)
+	case m.tab == tabActive:
+		m.clearFlowCursor()
+	}
+	return false
 }
 
 // flowKey 是第 1 页的行操作键: h/j/k/l 移动光标 (方向键仍走通用表滚动 / 切页), u 解锁

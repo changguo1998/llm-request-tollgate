@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"syscall"
+	"time"
 	"unicode/utf8"
 	"unsafe"
 )
@@ -68,6 +69,20 @@ func tuiRestore(fd uintptr, t *tuiTermios) {
 	if t != nil {
 		tuiIoctl(fd, tuiTCSETS, unsafe.Pointer(t))
 	}
+}
+
+// tuiInputReady 看 fd 上此刻有没有还没读走的字节: 最多等 d, 到点还没有就返回 false。
+// 用来分辨单独按下的 Esc 与方向键等转义序列的开头 (两者都以 0x1b 开头)。
+func tuiInputReady(fd uintptr, d time.Duration) bool {
+	var set syscall.FdSet
+	word := uintptr(unsafe.Sizeof(set.Bits[0])) * 8 // 每个字多少位 (32 / 64 位平台都适用)
+	if fd >= word*uintptr(len(set.Bits)) {
+		return false
+	}
+	set.Bits[fd/word] |= 1 << (fd % word)
+	tv := syscall.NsecToTimeval(int64(d))
+	n, err := syscall.Select(int(fd)+1, &set, nil, nil, &tv)
+	return err == nil && n > 0
 }
 
 // tuiSize 取终端行列; 失败时给 100x30, 保证还能画出东西。

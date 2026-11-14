@@ -7,6 +7,9 @@
 // 的熔断锁与退避; Enter 把光标所在的模型行置为它所属逻辑名的粘性偏好, c 清除该逻辑名
 // 的偏好。写操作都走 HTTP (POST /unlock / POST /sticky): 同进程发给自己, -tui-state 发给
 // 被观测服务。
+//
+// 单独按下的 Esc 清掉光标: 上方两张表全都不选中 (没有反显格), 之后的 j/k 重新选起 (j 选
+// 第一行, k 选最后一行)。
 
 package main
 
@@ -19,6 +22,7 @@ import (
 // flowCursor 是第 1 页的光标锚点。
 //   - table 0 (上游表): up + name 选中上游名那一格; 否则选 group 那一列 (默认组是空串);
 //   - table 1 (模型表): logical + up + model 选中一行。
+//   - off: 单独按下的 Esc 清掉了光标, 不选中任何行 (其余字段作废)。
 type flowCursor struct {
 	table int
 	up    string
@@ -26,6 +30,8 @@ type flowCursor struct {
 	group string
 
 	logical, model string
+
+	off bool // Esc 清掉光标后为真: 不选中任何行, 直到再按 j/k
 }
 
 // flowUpRow 是上游表的一行可操作目标: 上游 id + 记账组 (默认组在前, 与上游表的列序一致)。
@@ -70,6 +76,9 @@ func flowNavFrom(cands []candView, rows []*modelRow) flowNav {
 // resolve 把锚点钉到当前行序上: 锚点行不在了就退到同表第一行 (该表空了换另一张表);
 // 记账组不在了退回该行的上游名列。
 func (n flowNav) resolve(c flowCursor) (flowCursor, bool) {
+	if c.off {
+		return c, false // 光标被 Esc 清掉: 不选中任何行, 也不退到第一行
+	}
 	if c.table == 0 {
 		for _, r := range n.ups {
 			if r.id != c.up {
@@ -150,9 +159,21 @@ func (n flowNav) at(i int, want flowCursor) (flowCursor, bool) {
 	return flowCursor{table: 1, up: r.up, logical: r.logical, model: r.model}, true
 }
 
-// flowMove 上下移动光标 (j/k): 上游表与模型表按页面顺序连着走, 边界处停住。
+// flowMove 上下移动光标 (j/k): 上游表与模型表按页面顺序连着走, 边界处停住。光标被 Esc
+// 清掉后按 j 选第一行, 按 k 选最后一行。
 func (m *tuiModel) flowMove(d int) {
 	n := m.flowNav()
+	if m.cur.off {
+		i := 0
+		if d < 0 {
+			i = len(n.ups) + len(n.models) - 1
+		}
+		if next, ok := n.at(i, flowCursor{name: true}); ok { // 上游行落在上游名那一格
+			m.cur = next
+			m.followCursorRow()
+		}
+		return
+	}
 	c, ok := n.resolve(m.cur)
 	if !ok {
 		return
@@ -162,6 +183,13 @@ func (m *tuiModel) flowMove(d int) {
 		m.cur = next
 		m.followCursorRow()
 	}
+}
+
+// clearFlowCursor 清掉第 1 页的行光标 (单独按下的 Esc): 上方两张表全都不选中, 没有反显
+// 格; 解锁 / 置偏好也先要求选一行。
+func (m *tuiModel) clearFlowCursor() {
+	m.cur = flowCursor{off: true}
+	m.curFollow = false
 }
 
 // flowCol 左右移动光标 (h/l): 上游行在 上游名 / 默认组 / 命名的组合格之间走;
@@ -207,7 +235,11 @@ func (m *tuiModel) flowUnlock() {
 	n := m.flowNav()
 	c, ok := n.resolve(m.cur)
 	if !ok {
-		m.flowFail("没有可操作的行")
+		if m.cur.off {
+			m.flowFail("光标没选中行, 按 j/k 选一行")
+		} else {
+			m.flowFail("没有可操作的行")
+		}
 		return
 	}
 	m.cur = c
