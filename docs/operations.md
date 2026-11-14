@@ -169,7 +169,8 @@ contextWindow / maxTokens / thinkingLevelMap / reasoning 等) 与黑名单
 的 `upstreams` / `upstreams[].models` 读 (provider 与模型的 `priority`, 模型的 `alias` /
 `billing`; 旧名 `group` / `billing_group` 读取时兼容), 重生成 `upstreams` 写回.
 本脚本只写配置, 不碰 store; 代理自身的 `tg` (kind=proxy) 目录条目由 `scripts/upsert_tollgate_provider.py` 维护 (fff 更新过 store 后跑一次, 让 agent 从 store 指向本代理).
-该脚本分两步: 先校验同一逻辑名/组的候选参数四项完全一致 (缺失也算不一致), 有冲突就逐条列出并退出 1, store 不动; 全部通过后才写入.
+该脚本分两步: 先把 contextWindow 归到档位 (16K/32K/64K/128K/200K/256K/512K/1M/2M, 取最近档, 写入用档位统一值), 再校验它与其余三项参数完全一致 (缺失也算不一致), 同时校验组的成员与嵌套 (组名不得与逻辑名重名, 成员必须是已注册逻辑名, 禁止嵌套组); 有问题就逐条列出并退出 1, store 不动; 全部通过后才写入.
+公开仓库另有同规则的示例版 `scripts/upsert_tollgate_provider.example.py` (读同目录的 `tg-store.example.json` + `tg-config.example.json`, 把条目打印到 stdout, 不写文件).
 公开仓库提供不依赖 fff 的示例: `scripts/gen_tollgate_config.example.py` +
 模型列表示例 `scripts/llm-models.example.json` (权重可用 `--cfg` 从现有配置继承). 要点:
 

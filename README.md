@@ -287,7 +287,9 @@ thinkingLevelMap / reasoning) 与 `llm-models-droplist.json` (精确匹配黑名
   `max_tokens`; 代理的 `/v1/models` 按逻辑名聚合下发 (推理等级取交集, 两个上限取最小),
   agent 据此决定要不要发 `reasoning_effort`, 缺等级表时报
   `UNSUPPORTED_REASONING_EFFORT` (dsh 客户端校验)。`scripts/upsert_tollgate_provider.py`
-  写 store 的 `tg` 条目时更严: 同一逻辑名/组的候选四项参数必须完全一致 (缺失也算不一致);
+  写 store 的 `tg` 条目时更严: contextWindow 先归档 (16K/32K/64K/128K/200K/256K/512K/
+  1M/2M, 取最近档, 居中取小档, 写入用档位统一值); 其余三项必须完全一致 (缺失也算不一致);
+  组同时做结构校验 (组名不得与逻辑名重名, 成员必须是已注册逻辑名, 禁止嵌套组);
   先校验再写, 有冲突就逐条列出并以退出码 1 结束, store 不动。
 - `key_env` 取 store 里 `apiKey` 的占位符名; `auth_header` 等设置从现有配置继承, 不会被覆盖。
 - 写入 `config.local.json` (即 `~/fff/config/tollgate.json`); `--dry-run` 只打印,
@@ -296,6 +298,9 @@ thinkingLevelMap / reasoning) 与 `llm-models-droplist.json` (精确匹配黑名
 - 只生成配置, 不再写 store: 代理自身的 `tg` (kind=proxy) 目录条目由
   独立脚本 `scripts/upsert_tollgate_provider.py` 维护 (fff 更新过 store 后
   跑一次, 让 agent 从 store 同步到本代理; `--dry-run` 先预览)。
+- 公开仓库给同规则的示例版: `scripts/upsert_tollgate_provider.example.py` 读
+  同目录的 `tg-store.example.json` + `tg-config.example.json`, 把条目打印到 stdout
+  (不写文件; 归档位、组校验与参数校验走同一套规则).
 - 不在 store 里的手加上游在重生成时会丢 (`build_upstreams` 只认 store 里的 provider);
   要先在 store 里补 provider, 或重生成后手工补回。
 - `groups` (手工维护的组) 原样保留; 重生成后若某组成员不再是对应别名 (模型被删 /
@@ -311,6 +316,8 @@ python3 scripts/gen_tollgate_config.py
 python3 scripts/upsert_tollgate_provider.py
 # 公开仓库示例 (不依赖 fff, 读 scripts/llm-models.example.json):
 python3 scripts/gen_tollgate_config.example.py
+# store 条目 (只打印, 不写文件):
+python3 scripts/upsert_tollgate_provider.example.py
 ```
 
 优先级用状态台的 `settings` 页调: provider 面板 + 模型列表 + 候选顺序实时预览;
@@ -376,6 +383,9 @@ token) 与 `-usage` (上游 + 模型 × 窗口的 token 分解)。
 - `scripts/gen_tollgate_config.example.py` 由模型列表生成本项目配置 (示例版, 不依赖
   fff; 输入与规则见上) + `llm-models.example.json` 模型列表示例 (本机版
   `gen_tollgate_config.py` 在 dotfiles)。
+- `scripts/upsert_tollgate_provider.example.py` 算代理自身的 store 条目 (示例版, 不依赖
+  fff; 打印到 stdout 不写文件) + `tg-store.example.json` / `tg-config.example.json`
+  输入示例 (本机版 `upsert_tollgate_provider.py` 在 dotfiles, 会 upsert 进 store)。
 - `tui_*.go` 状态台: `tui_run.go` 主循环与按键, `tui_term.go` 终端与画布, `tui_table.go`
   表格, `tui_flow*.go` / `tui_cursor.go` active 页 (请求链 + 行光标与解锁 / 粘性操作),
   `tui_models.go` / `tui_events.go` 后两页,
