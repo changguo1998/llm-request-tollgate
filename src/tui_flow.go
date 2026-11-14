@@ -149,7 +149,8 @@ func (m *tuiModel) livePerf(f flow) string {
 	} else {
 		v = m.perfIdx(f.Up, f.Model, int64(f.RecvTok), elMs, f.RecvBytes)
 	}
-	return plainTPS(v) + " t/s"
+	// 请求表链尾的性能只写数字, 不带 t/s 单位。
+	return plainTPS(v)
 }
 
 // colorTryFail 给链尾的结局词上色: fail(...) 红字 (失败), reject(...) 黄字 (被挡)。

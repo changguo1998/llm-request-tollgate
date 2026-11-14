@@ -84,7 +84,7 @@ func (a *App) addLockLowPerf(c *cand, model string, peak, avg, latAvg float64, d
 	// 重锁时长按观察期递增 (解锁后窗口内又锁 => 翻倍, 封顶 8 倍): 持续低性能的候选
 	// 慢慢退成长期死锁, 抖动自衰减; 超过一个窗口没再锁则归零回基础时长。
 	dur = c.relockDur(model, dur, a.gate.perfWindow())
-	cause := "peak " + ftoa(peak, 1) + " / avg " + ftoa(avg, 1) + " t/s"
+	cause := "peak " + ftoa(peak, 1) + " / avg " + ftoa(avg, 1)
 	if latAvg > 0 {
 		cause = "ttfb " + durStr(time.Duration(latAvg*float64(time.Millisecond)))
 	}

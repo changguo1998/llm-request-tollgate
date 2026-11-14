@@ -46,17 +46,17 @@ func TestFlowCellLiveTps(t *testing.T) {
 		Tries: []flowTry{{Cur: stageRecv, Segs: make([]float64, stageCount),
 			CurAt: now.Add(-100 * time.Second).UnixMilli()}}}
 	got := m.stageChain(recv, recv.Tries[0])
-	if !strings.Contains(got, "120.0 t/s") { // 6000/100s=60 t/s, perfIdx 修正成 120
-		t.Errorf("接收段链尾应写性能 120.0 t/s, 实际 %q", got)
+	if !strings.Contains(got, "120.0") { // 6000/100s=60 t/s, perfIdx 修正成 120
+		t.Errorf("接收段链尾应写性能 120.0, 实际 %q", got)
 	}
 	// 实时性能带青色, 同一行的耗时仍是前景色 (青色只出现一次)。
-	if !strings.Contains(got, tuiLive+"120.0 t/s"+tuiReset) {
+	if !strings.Contains(got, tuiLive+"120.0"+tuiReset) {
 		t.Errorf("实时性能应带青色: %q", got)
 	}
 	if strings.Count(got, tuiLive) != 1 {
 		t.Errorf("青色只该出现在性能上: %q", got)
 	}
-	for _, unwanted := range []string{"60.0 t/s", "KB/s"} { // 只写修正后的性能, 不再写原始/下载
+	for _, unwanted := range []string{"60.0", " t/s", "KB/s"} { // 只写修正后的性能, 不带单位, 不再写原始/下载
 		if strings.Contains(got, unwanted) {
 			t.Errorf("只该写一个性能值, 不该出现 %q: %q", unwanted, got)
 		}
@@ -67,14 +67,13 @@ func TestFlowCellLiveTps(t *testing.T) {
 		RecvStart: now.Add(-100 * time.Second).UnixMilli(),
 		Tries: []flowTry{{Cur: stageRecv, Segs: make([]float64, stageCount),
 			CurAt: now.Add(-100 * time.Second).UnixMilli()}}}
-	if got := m.stageChain(onlyBytes, onlyBytes.Tries[0]); strings.Contains(got, "t/s") ||
-		strings.Contains(got, "KB/s") {
+	if got := m.livePerf(onlyBytes); got != "" {
 		t.Errorf("只有字节时不该写速率/性能, 得到 %q", got)
 	}
 	// 还没收到任何东西 (非流式 / 刚开流) 时不写性能。
 	fresh := flow{ID: 2, Logical: "m1", Stage: stageRecv, StartTime: now,
 		Tries: []flowTry{{Cur: stageRecv, Segs: make([]float64, stageCount)}}}
-	if got := m.stageChain(fresh, fresh.Tries[0]); strings.Contains(got, "t/s") {
+	if got := m.livePerf(fresh); got != "" {
 		t.Errorf("没有收到内容时不该写性能, 得到 %q", got)
 	}
 	// 只有接收中那一段才显示性能。
@@ -82,13 +81,17 @@ func TestFlowCellLiveTps(t *testing.T) {
 		RecvTok: 6000, RecvBytes: 4096,
 		RecvStart: now.Add(-100 * time.Second).UnixMilli(),
 		Tries:     []flowTry{{Cur: stageSend, Segs: make([]float64, stageCount)}}}
-	if got := m.stageChain(send, send.Tries[0]); strings.Contains(got, "t/s") {
+	if got := m.livePerf(send); got != "" {
 		t.Errorf("只有接收中才显示性能, 得到 %q", got)
 	}
 	// 缺参数 (远端模式) 时退原始解码速率。
 	m.perfIdx = nil
-	if got := m.stageChain(recv, recv.Tries[0]); !strings.Contains(got, "60.0 t/s") {
-		t.Errorf("无参数时应退原始速率 60.0 t/s, 得到 %q", got)
+	if got := m.livePerf(recv); !strings.Contains(got, "60.0") {
+		t.Errorf("无参数时应退原始速率 60.0, 得到 %q", got)
+	}
+	// 请求表链尾的性能只写数字, 不带 t/s 单位。
+	if got := m.stageChain(recv, recv.Tries[0]); strings.Contains(got, " t/s") {
+		t.Errorf("请求表性能应只写数字, 不带 t/s 单位: %q", got)
 	}
 }
 
