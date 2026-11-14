@@ -62,7 +62,7 @@ func TestSetGatePromptInvalid(t *testing.T) {
 		{gateIdxRetry, -1, "1,x", "退避序列要逗号分隔的正秒数 (可小数)"},
 		{gateIdxProbe, -1, "maybe", "probe_enabled 要用 0/1 / on/off / 开/关"},
 		{0, before, "abc", "出队间隔 要非负秒数 (可小数)"},
-		{gateIdxPeak, -1, "0", "低吞吐峰值 要正整数 (t/s)"},
+		{gateIdxPeak, -1, "0", "低吞吐峰值 要正整数"},
 		{gateIdxRel, -1, "0", "低吞吐历史比 要 1-100 的整数百分比"},
 	}
 	for _, c := range cases {

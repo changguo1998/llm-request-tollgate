@@ -76,8 +76,8 @@ type Config struct {
 	QuotaLockSec       float64 `json:"quota_lock_sec"`
 	BreakerLockSec     float64 `json:"breaker_lock_sec"`
 	PerfWindowSec      float64 `json:"perf_window_sec"`      // 性能窗 (低性能锁样本与 TUI 展示共用); 0 = 取缺省 5min
-	LowPerfPeakMax     int     `json:"lowperf_peak_max"`     // tokens/s, 非时间
-	LowPerfAvgMax      int     `json:"lowperf_avg_max"`      // tokens/s, 非时间
+	LowPerfPeakMax     int     `json:"lowperf_peak_max"`     // 低吞吐峰值门槛 (绝对值, 直接套在 r* 上; 非时间)
+	LowPerfAvgMax      int     `json:"lowperf_avg_max"`      // 低吞吐平均门槛 (绝对值, 直接套在 r* 上; 非时间)
 	LowPerfRelMax      float64 `json:"lowperf_rel_max"`      // 低吞吐相对门槛: 当前平均 / 历史平均 < 它 (0.2 = 20%)
 	LowPerfTtfbMaxSec  float64 `json:"lowperf_ttfb_max_sec"` // 高延迟阈值 (秒); 0 = 关闭
 	LowPerfLockSec     float64 `json:"lowperf_lock_sec"`
@@ -253,8 +253,8 @@ type GateCfg struct {
 	// 当前平均 / 历史平均低于 lowperf_rel_max) 或 高延迟 (窗口内平均首字节时延超过阈值),
 	// 任一命中即锁该 上游/模型。
 	PerfWindowMs     int     `json:"perf_window_ms"`
-	LowPerfPeakMax   int     `json:"lowperf_peak_max"`    // 低吞吐峰值上限 (tokens/s)
-	LowPerfAvgMax    int     `json:"lowperf_avg_max"`     // 低吞吐平均上限 (tokens/s)
+	LowPerfPeakMax   int     `json:"lowperf_peak_max"`    // 低吞吐峰值上限 (r* 绝对值)
+	LowPerfAvgMax    int     `json:"lowperf_avg_max"`     // 低吞吐平均上限 (r* 绝对值)
 	LowPerfRelMax    float64 `json:"lowperf_rel_max"`     // 低吞吐相对门槛: 当前平均 / 历史平均 < 它
 	LowPerfTtfbMaxMs int     `json:"lowperf_ttfb_max_ms"` // 高延迟阈值 (平均首字节时延, ms); 0 = 关闭该项
 	LowPerfLockMs    int     `json:"lowperf_lock_ms"`

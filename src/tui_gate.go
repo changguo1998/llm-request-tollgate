@@ -36,8 +36,8 @@ var gateCN = []string{
 const (
 	gateIdxRetry   = 3  // 退避序列: 逗号秒串, 只能 = 输入
 	gateIdxPerfWin = 10 // 性能窗 (低性能样本 + TUI 展示共用)
-	gateIdxPeak    = 11 // 低吞吐峰值门槛 (t/s)
-	gateIdxAvg     = 12 // 低吞吐平均门槛 (t/s)
+	gateIdxPeak    = 11 // 低吞吐峰值门槛 (套在 r* 性能上, 显示不带单位)
+	gateIdxAvg     = 12 // 低吞吐平均门槛 (套在 r* 性能上, 显示不带单位)
 	gateIdxRel     = 13 // 低吞吐历史比门槛 (百分比)
 	gateIdxTtfb    = 14 // 高延迟阈值 (0 = 关闭该项)
 	gateIdxProbe   = 5  // 恢复探测开关
@@ -59,7 +59,7 @@ func gateStep(i int) int {
 	case 6, 7, 8, 9, 10:
 		return 60000 // 四把锁 + 性能窗
 	case 11, 12, 13:
-		return 1 // 低吞吐门槛 t/s / 历史比 1%
+		return 1 // 低吞吐门槛套在 r* 上 / 历史比 1%
 	case 14:
 		return 1000 // 高延迟阈值
 	}
@@ -107,7 +107,8 @@ func (e *tuiEditor) gateField(i int) int {
 }
 
 // gateText 是设置页里那一行的值+单位: 时间字段与配置一致按秒 (可小数, 单位 s),
-// 退避序列写成逗号秒串; 两个门槛单位 t/s, 历史比按百分比, 开关写 开/关。
+// 退避序列写成逗号秒串; 两个低吞吐门槛是 r* 性能阈值, 显示不带单位, 历史比按百分比,
+// 开关写 开/关。
 func (e *tuiEditor) gateText(i int) string {
 	if i == gateIdxRetry {
 		parts := make([]string, 0, len(e.gate.RetryBackoffMs))
@@ -117,7 +118,7 @@ func (e *tuiEditor) gateText(i int) string {
 		return strings.Join(parts, ",") + " s"
 	}
 	if i == gateIdxPeak || i == gateIdxAvg {
-		return strconv.Itoa(e.gateField(i)) + " t/s"
+		return strconv.Itoa(e.gateField(i))
 	}
 	if i == gateIdxRel {
 		return strconv.Itoa(e.gateField(i)) + "%"
@@ -147,7 +148,7 @@ func (e *tuiEditor) gateNumUnit(i int) (num, unit string) {
 		return strings.Join(parts, ","), "s"
 	}
 	if i == gateIdxPeak || i == gateIdxAvg {
-		return strconv.Itoa(e.gateField(i)), "t/s"
+		return strconv.Itoa(e.gateField(i)), ""
 	}
 	if i == gateIdxRel {
 		return strconv.Itoa(e.gateField(i)), "%"
@@ -222,7 +223,7 @@ func (e *tuiEditor) adjustGate(delta int) {
 	e.message = gateCN[i] + " = " + e.gateText(i)
 }
 
-// gateBounds 是 +/- 调整时的取值范围 (毫秒 / t/s / 百分比 / 0-1 开关)。
+// gateBounds 是 +/- 调整时的取值范围 (毫秒 / r* 门槛 / 百分比 / 0-1 开关)。
 func gateBounds(i int) (lo, hi int) {
 	switch i {
 	case 0:
@@ -246,7 +247,7 @@ func gateBounds(i int) (lo, hi int) {
 }
 
 // setGatePrompt 处理 = 输入: 时间字段与退避序列都用秒 (可小数, 与配置文件一致),
-// 两个 t/s 门槛 / 历史比 (百分比) / 开关用 0/1 / on/off / 开/关。
+// 两个 r* 门槛 / 历史比 (百分比) / 开关用 0/1 / on/off / 开/关。
 func (e *tuiEditor) setGatePrompt(i int, text string) {
 	switch {
 	case i == gateIdxRetry:
@@ -318,11 +319,11 @@ func (e *tuiEditor) setSecInput(i int, text string) {
 	e.message = gateCN[i] + " = " + fsec(ms)
 }
 
-// setRateLimit 解析低吞吐门槛 (正整数 t/s)。
+// setRateLimit 解析低吞吐门槛 (正整数, 套在 r* 性能上显示不带单位)。
 func (e *tuiEditor) setRateLimit(i int, text string) {
 	n, err := strconv.Atoi(strings.TrimSpace(text))
 	if err != nil || n < 1 {
-		e.message = gateCN[i] + " 要正整数 (t/s)"
+		e.message = gateCN[i] + " 要正整数"
 		return
 	}
 	if i == gateIdxPeak {
