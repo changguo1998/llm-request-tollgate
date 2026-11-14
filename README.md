@@ -287,7 +287,8 @@ thinkingLevelMap / reasoning) 与 `llm-models-droplist.json` (精确匹配黑名
   `max_tokens`; 代理的 `/v1/models` 按逻辑名聚合下发 (推理等级取交集, 两个上限取最小),
   agent 据此决定要不要发 `reasoning_effort`, 缺等级表时报
   `UNSUPPORTED_REASONING_EFFORT` (dsh 客户端校验)。`scripts/upsert_tollgate_provider.py`
-  写 store 的 `tg` 条目时按同一口径从候选模型参数继承。
+  写 store 的 `tg` 条目时更严: 同一逻辑名/组的候选四项参数必须完全一致 (缺失也算不一致);
+  先校验再写, 有冲突就逐条列出并以退出码 1 结束, store 不动。
 - `key_env` 取 store 里 `apiKey` 的占位符名; `auth_header` 等设置从现有配置继承, 不会被覆盖。
 - 写入 `config.local.json` (即 `~/fff/config/tollgate.json`); `--dry-run` 只打印,
   `--providers` 改上游顺序; 不传时缺省是 store 里**除 tg 与 arkap 外**的全部 provider

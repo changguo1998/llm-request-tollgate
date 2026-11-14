@@ -169,6 +169,7 @@ contextWindow / maxTokens / thinkingLevelMap / reasoning 等) 与黑名单
 的 `upstreams` / `upstreams[].models` 读 (provider 与模型的 `priority`, 模型的 `alias` /
 `billing`; 旧名 `group` / `billing_group` 读取时兼容), 重生成 `upstreams` 写回.
 本脚本只写配置, 不碰 store; 代理自身的 `tg` (kind=proxy) 目录条目由 `scripts/upsert_tollgate_provider.py` 维护 (fff 更新过 store 后跑一次, 让 agent 从 store 指向本代理).
+该脚本分两步: 先校验同一逻辑名/组的候选参数四项完全一致 (缺失也算不一致), 有冲突就逐条列出并退出 1, store 不动; 全部通过后才写入.
 公开仓库提供不依赖 fff 的示例: `scripts/gen_tollgate_config.example.py` +
 模型列表示例 `scripts/llm-models.example.json` (权重可用 `--cfg` 从现有配置继承). 要点:
 
