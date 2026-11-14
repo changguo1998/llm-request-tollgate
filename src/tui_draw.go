@@ -117,8 +117,14 @@ func (m *tuiModel) hint() string {
 		return tuiEditBg + tuiPad(tuiIndent+m.evPrompt.label+" "+m.evPrompt.buffer+" ", m.cols-1) + tuiReset
 	}
 	if m.tab == tabSettings {
-		return "  m/p/g 换面板   j/k 移动   +/- 调值   = 输入   s 保存并生成" +
-			"   h 热加载   q 退出   (" + m.prioHint() + ")"
+		plus := "调值"
+		if e := m.prio; e != nil && e.focus == 0 {
+			if p := e.pickAt(e.modelSel); p != nil && p.isGroup {
+				plus = "组内移成员" // 光标在组行上: +/- 是调组成员顺序, 不是调权重
+			}
+		}
+		return "  m/p/g 换面板  j/k 移动  +/- " + plus + "  = 输入  s 保存并生成" +
+			"  h 热加载  q 退出  (" + m.prioHint() + ")"
 	}
 	base := "  1-3 或 Tab 切页   up/down/PgUp/PgDn 滚动   r 重读日志   q 退出"
 	switch m.tab {

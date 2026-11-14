@@ -5,6 +5,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -194,7 +195,8 @@ func TestSettingsModelPanelListsGroups(t *testing.T) {
 	}
 }
 
-// 组行只列成员、不参与权重: 光标落在组行上 +/- 不改任何别名优先级。
+// 组行不参与权重: 光标落在组行上时 +/- 走组内移动 (这里是单成员组, 移动是边界,
+// 没有反应), 别名行的优先级不变。
 func TestSettingsStickyGroupNoWeights(t *testing.T) {
 	cfg := filepath.Join(t.TempDir(), "tollgate.json")
 	if err := os.WriteFile(cfg, []byte(`{
@@ -220,6 +222,121 @@ func TestSettingsStickyGroupNoWeights(t *testing.T) {
 	m.prio.adjust(3)
 	if rows := m.prio.filtered(); len(rows) != 1 || prioOf(rows[0].model) != 0 {
 		t.Fatalf("组行上调权重不该改别名行: %+v", rows)
+	}
+}
+
+// 组行上的 +/- 在组内移动成员 (上移 = 靠近候选链首位, 优先级提高): 到边界再按没有
+// 反应 (不改配置、不标脏、不换提示), 成功时只改内存并标脏 (按 s 才落盘), 光标跟着被
+// 移动的成员走, 权重列一律不动。
+func TestSettingsGroupMemberMove(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "tollgate.json")
+	store := filepath.Join(dir, "llm-models.json")
+	if err := os.WriteFile(store, []byte(`{
+	    "providers": {"u1": {"baseUrl": "http://u1.invalid/v1", "models": [
+	        {"id": "real-1"}, {"id": "real-2"}, {"id": "real-3"}
+	    ]}}
+	}`), 0o600); err != nil {
+		t.Fatalf("写 store: %v", err)
+	}
+	if err := os.WriteFile(cfg, []byte(`{
+	    "listen": "127.0.0.1:8787",
+	    "x_unknown": {"keep": true},
+	    "upstreams": [
+	        {"id": "u1", "base_url": "http://u1.invalid/v1", "models": [
+	            {"id": "real-1", "alias": "m1"},
+	            {"id": "real-2", "alias": "m2"},
+	            {"id": "real-3", "alias": "m3"}
+	        ]}
+	    ],
+	    "groups": {"g1": ["m1", "m2", "m3"]}
+	}`), 0o600); err != nil {
+		t.Fatalf("写配置: %v", err)
+	}
+	e := newTuiEditor(cfg)
+	if !e.usable() {
+		t.Fatalf("编辑器装载失败: %v", e.err)
+	}
+	// memberOrder 读组 g1 当前列出的成员顺序 (也就是展开候选链的顺序)。
+	memberOrder := func() string {
+		var got []string
+		for _, c := range e.cands() {
+			if c.isGroup && c.logical == "g1" {
+				got = append(got, c.member)
+			}
+		}
+		return strings.Join(got, ",")
+	}
+	// 光标放到成员 m2 那一行。
+	e.modelSel = -1
+	for i, c := range e.cands() {
+		if c.isGroup && c.logical == "g1" && c.member == "m2" {
+			e.modelSel = i
+			break
+		}
+	}
+	if e.modelSel < 0 {
+		t.Fatalf("模型面板里应有组行 g1/m2: %+v", e.cands())
+	}
+	if got := memberOrder(); got != "m1,m2,m3" {
+		t.Fatalf("初始组内顺序不对: %q", got)
+	}
+	e.adjust(-1) // 下移
+	if got := memberOrder(); got != "m1,m3,m2" {
+		t.Fatalf("下移后组内顺序应为 m1,m3,m2, 得到 %q", got)
+	}
+	if !e.dirty || !strings.Contains(e.message, "移到第 3 位") {
+		t.Errorf("移动应标脏并写反馈: dirty=%v msg=%q", e.dirty, e.message)
+	}
+	if p := e.pickAt(e.modelSel); p == nil || !p.isGroup || p.member != "m2" {
+		t.Errorf("光标应跟着被移动的成员: %+v", p)
+	}
+	e.adjust(1) // 上移回来
+	if got := memberOrder(); got != "m1,m2,m3" {
+		t.Fatalf("上移后应回到 m1,m2,m3, 得到 %q", got)
+	}
+	e.adjust(1) // 再上移到首位
+	if got := memberOrder(); got != "m2,m1,m3" {
+		t.Fatalf("再上移应到 m2,m1,m3, 得到 %q", got)
+	}
+	// 边界: m2 已在首位, 再上移没有反应 (不标脏、不改顺序、不换提示)。
+	e.dirty, e.message = false, "原样"
+	e.adjust(1)
+	if e.dirty || memberOrder() != "m2,m1,m3" || e.message != "原样" {
+		t.Errorf("边界上移不该有任何反应: dirty=%v 顺序=%q msg=%q", e.dirty, memberOrder(), e.message)
+	}
+	// 组行不是权重条目: 移动成员不改任何模型/provider 优先级。
+	for _, row := range e.filtered() {
+		if prioOf(row.model) != 0 {
+			t.Errorf("移动组成员不该改模型优先级: %s/%s = %d", row.provider, modelID(row.model), prioOf(row.model))
+		}
+	}
+	// 键位提示在组行上换措辞 (光标仍在 m2 这一组行)。
+	m := newTUIModel(cfg)
+	m.prio, m.tab = e, tabSettings
+	if !strings.Contains(m.hint(), "组内移成员") {
+		t.Errorf("光标在组行上时键位提示应说明组内移成员: %q", m.hint())
+	}
+	// 落盘: groups 按新顺序写回, 其余字段保留。
+	if err := e.save(); err != nil {
+		t.Fatalf("存盘: %v", err)
+	}
+	b, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatalf("读回: %v", err)
+	}
+	var top struct {
+		Groups   map[string][]string `json:"groups"`
+		XUnknown map[string]any      `json:"x_unknown"`
+	}
+	if err := json.Unmarshal(b, &top); err != nil {
+		t.Fatalf("存出来的不是 JSON: %v", err)
+	}
+	if got := strings.Join(top.Groups["g1"], ","); got != "m2,m1,m3" {
+		t.Errorf("组内顺序应落盘为 m2,m1,m3, 得到 %q (%s)", got, b)
+	}
+	if _, ok := top.XUnknown["keep"]; !ok {
+		t.Errorf("没动过的字段丢了: %s", b)
 	}
 }
 

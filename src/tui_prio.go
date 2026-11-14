@@ -42,8 +42,8 @@ type tuiCand struct {
 }
 
 // cands 返回模型面板全部可选行: 先别名模型行 (filtered, 可调优先级), 再组候选行
-// (只展示组成员, 组是配置内容); 配置读不到时只回模型行。组候选行按配置 mtime 缓存
-// (groups 只随配置文件变), 免得每帧重读解析。
+// (只列组成员, 组内顺序即优先级, +/- 在组内上下移动成员); 配置读不到时只回模型行。
+// 组候选行按配置 mtime 缓存, 组内移动后由 moveGroupMember 就地作废重建。
 func (e *tuiEditor) cands() []tuiCand {
 	rows := e.filtered()
 	out := make([]tuiCand, 0, len(rows)+8)
@@ -60,27 +60,26 @@ func (e *tuiEditor) cands() []tuiCand {
 	return out
 }
 
-// buildGroupCands 从配置 groups 展开组成员 (组名 -> 成员逻辑名, 不展开上游); 配置
-// 读不到时返回 nil。
+// buildGroupCands 把组成员摊成候选行 (组名 -> 成员逻辑名, 不展开上游): 组名按字典序,
+// 成员按内存里配置的顺序 (组内 +/- 移动后还没落盘时以内存为准)。成员没有可用候选
+// (未注册或整家停用) 就不列; 配置读不到时返回 nil。
 func (e *tuiEditor) buildGroupCands() []tuiCand {
+	groups, ok := e.groups()
+	if !ok {
+		return nil
+	}
 	c, err := loadConfigOpt(e.config, true)
 	if err != nil {
 		return nil
 	}
 	ex := c.expandedAliases()
-	names := make([]string, 0, len(c.Groups))
-	for name := range c.Groups {
-		names = append(names, name)
-	}
-	sort.Strings(names)
 	var out []tuiCand
-	for _, g := range names {
-		for _, member := range c.Groups[g] {
-			chain := ex[member]
-			if len(chain) == 0 {
+	for _, g := range groups {
+		for _, member := range g.members {
+			if len(ex[member]) == 0 {
 				continue
 			}
-			out = append(out, tuiCand{logical: g, member: member, isGroup: true, row: -1})
+			out = append(out, tuiCand{logical: g.name, member: member, isGroup: true, row: -1})
 		}
 	}
 	return out
@@ -212,6 +211,56 @@ func (e *tuiEditor) selected() *tuiPrioRow {
 	return &rows[p.row]
 }
 
+// groupRow 返回组候选行 (组名 + 成员) 在 cands 里的下标; 没有返回 -1。
+func (e *tuiEditor) groupRow(gname, member string) int {
+	for i, c := range e.cands() {
+		if c.isGroup && c.logical == gname && c.member == member {
+			return i
+		}
+	}
+	return -1
+}
+
+// moveGroupMember 把组 gname 的成员 member 在组内移动一位: delta > 0 上移 (靠近候选链
+// 首位, 优先级提高), delta < 0 下移; 到边界再按没有反应 (不改配置, 不标脏, 不提示)。
+// 新顺序先写进内存里的配置, 按 s 才落盘; 光标跟着被移动的那一行走。
+func (e *tuiEditor) moveGroupMember(gname, member string, delta int) {
+	raw, ok := e.cfg["groups"].(map[string]any)
+	if !ok {
+		return
+	}
+	list, ok := raw[gname].([]any)
+	if !ok || len(list) < 2 {
+		return
+	}
+	from := -1
+	for i, m := range list {
+		if s, ok := m.(string); ok && s == member {
+			from = i
+			break
+		}
+	}
+	if from < 0 {
+		return
+	}
+	step := 1
+	if delta < 0 {
+		step = -1
+	}
+	to := from - step
+	if to < 0 || to >= len(list) {
+		return // 边界: 再按没有反应
+	}
+	list[from], list[to] = list[to], list[from]
+	e.groupCands = nil // 组内顺序变了: 缓存作废, 下次 cands() 按内存重建
+	e.dirty = true
+	e.asked = false
+	e.message = "组 " + gname + ": " + member + " 移到第 " + strconv.Itoa(to+1) + " 位"
+	if i := e.groupRow(gname, member); i >= 0 {
+		e.modelSel = i
+	}
+}
+
 // candsFor 取某别名的候选顺序 (右栏预览)。
 func (e *tuiEditor) candsFor(alias string) []tuiPrioCand {
 	for _, a := range e.buildAliases() {
@@ -256,6 +305,10 @@ func (e *tuiEditor) adjust(delta int) {
 		e.message = name + ": provider 优先级 = " + strconv.Itoa(prioOf(entry))
 		e.sortProviders()
 	} else {
+		if p := e.pickAt(e.modelSel); p != nil && p.isGroup {
+			e.moveGroupMember(p.logical, p.member, delta) // 组行: +/- 在组内上下移成员
+			return
+		}
 		row := e.selected()
 		if row == nil {
 			return

@@ -329,7 +329,7 @@ func (e *tuiEditor) syncWeights() {
 
 // save 原子写回配置 (先写 .tmp 再 rename); 2 空格缩进, 键字典序 (map 编码的默认行为)。
 // 先把编辑态权重同步进 e.cfg, 再以磁盘上的最新配置为底 (避免盖掉刚由 saveGate 写的
-// 调度参数), 其余字段原样保留。
+// 调度参数), 其余字段原样保留; 组内顺序也可能在模型面板里调过, groups 一并带上。
 func (e *tuiEditor) save() error {
 	e.syncWeights()
 	top := e.cfg
@@ -339,6 +339,9 @@ func (e *tuiEditor) save() error {
 		var fresh map[string]any
 		if dec.Decode(&fresh) == nil {
 			fresh["upstreams"] = top["upstreams"]
+			if g, ok := top["groups"]; ok {
+				fresh["groups"] = g
+			}
 			top = fresh
 		}
 	}
