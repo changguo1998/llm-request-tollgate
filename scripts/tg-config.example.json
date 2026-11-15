@@ -26,12 +26,12 @@
       "priority": 3,
       "models": [
         {
-          "id": "deepseek-v4.1-flash",
+          "id": "deepseek-flash",
           "priority": 20,
           "alias": "deepseek-v4.1-flash"
         },
         {
-          "id": "deepseek-flash",
+          "id": "deepseek-v4.1-flash",
           "priority": 20,
           "alias": "deepseek-flash"
         }

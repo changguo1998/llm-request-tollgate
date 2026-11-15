@@ -6,9 +6,28 @@
       "models": [
         {
           "id": "deepseek-v4.1-flash",
-          "contextWindow": 131072,
-          "maxTokens": 65536,
-          "reasoning": true
+          "contextWindow": 1000000,
+          "maxTokens": 131072,
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": "none",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+          }
+        },
+        {
+          "id": "deepseek-flash",
+          "contextWindow": 1000000,
+          "maxTokens": 131072,
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": "none",
+            "low": "low",
+            "high": "high"
+          }
         },
         {
           "id": "qwen2.5-chat",
@@ -22,9 +41,31 @@
       "models": [
         {
           "id": "deepseek-v4.1-flash",
-          "contextWindow": 131072,
-          "maxTokens": 65536,
-          "reasoning": true
+          "contextWindow": 1050000,
+          "maxTokens": 128000,
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": "none",
+            "minimal": "minimal",
+            "low": "low",
+            "high": "high",
+            "max": "max"
+          }
+        },
+        {
+          "id": "deepseek-flash",
+          "contextWindow": 1050000,
+          "maxTokens": 128000,
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": "none",
+            "minimal": "minimal",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+          }
         },
         {
           "id": "glm-5-lite",

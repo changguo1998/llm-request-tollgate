@@ -6,25 +6,32 @@
       "models": [
         {
           "id": "deepseek-v4.1-flash",
-          "reasoning": true,
           "contextWindow": 1000000,
-          "maxTokens": 65536,
+          "maxTokens": 131072,
+          "reasoning": true,
           "thinkingLevelMap": {
+            "off": "none",
             "low": "low",
+            "medium": "medium",
             "high": "high",
-            "off": "none"
+            "xhigh": "xhigh",
+            "max": "max"
           }
         },
         {
           "id": "deepseek-flash",
-          "reasoning": true,
           "contextWindow": 1000000,
-          "maxTokens": 65536,
+          "maxTokens": 131072,
+          "reasoning": true,
           "thinkingLevelMap": {
+            "off": "none",
             "low": "low",
-            "high": "high",
-            "off": "none"
+            "high": "high"
           }
+        },
+        {
+          "id": "qwen2.5-chat",
+          "contextWindow": 32768
         }
       ]
     },
@@ -34,25 +41,35 @@
       "models": [
         {
           "id": "deepseek-v4.1-flash",
-          "reasoning": true,
           "contextWindow": 1050000,
-          "maxTokens": 65536,
+          "maxTokens": 128000,
+          "reasoning": true,
           "thinkingLevelMap": {
+            "off": "none",
+            "minimal": "minimal",
             "low": "low",
             "high": "high",
-            "off": "none"
+            "max": "max"
           }
         },
         {
           "id": "deepseek-flash",
-          "reasoning": true,
           "contextWindow": 1050000,
-          "maxTokens": 65536,
+          "maxTokens": 128000,
+          "reasoning": true,
           "thinkingLevelMap": {
+            "off": "none",
+            "minimal": "minimal",
             "low": "low",
+            "medium": "medium",
             "high": "high",
-            "off": "none"
+            "xhigh": "xhigh",
+            "max": "max"
           }
+        },
+        {
+          "id": "glm-5-lite",
+          "contextWindow": 131072
         }
       ]
     }
