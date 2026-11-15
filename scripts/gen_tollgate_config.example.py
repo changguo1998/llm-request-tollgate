@@ -69,6 +69,97 @@ MODEL_PARAM_FIELDS = {
     "maxTokens": "max_tokens",
 }
 
+# 推理等级从 off (不开启, 0) 到 max (最高): 补齐时用来找"更高的最低等级".
+LEVEL_ORDER = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+LEVEL_RANK = {level: rank for rank, level in enumerate(LEVEL_ORDER)}
+
+
+def level_rank(level: str) -> int:
+    """等级在 0..6 里的位置; 表里没有的等级排最后."""
+    return LEVEL_RANK.get(level, len(LEVEL_ORDER))
+
+
+def filled_level_map(level_map: dict, levels: list[str]) -> dict:
+    """把一张等级表补齐到 ``levels``, 返回"等级 -> 发给上游的 effort 名".
+
+    对齐规则与 upsert_tollgate_provider.py 相同: 声明了该等级就用原值; 缺的 (缺键
+    或 null) 指向本表更高的最低等级, 没有更高等级时指向本表最高等级; 完全没有表时
+    按同名映射, 即等级名本身就是发给上游的名字.
+    """
+    declared = {
+        level: effort
+        for level, effort in (level_map or {}).items()
+        if isinstance(effort, str) and effort
+    }
+    if not declared:
+        return {level: level for level in levels}
+    highest = max(declared, key=level_rank)
+    filled = {}
+    for level in levels:
+        if level in declared:
+            filled[level] = declared[level]
+            continue
+        higher = [name for name in declared if level_rank(name) > level_rank(level)]
+        if higher:
+            filled[level] = declared[min(higher, key=level_rank)]
+        else:
+            filled[level] = declared[highest]
+    return filled
+
+
+def filled_level_maps(level_maps: list) -> list[dict]:
+    """把作用域内的每张等级表补齐到等级并集, 返回与输入同序的表.
+
+    作用域内所有候选都显式写 null 的等级保持 null, 不补: 谁都不支持它, 补成更高
+    等级只会把"不支持"说成"支持".
+    """
+    maps = [one if isinstance(one, dict) else {} for one in level_maps]
+    levels = sorted({level for one in maps for level in one}, key=level_rank)
+    if not levels:
+        return [dict(one) for one in maps]
+    filled = [filled_level_map(one, levels) for one in maps]
+    for one in filled:
+        for level in levels:
+            if all(level in raw and not raw.get(level) for raw in maps):
+                one[level] = None
+    return filled
+
+
+def apply_filled_level_maps(upstreams: list, aliases: dict, groups: dict) -> None:
+    """按"组 / 逻辑名"作用域补齐 upstreams 里每个模型的 thinking_level_map.
+
+    组展开后成员 alias 的候选合起来算一个作用域; 没被任何组引用的逻辑名自成作用域.
+    """
+    by_pair = {}
+    for upstream in upstreams:
+        for model in upstream.get("models", []):
+            by_pair[(upstream["id"], model["id"])] = model
+
+    grouped = set()
+    scopes = []
+    for members in groups.values():
+        grouped.update(members)
+        scopes.append(members)
+    for name in aliases:
+        if name not in grouped:
+            scopes.append([name])
+
+    for members in scopes:
+        pairs = [
+            (upstream, model)
+            for name in members
+            for upstream, model in aliases.get(name, [])
+            if (upstream, model) in by_pair
+        ]
+        if not pairs:
+            continue
+        filled = filled_level_maps(
+            [by_pair[pair].get("thinking_level_map") for pair in pairs]
+        )
+        for pair, one in zip(pairs, filled):
+            if one:
+                by_pair[pair]["thinking_level_map"] = one
+
 
 def weight(
     cfg: dict | None, upstream_id: str, model_id: str | None
@@ -170,7 +261,9 @@ def build(list_path: Path, cfg_path: Path | None) -> tuple[dict, list[str]]:
         }
         upstreams.append(entry)
 
-    out: dict = {"upstreams": upstreams}  # 顶层 aliases 键已废弃, 逻辑名在 models[].alias 上
+    out: dict = {
+        "upstreams": upstreams
+    }  # 顶层 aliases 键已废弃, 逻辑名在 models[].alias 上
     warnings: list[str] = []
     groups = groups_of(cfg)
     # 组只能在生成的别名集合里引用成员: 成员被删 / 停用后不再是别名, 警告但保留原样
@@ -184,6 +277,9 @@ def build(list_path: Path, cfg_path: Path | None) -> tuple[dict, list[str]]:
                 warnings.append(
                     f"group {g}: member(s) no longer an alias: {', '.join(missing)}"
                 )
+    # 每个上游模型的 thinking_level_map 按所在组 / 逻辑名补齐: 组里有人支持的等级,
+    # 不支持的候选指向更高的最低等级; 全组都显式 null 的等级保持 null.
+    apply_filled_level_maps(upstreams, aliases, groups)
     return out, warnings
 
 
@@ -196,9 +292,7 @@ def main() -> None:
     ap.add_argument("--out", default="", help="写到文件而非 stdout")
     args = ap.parse_args()
 
-    out, warnings = build(
-        Path(args.list), Path(args.cfg) if args.cfg else None
-    )
+    out, warnings = build(Path(args.list), Path(args.cfg) if args.cfg else None)
     text = json.dumps(out, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
     for w in warnings:
         print(f"注意: {w}", file=sys.stderr)
