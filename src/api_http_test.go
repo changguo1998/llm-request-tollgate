@@ -171,7 +171,8 @@ func TestHTTPServeModelsAndState(t *testing.T) {
 }
 
 // /v1/models 的模型参数按逻辑名的候选聚合: reasoning 任一候选声明即 true,
-// thinkingLevelMap 取交集 (不支持的等级给 null), contextWindow / maxTokens 取最小值。
+// thinkingLevelMap 按等级并集合并 (有同名映射取同名, 否则取最低 effort; 全候选都
+// 显式 null 的等级保持 null), contextWindow / maxTokens 取最小值。
 func TestServeModelsAggregatesMeta(t *testing.T) {
 	level := func(s string) *string { return &s }
 	cfg := &Config{
@@ -212,14 +213,71 @@ func TestServeModelsAggregatesMeta(t *testing.T) {
 	if got.ID != "m1" || !got.Reasoning || got.ContextWindow != 100000 || got.MaxTokens != 4000 {
 		t.Errorf("聚合参数不对: %+v", got)
 	}
-	want := map[string]*string{"low": level("low"), "high": nil, "medium": nil}
+	want := map[string]*string{"low": level("low"), "high": level("high"), "medium": level("medium")}
 	if len(got.ThinkingLevelMap) != len(want) {
-		t.Fatalf("推理等级表应取交集, 得到 %+v", got.ThinkingLevelMap)
+		t.Fatalf("推理等级表应按并集合并, 得到 %+v", got.ThinkingLevelMap)
 	}
 	for k, v := range want {
 		gv := got.ThinkingLevelMap[k]
 		if (v == nil) != (gv == nil) || (v != nil && *v != *gv) {
 			t.Errorf("等级 %s 应为 %v, 得到 %v", k, v, gv)
+		}
+	}
+}
+
+// mergeLevelMaps 的合并规则: 同名优先, 没有同名取最低 effort, 全候选都显式 null 的
+// 等级保持 null, 无表候选按同名映射参与。
+func TestMergeLevelMaps(t *testing.T) {
+	level := func(s string) *string { return &s }
+	cases := []struct {
+		name string
+		maps []map[string]*string
+		want map[string]*string
+	}{
+		{
+			name: "同名优先",
+			maps: []map[string]*string{
+				{"low": level("low"), "high": level("high"), "medium": nil},
+				{"low": level("low"), "high": nil, "medium": level("medium")},
+			},
+			want: map[string]*string{"low": level("low"), "high": level("high"), "medium": level("medium")},
+		},
+		{
+			name: "全显式 null 保持 null",
+			maps: []map[string]*string{
+				{"medium": nil, "high": level("high")},
+				{"medium": nil, "high": level("high")},
+			},
+			want: map[string]*string{"medium": nil, "high": level("high")},
+		},
+		{
+			name: "没有同名取最低 effort",
+			maps: []map[string]*string{
+				{"off": level("none"), "low": level("low")},
+				{"off": level("low"), "low": level("low")},
+			},
+			want: map[string]*string{"off": level("none"), "low": level("low")},
+		},
+		{
+			name: "无表候选按同名映射",
+			maps: []map[string]*string{
+				{},
+				{"low": level("low"), "high": level("high")},
+			},
+			want: map[string]*string{"low": level("low"), "high": level("high")},
+		},
+	}
+	for _, tc := range cases {
+		got := mergeLevelMaps(tc.maps)
+		if len(got) != len(tc.want) {
+			t.Errorf("%s: 等级数应为 %d, 得到 %+v", tc.name, len(tc.want), got)
+			continue
+		}
+		for k, want := range tc.want {
+			gv := got[k]
+			if (want == nil) != (gv == nil) || (want != nil && *want != *gv) {
+				t.Errorf("%s: 等级 %s 应为 %v, 得到 %v", tc.name, k, want, gv)
+			}
 		}
 	}
 }

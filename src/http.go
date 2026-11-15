@@ -124,9 +124,10 @@ type modelEntry struct {
 }
 
 // aggregateMeta 把一个逻辑名的候选聚合成对外模型参数: reasoning 任一候选声明即 true;
-// thinkingLevelMap 取交集 (某等级只有所有声明了等级表的候选都支持才保留, 否则给 null);
-// contextWindow / maxTokens 取最小值 —— 请求可能落到任一候选, 只有保守值才不会被上游
-// 拒绝 (与 scripts/upsert_tollgate_provider.py 同一口径)。调用方须持有 a.mu。
+// thinkingLevelMap 按等级并集合并 (每个候选先补齐, 再逐级取同名映射, 没有同名取最低
+// effort; 全候选都显式 null 的等级保持 null); contextWindow / maxTokens 取最小值 ——
+// 请求可能落到任一候选, 只有保守值才不会被上游拒绝 (与
+// scripts/upsert_tollgate_provider.py 同一口径)。调用方须持有 a.mu。
 func (a *App) aggregateMeta(chain []aliasTarget) modelMeta {
 	var meta modelMeta
 	var maps []map[string]*string
@@ -143,9 +144,8 @@ func (a *App) aggregateMeta(chain []aliasTarget) modelMeta {
 			if m.Reasoning {
 				meta.Reasoning = true
 			}
-			if len(m.ThinkingLevelMap) > 0 {
-				maps = append(maps, m.ThinkingLevelMap)
-			}
+			// 没有等级表的候选也参与合并: 它按同名映射补齐 (与 upsert 脚本一致)。
+			maps = append(maps, m.ThinkingLevelMap)
 			if m.ContextWindow > 0 && (meta.ContextWindow == 0 || m.ContextWindow < meta.ContextWindow) {
 				meta.ContextWindow = m.ContextWindow
 			}
@@ -155,25 +155,148 @@ func (a *App) aggregateMeta(chain []aliasTarget) modelMeta {
 			break
 		}
 	}
-	if len(maps) > 0 {
-		out := make(map[string]*string, len(maps[0]))
-		for level, v := range maps[0] {
-			if v == nil || *v == "" {
-				out[level] = nil
+	meta.ThinkingLevelMap = mergeLevelMaps(maps)
+	return meta
+}
+
+// 推理等级从 off (不开启, 0) 到 max (最高); effort 名从低到高 (none = 不开启)。
+var levelOrder = []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+var effortOrder = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+func orderRank(order []string, name string) int {
+	for i, item := range order {
+		if item == name {
+			return i
+		}
+	}
+	return len(order) // 表里没有的名字排最后 (effort 未知按最低处理, 见 effortRank)
+}
+
+func levelRank(level string) int { return orderRank(levelOrder, level) }
+
+// effortRank 把未知 effort 名当最低 (返回 -1), 合并取最低时更保守。
+func effortRank(effort string) int {
+	for i, item := range effortOrder {
+		if item == effort {
+			return i
+		}
+	}
+	return -1
+}
+
+// filledLevelMap 把一张等级表补齐到 levels: 缺的等级指向本表更高的最低等级,
+// 没有更高等级时指向本表最高等级; 完全没有表时按同名映射。
+func filledLevelMap(levelMap map[string]*string, levels []string) map[string]*string {
+	declared := map[string]string{}
+	for level, effort := range levelMap {
+		if effort != nil && *effort != "" {
+			declared[level] = *effort
+		}
+	}
+	if len(declared) == 0 {
+		filled := make(map[string]*string, len(levels))
+		for _, level := range levels {
+			name := level
+			filled[level] = &name
+		}
+		return filled
+	}
+	highest := ""
+	for level := range declared {
+		if highest == "" || levelRank(level) > levelRank(highest) {
+			highest = level
+		}
+	}
+	filled := make(map[string]*string, len(levels))
+	for _, level := range levels {
+		if effort, ok := declared[level]; ok {
+			value := effort
+			filled[level] = &value
+			continue
+		}
+		higher := ""
+		for name := range declared {
+			if levelRank(name) <= levelRank(level) {
 				continue
 			}
-			val := *v
-			out[level] = &val
-			for _, other := range maps[1:] {
-				if ov := other[level]; ov == nil || *ov == "" {
-					out[level] = nil
-					break
-				}
+			if higher == "" || levelRank(name) < levelRank(higher) {
+				higher = name
 			}
 		}
-		meta.ThinkingLevelMap = out
+		source := declared[highest]
+		if higher != "" {
+			source = declared[higher]
+		}
+		value := source
+		filled[level] = &value
 	}
-	return meta
+	return filled
+}
+
+// mergeLevelMaps 按等级并集合并多张表: 候选有同名映射就用它, 否则取最低 effort;
+// 全候选都显式写 null 的等级保持 null, 不补。
+func mergeLevelMaps(maps []map[string]*string) map[string]*string {
+	levelSet := map[string]bool{}
+	for _, one := range maps {
+		for level := range one {
+			levelSet[level] = true
+		}
+	}
+	if len(levelSet) == 0 {
+		return nil
+	}
+	levels := make([]string, 0, len(levelSet))
+	for level := range levelSet {
+		levels = append(levels, level)
+	}
+	sort.Slice(levels, func(i, j int) bool { return levelRank(levels[i]) < levelRank(levels[j]) })
+
+	filled := make([]map[string]*string, 0, len(maps))
+	for _, one := range maps {
+		filled = append(filled, filledLevelMap(one, levels))
+	}
+	out := make(map[string]*string, len(levels))
+	for _, level := range levels {
+		allNull := true
+		for _, one := range maps {
+			effort, ok := one[level]
+			if !ok || effort != nil && *effort != "" {
+				allNull = false
+				break
+			}
+		}
+		if allNull {
+			out[level] = nil
+			continue
+		}
+		sameNamed := false
+		lowest := ""
+		for _, one := range filled {
+			effort := one[level]
+			if effort == nil || *effort == "" {
+				continue
+			}
+			if *effort == level {
+				sameNamed = true
+				break
+			}
+			if lowest == "" || effortRank(*effort) < effortRank(lowest) {
+				lowest = *effort
+			}
+		}
+		if sameNamed {
+			name := level
+			out[level] = &name
+			continue
+		}
+		if lowest == "" {
+			out[level] = nil
+			continue
+		}
+		value := lowest
+		out[level] = &value
+	}
+	return out
 }
 
 // serveModels 返回别名表里的逻辑模型清单。只列对外名字, 不暴露上游真实 id;

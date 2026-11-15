@@ -202,8 +202,9 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 `max_tokens`. 官方 OpenAI 列表不含推理等级, 这些扩展键是本地约定, 客户端通常会忽略:
 
 - `reasoning`: 任一候选声明支持思考即为 `true`.
-- `thinkingLevelMap`: 推理等级 -> 上游 effort 名, 按候选取交集 —— 某等级只有所有声明了
-  等级表的候选都支持才保留, 否则给 `null`.
+- `thinkingLevelMap`: 推理等级 -> 上游 effort 名, 按所有候选键的并集合并 —— 每个候选先
+  补齐 (缺的等级指向更高等级里最低的, 没有更高就指向该候选最高等级; 无表按同名映射),
+  再逐级取同名映射, 没有同名就取最低 effort; 所有候选都显式 `null` 的等级保持 `null`.
 - `contextWindow` / `maxTokens`: 候选里的最小值 (请求可能落到任一候选, 只有保守值才
   不会被上游拒绝).
 
