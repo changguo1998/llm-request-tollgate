@@ -237,8 +237,8 @@ sum(exp(-((结束时刻-当前时刻)/10min)^2)); 按权重降序分配, 同权�
   额度锁只锁组; 不写组名 = 该上游的默认组; 旧称 `billing_group`, 读取时兼容)。手写配置
   不写 `models` 也兼容 (全部归默认组, 权重按 0)。可选模型参数 `reasoning` /
   `thinking_level_map` (推理等级 -> 上游 effort 名, `null` = 不支持) / `context_window` /
-  `max_tokens` 只对外展示: 代理由 `/v1/models` 按逻辑名聚合下发 (推理等级取候选交集,
-  两个上限取最小值), 不参与路由。
+  `max_tokens` 只对外展示: 代理由 `/v1/models` 按逻辑名聚合下发 (推理等级按并集合并,
+  同名优先、没有同名取最低 effort; 两个上限取最小值), 不参与路由。
 - 候选链不再独立维护: 顶层 `aliases` 键已废弃, 代理读取配置后从 `models[].alias` 按
   `priority` 重建候选表 (逻辑名 = alias, 缺省模型 id; 顺序 = 模型 priority 降序 →
   provider priority 降序 → 配置顺序 → 模型 id, 与生成器 / TUI 预览同口径; 负优先级停用
@@ -284,13 +284,18 @@ thinkingLevelMap / reasoning) 与 `llm-models-droplist.json` (精确匹配黑名
   上游的 `models` 固定写出 (权重在上面), 整家都没写 `billing` 时只有一个默认组。
 - 模型参数 `reasoning` / `thinkingLevelMap` / `contextWindow` / `maxTokens` 从 store 条目
   搬进配置 `models[]` 的 `reasoning` / `thinking_level_map` / `context_window` /
-  `max_tokens`; 代理的 `/v1/models` 按逻辑名聚合下发 (推理等级取交集, 两个上限取最小),
-  agent 据此决定要不要发 `reasoning_effort`, 缺等级表时报
-  `UNSUPPORTED_REASONING_EFFORT` (dsh 客户端校验)。`scripts/upsert_tollgate_provider.py`
-  写 store 的 `tg` 条目时更严: contextWindow 先归档 (16K/32K/64K/128K/200K/256K/512K/
-  1M/2M, 取最近档, 居中取小档, 写入用档位统一值); 其余三项必须完全一致 (缺失也算不一致);
-  组同时做结构校验 (组名不得与逻辑名重名, 成员必须是已注册逻辑名, 禁止嵌套组);
-  先校验再写, 有冲突就逐条列出并以退出码 1 结束, store 不动。
+  `max_tokens`。生成配置时按组 / 逻辑名补齐每个上游的 `thinking_level_map`: 组里有人
+  支持的等级, 不支持的候选指向更高的最低等级 (没有更高就指向它的最高等级); 全组都显式
+  写 null 的等级保持 null, 无表候选按同名映射。代理的 `/v1/models` 用同一套并集规则
+  合并 (同名优先, 否则取最低 effort; 全候选都显式 null 的等级保持 null; 两个上限取
+  最小值), agent 据此决定要不要发 `reasoning_effort`, 缺等级表时报
+  `UNSUPPORTED_REASONING_EFFORT` (dsh 客户端校验)。
+- `scripts/upsert_tollgate_provider.py` 写 store 的 `tg` 条目时用同一套并集合并规则,
+  另外: reasoning 是硬性分组条件 (同一逻辑名或组展开后不能既有推理模型又有非推理模型);
+  contextWindow / maxTokens 先归各自档位比较 (contextWindow 跨档报错退出, maxTokens
+  跨档只警告), 写入取候选里最小的已声明原值。组同时做结构校验 (组名不得与逻辑名重名,
+  成员必须是已注册逻辑名, 禁止嵌套组); 先校验再写, 阻塞错误逐条列出并以退出码 1 结束,
+  store 不动。
 - `key_env` 取 store 里 `apiKey` 的占位符名; `auth_header` 等设置从现有配置继承, 不会被覆盖。
 - 写入 `config.local.json` (即 `~/fff/config/tollgate.json`); `--dry-run` 只打印,
   `--providers` 改上游顺序; 不传时缺省是 store 里**除 tg 与 arkap 外**的全部 provider
@@ -300,7 +305,7 @@ thinkingLevelMap / reasoning) 与 `llm-models-droplist.json` (精确匹配黑名
   跑一次, 让 agent 从 store 同步到本代理; `--dry-run` 先预览)。
 - 公开仓库给同规则的示例版: `scripts/upsert_tollgate_provider.example.py` 读
   同目录的 `tg-store.example.json` + `tg-config.example.json`, 把条目打印到 stdout
-  (不写文件; 归档位、组校验与参数校验走同一套规则).
+  (不写文件; 档位比较、组校验与参数合并走同一套规则).
 - 不在 store 里的手加上游在重生成时会丢 (`build_upstreams` 只认 store 里的 provider);
   要先在 store 里补 provider, 或重生成后手工补回。
 - `groups` (手工维护的组) 原样保留; 重生成后若某组成员不再是对应别名 (模型被删 /
