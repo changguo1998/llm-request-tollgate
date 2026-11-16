@@ -130,6 +130,47 @@ func TestModelTableUnusedRowPlaceholders(t *testing.T) {
 	}
 }
 
+// 模型表统计四列 (Token / 首字节 / 性能 / 最近) 之间用边框竖线分隔; 组名行在
+// 同样的列位也画竖线 (穿过分组标题, 不断开)。
+func TestModelTableStatsBars(t *testing.T) {
+	openTestPTY(t, 60, 140)
+	m := flowFixture(t)
+	lines := strings.Split(stripANSI(m.draw()), "\r\n")
+	barCols := func(s string) []int {
+		var idx []int
+		for i, r := range s {
+			if r == '│' {
+				idx = append(idx, i)
+			}
+		}
+		return idx
+	}
+	var dataIdx, groupIdx []int
+	for _, ln := range lines {
+		switch {
+		case strings.Contains(ln, "u1/real-1"):
+			if dataIdx == nil {
+				dataIdx = barCols(ln)
+			}
+		case strings.HasPrefix(strings.TrimSpace(ln), "m1"): // 组名行 (没设粘性, 无倒计时)
+			if groupIdx == nil {
+				groupIdx = barCols(ln)
+			}
+		}
+	}
+	if dataIdx == nil || len(dataIdx) != 3 {
+		t.Fatalf("数据行应有 3 条竖线 (Token/首字节/性能 之后): %v\n%s", dataIdx, strings.Join(lines, "\n"))
+	}
+	if groupIdx == nil || len(groupIdx) != 3 {
+		t.Fatalf("组名行也应有 3 条竖线: %v\n%s", groupIdx, strings.Join(lines, "\n"))
+	}
+	for i := range dataIdx {
+		if dataIdx[i] != groupIdx[i] {
+			t.Errorf("组名行竖线列位应与数据行一致: data=%v group=%v", dataIdx, groupIdx)
+		}
+	}
+}
+
 // 模型表的格子按同一口径拼: Token = cached/total, 首字节 = 最近/短均/长均/谷 四段,
 // 性能 = 最近/短均/长均/峰 四段 (每请求 r*, 无参数时退原始速率); 熔断锁红、退避黄。
 func TestDrawModelsRouteCells(t *testing.T) {

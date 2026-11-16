@@ -725,7 +725,8 @@ func TestModelsGroupedByLogical(t *testing.T) {
 	for _, name := range []string{"alias-b", "alias-a"} {
 		hdr := -1
 		for i, ln := range lines {
-			if strings.TrimSpace(ln) == name {
+			// 组名行结尾带统计列的边框竖线, 只能按前缀辨认。
+			if strings.HasPrefix(strings.TrimSpace(ln), name) {
 				hdr = i
 			}
 		}
@@ -942,7 +943,8 @@ func TestModelTableHangingIndent(t *testing.T) {
 	for _, ln := range lines {
 		txt := strings.TrimSpace(ln)
 		switch {
-		case strings.HasPrefix(txt, "m1") && strings.Contains(txt, "04:32"), txt == "m2":
+		case strings.HasPrefix(txt, "m1") && strings.Contains(txt, "04:32"),
+			strings.HasPrefix(txt, "m2"): // 组名行结尾带统计列竖线, 按前缀辨认
 			headers++
 			if !strings.HasPrefix(ln, tuiIndent) || strings.HasPrefix(ln, modelIndent) {
 				t.Errorf("组名应在 %d 格缩进 (悬挂在表体外面): %q", len(tuiIndent), ln)

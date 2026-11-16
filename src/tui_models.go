@@ -298,6 +298,114 @@ const (
 	modelIndent = tuiIndent + "  "
 )
 
+// modelBar 是模型表统计四列 (Token / 首字节 / 性能 / 最近) 之间的边框竖线。
+// tuiWidth 按 1 列算 (U+2502 不在全角区), 主流终端同宽, 不会顶歪列对齐。
+const modelBar = "│"
+
+// modelStatsSep 判断分隔点 (前一个可见列在 modelCols 里的下标) 是否该用边框竖线:
+// Token (4) / 首字节 (5) / 性能 (6) 之后, 即统计四列两两之间。
+func modelStatsSep(prevCol int) bool {
+	return prevCol == 4 || prevCol == 5 || prevCol == 6
+}
+
+// modelKeptColIdx 是 colKeep 保住的原列下标 (每个 kept 列在 modelCols 里的位置),
+// 与 pickCols 的返回一一对应。
+func modelKeptColIdx(keep []bool) []int {
+	out := make([]int, 0, len(keep))
+	for i, k := range keep {
+		if k {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// modelVisibleColIdx 把 kept 列的原下标按可见性滤一遍, 得到与 alignRow 输出一一
+// 对应的原列下标序列 (竖线定位用)。
+func modelVisibleColIdx(cols []tuiCol, vis []bool, full []int) []int {
+	var out []int
+	for i := range cols {
+		if vis[i] {
+			out = append(out, full[i])
+		}
+	}
+	return out
+}
+
+// modelJoin 按列布局把已对齐格拼成一行正文 (不含行首缩进): Token / 首字节 / 性能 /
+// 最近 四列之间用边框竖线, 其余列之间照旧空格; 表头与数据行共用, 竖线位次一致。
+func modelJoin(cols []tuiCol, cells []string, vis []bool, vfull []int) string {
+	aligned := alignRow(cols, cells, vis)
+	var b strings.Builder
+	for i, s := range aligned {
+		if i > 0 {
+			if modelStatsSep(vfull[i-1]) {
+				b.WriteString(modelBar)
+			} else {
+				b.WriteString(tuiColSep)
+			}
+		}
+		b.WriteString(s)
+	}
+	return b.String()
+}
+
+// modelBarPos 返回统计四列之间的边框竖线在数据行内容里的字符位 (不含行首缩进),
+// 与 modelJoin 的拼法逐列一致; 数据行与组名行共用同一列布局, 位次相同。
+func modelBarPos(cols []tuiCol, vis []bool, vfull []int) []int {
+	var pos []int
+	x := 0
+	vi := -1
+	for i, col := range cols {
+		if !vis[i] {
+			continue
+		}
+		vi++
+		if vi > 0 {
+			if modelStatsSep(vfull[vi-1]) {
+				pos = append(pos, x)
+				x++ // 竖线占 1 列
+			} else {
+				x += tuiColGap
+			}
+		}
+		x += col.w
+	}
+	return pos
+}
+
+// modelHeadLine 拼模型表列名行 (含缩进): 统计四列之间同样画边框竖线, 与数据行
+// 竖线位次一致。
+func modelHeadLine(indent string, cols []tuiCol, vis []bool, vfull []int) string {
+	head := make([]string, len(cols))
+	for i, col := range cols {
+		head[i] = tuiTrunc(col.title, col.w)
+	}
+	return indent + tuiBold + modelJoin(cols, head, vis, vfull) + tuiReset
+}
+
+// modelGroupLine 拼组名显示行 (含左缩进): 组名文本在最左 (tuiIndent 起, 悬挂在表体
+// 外), 统计四列的边框竖线补到与数据行同列 (数据行从 modelIndent 起, 差 modelHang
+// 格), 让竖线贯穿组名行不断。
+func modelGroupLine(header string, cols []tuiCol, vis []bool, vfull []int) string {
+	pos := modelBarPos(cols, vis, vfull)
+	var b strings.Builder
+	b.WriteString(tuiIndent)
+	w := len(tuiIndent)
+	b.WriteString(header)
+	w += tuiWidth(header)
+	for _, p := range pos {
+		target := len(modelIndent) + p // 数据行的竖线屏幕列位 (组名行的内容只是更靠左)
+		if w < target {
+			b.WriteString(strings.Repeat(" ", target-w))
+			w = target
+		}
+		b.WriteString(modelBar)
+		w++
+	}
+	return b.String()
+}
+
 // drawModelTable 画第 2 张表 (模型/路由聚合): 逻辑名标题行 + 该组的 上游/模型 行;
 // 光标行反显 上游/模型 那一格, 返回它的显示行 (绝对行号, -1 = 光标不在这张表)。
 func (m *tuiModel) drawModelTable(c *tuiCanvas, rows []*modelRow, cur flowCursor, has bool) int {
@@ -311,15 +419,17 @@ func (m *tuiModel) drawModelTable(c *tuiCanvas, rows []*modelRow, cur flowCursor
 	keep := colKeep(modelCols(), data)
 	cols := pickCols(modelCols(), keep)
 	cols, vis := tableLayout(cols, pickRows(keep, data), c.cols-modelHang)
+	full := modelKeptColIdx(keep)
+	vfull := modelVisibleColIdx(cols, vis, full)
 	head := c.countLines()
-	c.line(tableHeadAt(modelIndent, cols, vis))
+	c.line(modelHeadLine(modelIndent, cols, vis, vfull))
 	if len(lines) == 0 {
 		c.line(tuiDim + modelIndent + "(空)" + tuiReset)
 	}
 	curLine := -1
 	for i, ln := range lines {
 		if ln.header != "" {
-			c.line(tuiIndent + ln.header)
+			c.line(modelGroupLine(ln.header, cols, vis, vfull))
 			continue
 		}
 		cells := pickRow(keep, ln.cells)
@@ -327,7 +437,7 @@ func (m *tuiModel) drawModelTable(c *tuiCanvas, rows []*modelRow, cur flowCursor
 			cells = markCell(cells, 0)
 			curLine = head + 1 + i
 		}
-		c.line(modelIndent + strings.Join(alignRow(cols, cells, vis), tuiColSep))
+		c.line(modelIndent + modelJoin(cols, cells, vis, vfull))
 	}
 	return curLine
 }
