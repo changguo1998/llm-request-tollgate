@@ -225,6 +225,10 @@ type modelLine struct {
 	cells              []string
 }
 
+// neverUsedTime 是没有用过的模型行的「最近」占位: mm:ss 形态, 一眼像时间而不是横线,
+// 也压不塌列 (colKeep 不会把整列当空裁掉)。
+const neverUsedTime = "--:--"
+
 // modelRouteLines 把模型队列与聚合统计拼成第 2 张表的显示行: 每个逻辑名先来一行标题
 // (只列最近用过的逻辑名; 用过逻辑名名下没进过队列的候选也占行, 见 modelRows), 再列
 // 该组的 上游/模型 行 (不加逻辑名列)。
@@ -251,15 +255,21 @@ func (m *tuiModel) modelRouteLines(rows []*modelRow) []modelLine {
 			lines = append(lines, modelLine{header: m.modelGroupHeader(r.logical)})
 			prev = r.logical
 		}
+		// 没有用过的行 (窗口内没有完成请求, Last 为零): 统计格留空 (表格按列宽补空格
+		// 对齐), 「最近」占位写 --:--, 不画 0 / --- 这些假数据; 队列 / 退避 / 锁照旧。
+		age := mages(r.Last)
+		token := humanTokens(r.Cached) + "/" + humanTokens(r.Total)
+		ttfb := ttfbCell(r.TtfbPts, now, m.rateWin, m.window)
+		perf := perfCell(r.PerfPts, now, m.rateWin, m.window, r.up, r.model, m.perfIdx)
+		if r.Last.IsZero() {
+			age, token, ttfb, perf = neverUsedTime, "", "", ""
+		}
 		// 与 modelCols 的顺序一一对应 (colKeep 按下标裁列)。
 		cells := []string{
 			marker + m.upModel(r.up, r.model),
 			strconv.Itoa(r.Queue), paused, lock,
 			// 缓存命中与总 token 合成一格 (cached/total)。
-			humanTokens(r.Cached) + "/" + humanTokens(r.Total),
-			ttfbCell(r.TtfbPts, now, m.rateWin, m.window),
-			perfCell(r.PerfPts, now, m.rateWin, m.window, r.up, r.model, m.perfIdx),
-			mages(r.Last),
+			token, ttfb, perf, age,
 		}
 		lines = append(lines, modelLine{logical: r.logical, up: r.up, model: r.model, cells: cells})
 	}

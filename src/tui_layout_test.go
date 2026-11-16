@@ -624,6 +624,13 @@ func TestFlowModelTables(t *testing.T) {
 			{Model: "kimi-k3", LeftMs: 300000, Why: "breaker"},
 		},
 	}}
+	// 加一条用过行: 没用的候选行统计格留空, 但整表只要有一行带数据, Token / 首字节 /
+	// 性能列就在 (deepseek-flash 那条带 Token)。
+	now := time.Now()
+	m.routes["m1\x00ustc\x00deepseek-flash"] = &routeRow{
+		Logical: "m1", Upstream: "ustc", Model: "deepseek-flash",
+		Reqs: 1, Total: 100, Last: now,
+	}
 	out := stripANSI(m.draw())
 	for _, s := range []string{"记账", "g2", "4/12s", "01:00", "上游", "Token",
 		"ustc/deepseek-flash", "ustc/glm-5.3", "ustc/kimi-k3"} {

@@ -101,6 +101,35 @@ func TestModelRowsExpandsUsedLogicalCandidates(t *testing.T) {
 	}
 }
 
+// 没用过的模型行: 统计格 (Token / 首字节 / 性能) 留空格对齐, 「最近」占位写 --:--;
+// 用过行照常画数值 (含 0/ 与 ---)。
+func TestModelTableUnusedRowPlaceholders(t *testing.T) {
+	m := flowFixture(t)
+	out := stripANSI(m.draw())
+	lines := strings.Split(out, "\r\n")
+	var unused, used string
+	for _, ln := range lines {
+		switch {
+		case strings.Contains(ln, "u2/real-2b"):
+			unused = ln // m2 的未用候选 (forced, 没有请求)
+		case strings.Contains(ln, "u1/real-1"):
+			used = ln // m1 的用过行
+		}
+	}
+	if used == "" || unused == "" {
+		t.Fatalf("应同时有已用与未用行:\n%s", out)
+	}
+	if !strings.Contains(unused, "--:--") {
+		t.Errorf("未用行的「最近」应占位 --:--: %q", unused)
+	}
+	if strings.Contains(unused, "0/") || strings.Contains(unused, "---") {
+		t.Errorf("未用行的统计格应留空 (空格), 不画 0/--- 假数据: %q", unused)
+	}
+	if !strings.Contains(used, "0/") || !strings.Contains(used, "---") {
+		t.Errorf("用过行的统计格应照常画: %q", used)
+	}
+}
+
 // 模型表的格子按同一口径拼: Token = cached/total, 首字节 = 最近/短均/长均/谷 四段,
 // 性能 = 最近/短均/长均/峰 四段 (每请求 r*, 无参数时退原始速率); 熔断锁红、退避黄。
 func TestDrawModelsRouteCells(t *testing.T) {
