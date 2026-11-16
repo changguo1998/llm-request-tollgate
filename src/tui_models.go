@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"sort"
 	"strconv"
@@ -318,15 +319,41 @@ func (m *tuiModel) drawModelTable(c *tuiCanvas, rows []*modelRow, cur flowCursor
 	return curLine
 }
 
-// cellDash 是四段统计里「这一段没有样本」的占位: 与数字段一样占 4 格 (两侧空格),
-// 四段的斜杠才不会被一个 1 字符的 "-" 顶歪。
+// cellDash 是四段统计里「这一段没有样本」的占位: 与性能数字段一样占 4 格 (两侧空格),
+// 四段用空格分隔, 横线不会被数字顶歪。
 const cellDash = " -- "
 
-// ttfbCell 拼首字节格 (四段斜杠): 最近一次 / 短时平均 (perfWin 性能窗) / 长时平均 (统计窗
-// 3h) / 谷值 (整窗最低); 整窗没样本与各段窗口内没样本时都写 cellDash。
+// ttfbDash 是首字节四段里「这一段没有样本」的占位: 与首字节的每个数字同宽 3 格,
+// 四段用空格分隔, 横线不会错位。
+const ttfbDash = "---"
+
+// ttfbNum 是首字节列里每个数字的写法: 单位恒为秒, 3 位有效数字, 整数部分用正常前景色,
+// 小数部分 (灰色) 最多 3 位到毫秒精度。整数部分位数不同, 小数的位数随之变化, 凑满 3 格:
+//   - 不足 1 秒 (整数位 0): 3 位灰色小数, 全灰 (补 0 到毫秒), 如 123ms 写成 灰"123";
+//   - 1 到 9.99 秒: 1 位整数 + 2 位灰色小数, 如 1.05s 写成 1 + 灰"05";
+//   - 10 到 99.9 秒: 2 位整数 + 1 位灰色小数, 如 12.3s 写成 12 + 灰"3";
+//   - 100 秒以上: 整数秒, 无小数, 超过 3 格时自然撑宽 (不截断)。
+func ttfbNum(ms int64) string {
+	if ms < 0 {
+		ms = 0
+	}
+	switch sec := ms / 1000; {
+	case sec >= 100:
+		return strconv.FormatInt(sec, 10)
+	case sec >= 10:
+		return strconv.FormatInt(sec, 10) + tuiDim + strconv.FormatInt((ms%1000)/100, 10) + tuiReset
+	case sec >= 1:
+		return strconv.FormatInt(sec, 10) + tuiDim + fmt.Sprintf("%02d", (ms%1000)/10) + tuiReset
+	default:
+		return tuiDim + fmt.Sprintf("%03d", ms) + tuiReset
+	}
+}
+
+// ttfbCell 拼首字节格 (四段用空格分隔): 最近一次 / 短时平均 (perfWin 性能窗) / 长时平均
+// (统计窗 3h) / 谷值 (整窗最低); 整窗没样本与各段窗口内没样本时都写 ttfbDash。
 func ttfbCell(pts []ttfbPoint, now time.Time, shortWin, longWin time.Duration) string {
 	if len(pts) == 0 {
-		return cellDash
+		return ttfbDash
 	}
 	shortSum, shortN := int64(0), 0
 	longSum, longN := int64(0), 0
@@ -351,19 +378,19 @@ func ttfbCell(pts []ttfbPoint, now time.Time, shortWin, longWin time.Duration) s
 	last, lok := ttfbLast(pts)
 	part := func(ms int64, ok bool) string {
 		if !ok {
-			return cellDash
+			return ttfbDash
 		}
-		return durStr(time.Duration(ms) * time.Millisecond)
+		return ttfbNum(ms)
 	}
 	return strings.Join([]string{
 		part(last, lok), part(shortAvg, shortOK),
 		part(longAvg, longOK), part(ttfbMin(pts), true),
-	}, "/")
+	}, " ")
 }
 
-// perfCell 拼性能格 (四段斜杠): 最近一次 / 短时平均 (perfWin 性能窗) / 长时平均 (统计窗 3h)
-// / 峰值 (整窗最高); 整窗没样本与各段窗口内没样本时都写 cellDash。perfIdx 为空 (远端
-// 模式无参数表) 时退化为原始速率 c/d。
+// perfCell 拼性能格 (四段用空格分隔): 最近一次 / 短时平均 (perfWin 性能窗) / 长时平均
+// (统计窗 3h) / 峰值 (整窗最高); 整窗没样本与各段窗口内没样本时都写 cellDash。perfIdx
+// 为空 (远端模式无参数表) 时退化为原始速率 c/d。
 func perfCell(pts []perfPoint, now time.Time, shortWin, longWin time.Duration, up, model string, perfIdx func(string, string, int64, int64, int64) float64) string {
 	if len(pts) == 0 {
 		return cellDash
@@ -411,7 +438,7 @@ func perfCell(pts []perfPoint, now time.Time, shortWin, longWin time.Duration, u
 	return strings.Join([]string{
 		part(lastV, true), part(shortAvg, shortN > 0),
 		part(longAvg, longN > 0), part(peak, true),
-	}, "/")
+	}, " ")
 }
 
 // modelCols 是第 1 页模型/路由聚合表的列: 按类别从左到右排, 同类相邻 ——

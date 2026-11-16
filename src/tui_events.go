@@ -484,18 +484,39 @@ func humanRate(bps float64) string {
 
 func itoa64(v int64) string { return strconv.FormatInt(v, 10) }
 
-// humanTPS 是性能列的写法: 同样固定 4 字符 —— 3 位数字 + 单位 (K/M/G/T/P); 千以内没有
-// 单位, 第 4 格写灰色的十分位数字 (12.3 写成 " 12" + 灰色 3), 与整数位一样占 1 格。
+// humanTPS 是性能列的写法: 千以上固定 3 位数字 + 单位 (K/M/G/T/P, 四舍五入); 千以内的
+// 小数用灰色、整数用前景色, 凑满 4 格 —— 不足 1 时省略整数 0, 4 位全灰小数 (万分位精度,
+// 0.01 -> 灰0100); 其余按整数位数分配灰小数位数 (8.4 -> 8 + 灰400, 12.34 -> 12 + 灰34,
+// 512.5 -> 512 + 灰5)。
 func humanTPS(v float64) string {
 	n, unit := scaled(v)
-	if unit == "" {
-		d := int(math.Round(n * 10)) // 千以内放大 10 倍, 最多 4 位 (9999)
-		if d >= 10000 {              // 999.95 以上舍入到 1000.0: 进位成 1K
-			return padLeft("1", 3) + numUnits[1]
-		}
-		return padLeft(strconv.Itoa(d/10), 3) + tuiDim + strconv.Itoa(d%10) + tuiReset
+	if unit != "" {
+		return padLeft(strconv.Itoa(int(math.Round(n))), 3) + unit
 	}
-	return padLeft(strconv.Itoa(int(math.Round(n))), 3) + unit
+	if n < 1 { // 不足 1: 4 位全灰小数 (万分位)
+		f := int(math.Round(n * 10000))
+		if f >= 10000 { // 进位到 1
+			return "1" + tuiDim + "000" + tuiReset
+		}
+		fs := strconv.Itoa(f)
+		for len(fs) < 4 {
+			fs = "0" + fs
+		}
+		return tuiDim + fs + tuiReset
+	}
+	s := int(math.Round(n * 1000)) // 1 到 999: 保留 3 位小数
+	if s >= 1000000 {              // 999.9995 以上进位成 1000
+		return padLeft("1", 3) + numUnits[1]
+	}
+	iv := s / 1000 // 整数部分
+	ints := strconv.Itoa(iv)
+	prec := 4 - len(ints) // 灰小数位数 (最多 3)
+	frac := (s % 1000) / int(math.Pow10(3-prec))
+	fracStr := strconv.Itoa(frac)
+	for len(fracStr) < prec {
+		fracStr = "0" + fracStr
+	}
+	return ints + tuiDim + fracStr + tuiReset
 }
 
 // plainTPS 是纯文本写法 (阶段链尾的实时速率用): 千以内保留一位小数, 千以上缩写,
