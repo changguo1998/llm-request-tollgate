@@ -5,7 +5,7 @@
 ## 版本号
 
 - 版本号采用语义化版本 (MAJOR.MINOR.PATCH), 定义在 `src/version.go` 的
-  `var version` (当前 `0.1.0`), 由 `GET /version` 接口对外返回, 不与 git commit 绑定。
+  `var version` (当前 `0.2.0`), 由 `GET /version` 接口对外返回, 不与 git commit 绑定。
 - **任何代码变更 (修复缺陷 / 新功能 / 重构 / 行为调整) 提交前, 必须同步递增版本号**:
   - 修复缺陷: PATCH +1 (0.1.0 -> 0.1.1);
   - 新功能或对外行为变化: MINOR +1 (0.1.x -> 0.2.0);

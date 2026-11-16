@@ -185,7 +185,10 @@ func (m *tuiModel) drawHeader(c *tuiCanvas) {
 		live = tuiRed + "no-state" + tuiReset
 	}
 	// 第 1 行整行都用前景色 (只有程序名加粗): 灰字在深色终端上太弱。
-	c.line(tuiIndent + tuiBold + "tollgate tui" + tuiReset + "  观测 " + src +
+	// 版本号 (buildVersion) 跟着程序名, 用灰字弱化, 不抢观测信息。
+	c.line(tuiIndent + tuiBold + "tollgate tui" + tuiReset +
+		" " + tuiDim + buildVersion() + tuiReset +
+		"  观测 " + src +
 		"   监听 " + m.listen + "   日志 " + m.logPath)
 	// 第 2 行实时状态: 此刻正在发生什么 (连接 / 路由 / 首字节 / 字节速率 / 运行 / 窗口)。
 	// 第 3 行统计状态: 窗口内的累计计数 (读日志 / 请求 / 错误 / 换候选 / token), 报错放行末。

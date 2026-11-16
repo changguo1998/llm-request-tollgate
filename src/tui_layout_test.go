@@ -91,6 +91,28 @@ func TestDrawFillsTerminalHeight(t *testing.T) {
 	}
 }
 
+// 头部第一行带 TUI 自身版本号 (灰字), 与 HTTP /version 同一来源 (buildVersion)。
+func TestTUIVersionInHeader(t *testing.T) {
+	m := newTUIModel("cfg")
+	m.stateURL = "http://127.0.0.1:8787"
+	m.listen = "127.0.0.1:8787"
+	m.logPath = "var/requests.jsonl"
+	m.live = true
+	c := &tuiCanvas{cols: 200}
+	m.drawHeader(c)
+	out := c.b.String()
+	if !strings.Contains(out, "tollgate tui") {
+		t.Fatalf("头部应含 TUI 名: %q", out)
+	}
+	if !strings.Contains(out, tuiDim+buildVersion()+tuiReset) {
+		t.Errorf("头部应带灰字版本号 %q: %q", buildVersion(), out)
+	}
+	first := strings.SplitN(out, "\r\n", 2)[0]
+	if !strings.HasPrefix(stripANSI(first), tuiIndent+"tollgate tui "+buildVersion()) {
+		t.Errorf("第一行应以 程序名+版本号 开头: %q", stripANSI(first))
+	}
+}
+
 // stripANSI 去掉 CSI 序列, 只留可见文本 (缩进断言要看可见列)。
 func stripANSI(s string) string {
 	var b strings.Builder
