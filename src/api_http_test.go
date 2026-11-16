@@ -170,6 +170,44 @@ func TestHTTPServeModelsAndState(t *testing.T) {
 	}
 }
 
+// /version: 返回构建版本号 (GET 200 且非空; 其它方法 405)。
+func TestHTTPServeVersion(t *testing.T) {
+	app := newTestApp(t, "http://127.0.0.1:1/v1", GateCfg{}, nil)
+	proxy := httptest.NewServer(app)
+	defer proxy.Close()
+
+	resp, err := http.Get(proxy.URL + "/version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/version 应返回 200, 得到 %d (%s)", resp.StatusCode, b)
+	}
+	var v struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		t.Fatalf("版本载荷不是合法 JSON: %v (%s)", err, b)
+	}
+	if v.Version == "" {
+		t.Errorf("version 不应为空: %s", b)
+	}
+	if want := buildVersion(); v.Version != want {
+		t.Errorf("version 应为 buildVersion() 的值 %q, 得到 %q", want, v.Version)
+	}
+
+	// POST 不是 /version 的方法。
+	code, msg := postJSON(t, proxy.URL+"/version", `{}`)
+	if code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /version 应返回 405, 得到 %d", code)
+	}
+	if c, m := errOf(t, msg); c != "method_not_allowed" || !strings.Contains(m, "only GET") {
+		t.Errorf("405 的错误体不对: code=%q msg=%q", c, m)
+	}
+}
+
 // /v1/models 的模型参数按逻辑名的候选聚合: reasoning 任一候选声明即 true,
 // thinkingLevelMap 按等级并集合并 (有同名映射取同名, 否则取最低 effort; 全候选都
 // 显式 null 的等级保持 null), contextWindow / maxTokens 取最小值。

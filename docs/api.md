@@ -13,6 +13,7 @@
 | `/v1/chat/completions` | POST | 转发 chat completions (替换凭据 / 调度 / fallback / 记账) | 客户端, 即各 agent |
 | `/v1/responses` | POST | 转发 Responses API, 同一链路 | 客户端, 即各 agent |
 | `/v1/models` | GET | 逻辑模型名清单 + 聚合后的模型参数 (不暴露真实上游 id) | 客户端与运维 |
+| `/version` | GET | 构建版本号 (编译期注入或嵌入的 git 提交) | 运维 |
 | `/state` | GET | 只读观测面: 进行中的请求 + 候选调度状态 + 事件 | 运维 (TUI) |
 | `/unlock` | POST | 调试用强制解锁: 清掉内存里的锁与失败计数. query: `upstream` (+ `model`, 只清该 上游/模型 的熔断锁与退避) / `upstream` + `group` (只清该记账组的额度锁, `def` = 默认组; `group` 不能单独给, 否则 400) / `upstream` 单独 (清该上游全部锁) / 都不给 (清全部候选) | 运维 (调试) |
 | `/sticky` | POST | 人工改粘性偏好: query `logical` + `upstream` (+ `model`, 省略取该上游首个) 置一次; 不给 `upstream` 则清除 (`logical` 省略清全部) | 运维 |
@@ -253,6 +254,20 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
   带上游专属色, `events` 标识列的逻辑名带专属色 (加粗; 按窗口内请求的结束时刻做 10min
   高斯衰减求和排序, 同权重按字典序).
 - 其余方法返回 405.
+
+### 6.3 GET /version
+
+返回构建版本号, 供运维确认跑的是哪一版:
+
+```json
+{ "version": "1fc741d" }
+```
+
+- `version`: 语义化版本号 (当前 `0.1.0`), 定义在 `src/version.go` 的 `var version`,
+  随代码变更递增 (规则见根目录 AGENTS.md); 常规构建直接用源码里的版本,
+  发布构建可用 `make VERSION=x build` 覆盖注入, 都不经 make 时回退为二进制嵌入的
+  git 提交号, 都拿不到写 `dev`.
+- 其它方法返回 405.
 
 ## 7. JSONL 请求日志 (每行一笔)
 

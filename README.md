@@ -46,7 +46,8 @@
      逐次翻倍 (基础 ×2/×4/×8 封顶), 免得「放行一笔又锁上」的周期抖动.
 06. 响应整形: 非流 / 流式 chunk 里的 `model` 字段改回请求的逻辑名,
     对外隐藏真实上游 id。
-07. 运维面: `GET /v1/models` 返回逻辑名清单与聚合后的模型参数; 请求头
+07. 运维面: `GET /v1/models` 返回逻辑名清单与聚合后的模型参数; `GET /version` 返回
+    构建版本号; 请求头
     `X-Tollgate-Source` 记入日志 `source` 字段; `-summary` 汇总请求日志; `deploy/` +
     `test/healthcheck.example.sh` 常驻与自检。
 08. 集中 fallback: 候选按序尝试, 只有 200 算成功; 首字节前其余状态码与传输失败都进候选
@@ -351,7 +352,7 @@ token) 与 `-usage` (上游 + 模型 × 窗口的 token 分解)。
 ## 当前边界
 
 - 转发覆盖 `POST /v1/chat/completions` 与 `POST /v1/responses` (O5); `GET /v1/models`
-  返回逻辑名清单与模型参数 (O5)。只读观测面: `GET /state`。调试用 `POST /unlock` 强制解锁
+  返回逻辑名清单与模型参数 (O5), `GET /version` 返回构建版本号。只读观测面: `GET /state`。调试用 `POST /unlock` 强制解锁
   (清掉运行中代理内存里的锁与失败计数: `?upstream=` 清该上游全部锁, 再加 `model=` 只清该
   上游/模型, 加 `group=` (默认组写 `def`) 只清该记账组的额度锁, 都不给清全部);
   `POST /sticky` 人工置一次偏好 (`?logical=&upstream=&model=`, 不给 upstream 即清除,

@@ -12,6 +12,10 @@ export GOCACHE
 BIN := llm-request-tollgate
 SRC := src
 
+# 版本号: 真源在 src/version.go 的 var version (当前 0.1.0), 常规构建直接编译进去;
+# 需要覆盖 (如发布构建) 时 make VERSION=x build, 经 -ldflags 注入。
+VERSION ?=
+
 .PHONY: help build vet test selftest healthcheck install fmt check
 
 help:
@@ -26,7 +30,7 @@ help:
 	@echo "  check       提交前检查 (vet + test + fmt)"
 
 build:
-	cd $(SRC) && go build -o ../$(BIN) .
+	cd $(SRC) && go build $(if $(strip $(VERSION)),-ldflags "-X main.version=$(VERSION)",) -o ../$(BIN) .
 
 vet:
 	cd $(SRC) && go vet ./...

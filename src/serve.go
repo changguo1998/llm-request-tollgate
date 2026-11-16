@@ -42,6 +42,15 @@ func (a *App) serveSide(w http.ResponseWriter, r *http.Request) bool {
 			return true
 		}
 		a.serveModels(w)
+	case "/version":
+		// 版本查询: 返回构建版本号 (编译期注入或嵌入的 git 提交)。登录不需要认证。
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+				"only GET /version")
+			return true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"version": buildVersion()})
 	default:
 		return false
 	}
