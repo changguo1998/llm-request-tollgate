@@ -199,9 +199,10 @@ func (m *tuiModel) upstreamRow(cand candView, maxNamed int) []string {
 }
 
 // upstreamCols 是上游表的列: 前 5 列固定, 命名记账组各占一列 (空标题)。
+// 这张表按机构 (供应商) 聚合状态, 首列写供应商 id。
 func upstreamCols(maxNamed int) []tuiCol {
 	cols := []tuiCol{
-		{"上游", tuiWidth("上游"), true, false, 4},
+		{"供应商", tuiWidth("供应商"), true, false, 4},
 		// 并发列基准 8 格: 容得下 "3(+1)/10" 这种带超发试探标记的写法。
 		{"并发", 8, true, true, 2},
 		// 排队列最小 6 格: 容得下 "1/1.0s" 这种带等节拍的写法, 不被压成半截。
@@ -448,12 +449,15 @@ func perfCell(pts []perfPoint, now time.Time, shortWin, longWin time.Duration, u
 // 这样与第 1 页和其它表一样, 列与列之间视觉上只隔 1 格。
 func modelCols() []tuiCol {
 	return []tuiCol{
-		{"上游/模型", 20, true, false, 4},
+		// 首列是「上游」= 供应商 + 模型 (一行一个上游, 列内写 供应商/真模型 id)。
+		{"上游", 20, true, false, 4},
 		{"排队", 2, true, true, 0}, {"退避", 4, true, true, 4}, {"熔断", 5, true, true, 4},
 		// Token 一格写 cached/total (两段各 4 字符); 首字节写 最近/短均/长均/谷 四段
-		// (短 = perfWin 性能窗, 长 = 统计窗 3h)。
-		{"Token", 9, true, true, 3}, {"首字节", 22, true, true, 3},
-		// 性能列写 最近/短均/长均/峰 四段 (每笔请求 r*), 每段固定 4 字符, 四段加 3 个斜杠 = 19。
+		// (短 = perfWin 性能窗, 长 = 统计窗 3h), 每段固定 3 字符 (整数 + 灰色小数到毫秒),
+		// 四段用空格分隔, 3 个空格 = 15。
+		{"Token", 9, true, true, 3}, {"首字节", 15, true, true, 3},
+		// 性能列写 最近/短均/长均/峰 四段 (每笔请求 r*), 每段固定 4 字符, 四段用空格分隔
+		// (3 个空格) = 19。
 		{"性能", 19, true, true, 4},
 		{"最近", 6, true, true, 2},
 	}

@@ -603,7 +603,7 @@ func TestFlowModelTables(t *testing.T) {
 		},
 	}}
 	out := stripANSI(m.draw())
-	for _, s := range []string{"记账", "g2", "4/12s", "01:00", "上游/模型", "Token",
+	for _, s := range []string{"记账", "g2", "4/12s", "01:00", "上游", "Token",
 		"ustc/deepseek-flash", "ustc/glm-5.3", "ustc/kimi-k3"} {
 		if !strings.Contains(out, s) {
 			t.Errorf("active 页缺少 %q", s)
@@ -636,7 +636,7 @@ func TestModelsColumnGroups(t *testing.T) {
 		got = append(got, c.title)
 	}
 	want := []string{
-		"上游/模型",
+		"上游",
 		"排队", "退避", "熔断",
 		"Token", "首字节", "性能",
 		"最近",
@@ -918,7 +918,7 @@ func TestModelTableHangingIndent(t *testing.T) {
 			if !strings.HasPrefix(ln, tuiIndent) || strings.HasPrefix(ln, modelIndent) {
 				t.Errorf("组名应在 %d 格缩进 (悬挂在表体外面): %q", len(tuiIndent), ln)
 			}
-		case strings.Contains(txt, "上游/模型"):
+		case strings.Contains(txt, "上游"):
 			rows++
 			if !strings.HasPrefix(ln, modelIndent) {
 				t.Errorf("列名行应在 %d 格缩进: %q", len(modelIndent), ln)
