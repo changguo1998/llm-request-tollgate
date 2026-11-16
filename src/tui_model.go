@@ -107,6 +107,8 @@ func newTUIModel(cfgPath string) *tuiModel {
 		rateWin: rateWin,
 		logPos:  map[string]int64{}, logRest: map[string][]byte{}, scannedFiles: map[string]bool{},
 		nameEnds: map[string][]time.Time{},
+		// 第 1 页刚进来时和第 1 次按 Esc 之后一样: 没有反显格, 按 j/k 才开始选行。
+		cur: flowCursor{off: true},
 	}
 	return m
 }

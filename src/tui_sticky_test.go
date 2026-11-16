@@ -445,10 +445,23 @@ func TestFlowUnlockPost(t *testing.T) {
 }
 
 // 光标移动: 上游表与模型表按页面顺序连着走, 边界停住; h/l 在上游行里换目标格
-// (上游名 / 默认组 / 命名组), 模型行只有一格。
+// (上游名 / 默认组 / 命名组), 模型行只有一格。刚进来没有光标 (与 Esc 之后一样),
+// 第一次 j 选第一行, k 选最后一行。
 func TestFlowCursorMoves(t *testing.T) {
 	m := flowFixture(t)
-	m.flowMove(1) // 初始在 u1 上游名 -> u2
+	if !m.cur.off {
+		t.Fatalf("刚进来不该有光标: %+v", m.cur)
+	}
+	m.flowMove(-1) // 没有光标时 k 直接选最后一行 (m2/u2/real-2)
+	if m.cur.off || m.cur.table != 1 || m.cur.logical != "m2" || m.cur.model != "real-2" {
+		t.Fatalf("没光标时 k 应选最后一行: %+v", m.cur)
+	}
+	m.cur = flowCursor{off: true} // 回到刚进来的状态
+	m.flowMove(1)                 // 没有光标时 j 选第一行 (u1 上游名)
+	if m.cur.off || m.cur.table != 0 || m.cur.up != "u1" || !m.cur.name {
+		t.Fatalf("没光标时 j 应选第一行: %+v", m.cur)
+	}
+	m.flowMove(1) // -> u2
 	if m.cur.table != 0 || m.cur.up != "u2" || !m.cur.name {
 		t.Fatalf("j 应到 u2 的上游名: %+v", m.cur)
 	}

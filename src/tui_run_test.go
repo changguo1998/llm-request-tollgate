@@ -129,6 +129,7 @@ func TestEscClearsFlowCursor(t *testing.T) {
 // 留在 pending 里, 也不去动第 1 页的光标。
 func TestEscCancelsPrompt(t *testing.T) {
 	m := flowFixture(t)
+	m.cur = flowCursor{table: 0, up: "u1", name: true} // 先选一行, 看 Esc 会不会误清
 	var pending []byte
 	m.tab = tabSettings
 	m.prio = &tuiEditor{prompt: &tuiPrompt{label: "新的优先级数值:"}}
@@ -140,8 +141,41 @@ func TestEscCancelsPrompt(t *testing.T) {
 	if quit := m.handleKeyEv(tuiKey{esc: true}, &pending); quit || m.evPrompt != nil {
 		t.Fatalf("events 页 Esc 应取消输入: quit=%v prompt=%v", quit, m.evPrompt)
 	}
-	if m.cur.off {
-		t.Errorf("events 页的 Esc 不该清第 1 页光标")
+	if m.cur.off || m.cur.up != "u1" {
+		t.Errorf("events 页的 Esc 不该清第 1 页光标: %+v", m.cur)
+	}
+}
+
+// 第 1 页刚进来时和第 1 次按 Esc 之后一样: 两张表都不选中 (没有反显格), 按 j/k 才开始选行,
+// 没选中行时 u 只提示先选一行。
+func TestFlowCursorStartsCleared(t *testing.T) {
+	m := flowFixture(t)
+	if !m.cur.off {
+		t.Fatalf("刚进来不该有光标: %+v", m.cur)
+	}
+	raw := m.draw()
+	// 两张表的 上游名 与 上游/模型 格都不该反显 (页签的反显不算)。
+	for _, id := range []string{"u1", "u2"} {
+		c := m.upColors[id]
+		for _, want := range []string{c + id, " " + c + id} {
+			if strings.Contains(raw, tuiRev+want) {
+				t.Errorf("刚进来不该有反显的光标格 (%s)", id)
+			}
+		}
+		if strings.Contains(raw, tuiRev+c+id+"/") || strings.Contains(raw, tuiRev+" "+c+id+"/") {
+			t.Errorf("刚进来不该有反显的模型行 (%s)", id)
+		}
+	}
+	m.flowUnlock()
+	if !m.flowErr || !strings.Contains(m.flowMsg, "j/k") {
+		t.Errorf("没选中行时解锁应提示先选一行: %q", m.flowMsg)
+	}
+	var pending []byte
+	if quit := m.handleKey('j', &pending); quit {
+		t.Fatalf("j 不该退出")
+	}
+	if m.cur.off || m.cur.up != "u1" || !m.cur.name {
+		t.Errorf("j 应选第一行: %+v", m.cur)
 	}
 }
 
