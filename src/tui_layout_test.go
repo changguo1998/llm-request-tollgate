@@ -952,8 +952,8 @@ func TestModelTableHangingIndent(t *testing.T) {
 			}
 		}
 	}
-	if headers != 2 || rows != 3 {
-		t.Errorf("应有 2 个组名与 3 行表体 (列名行 + 2 行数据), 实为 %d / %d:\n%s",
+	if headers != 2 || rows != 5 {
+		t.Errorf("应有 2 个组名与 5 行表体 (列名行 + 4 行数据: 两笔用过 + 两行展开的未用候选), 实为 %d / %d:\n%s",
 			headers, rows, strings.Join(lines, "\n"))
 	}
 }

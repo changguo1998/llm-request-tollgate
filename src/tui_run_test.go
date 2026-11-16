@@ -111,7 +111,8 @@ func TestEscClearsFlowCursor(t *testing.T) {
 		t.Errorf("没选中行时解锁应提示先选一行: %q", m.flowMsg)
 	}
 
-	// j 重新选起 = 第一行; 再 Esc 后 k = 最后一行。
+	// j 重新选起 = 第一行; 再 Esc 后 k = 最后一行 (m2 组最末: 用过但不在 m2 候选链的
+	// real-2)。
 	if quit := m.handleKey('j', &pending); quit {
 		t.Fatalf("j 不该退出")
 	}

@@ -81,8 +81,9 @@ func groupCell(g candGroup, isDefault bool) string {
 }
 
 // drawModelsBody 把模型视角的两张表画在第 1 页最上面, 与下面的请求表一起滚动: 先上游
-// 状态 (并发 / 排队 / 错误 / 记账组锁), 再列有过请求的 上游/模型 队列与路由聚合。两张表
-// 不画标题 (列名行保留), 表与表之间空一行; 只出现实际上游/模型, 不按配置候选铺开; 第二张
+// 状态 (并发 / 排队 / 错误 / 记账组锁), 再列 上游/模型 的队列与路由聚合。两张表
+// 不画标题 (列名行保留), 表与表之间空一行; 上游表只出现实际上游, 模型表在逻辑名
+// 最近用过时把它名下配置的全部候选都铺开 (未用行全 0 / - 也占位); 第二张
 // 表每个逻辑名先来一行标题 (逻辑名 + 粘性倒计时), 只列最近用过的逻辑名。返回光标所在的
 // 显示行 (从内容区第一行算起, -1 = 没有光标)。
 func (m *tuiModel) drawModelsBody(full *tuiCanvas) int {
@@ -225,7 +226,8 @@ type modelLine struct {
 }
 
 // modelRouteLines 把模型队列与聚合统计拼成第 2 张表的显示行: 每个逻辑名先来一行标题
-// (只列最近用过的逻辑名), 再列该组的 上游/模型 行 (不加逻辑名列)。
+// (只列最近用过的逻辑名; 用过逻辑名名下没进过队列的候选也占行, 见 modelRows), 再列
+// 该组的 上游/模型 行 (不加逻辑名列)。
 func (m *tuiModel) modelRouteLines(rows []*modelRow) []modelLine {
 	lines := make([]modelLine, 0, len(rows)+4)
 	prev := ""
@@ -477,6 +479,9 @@ type modelRow struct {
 	TtfbPts            []ttfbPoint // 窗口内各请求的首字节时延样本 (平均/谷值用)
 	PerfPts            []perfPoint // 窗口内各请求的性能样本 (r* 算术平均用)
 	Last               time.Time
+	// forced 表示这行是「最近用过的逻辑名的配置候选」强制带进来的: 全 0 / - 也显示,
+	// 让从没进过队列的 上游/模型 也能被光标选中 (置粘性偏好) 与标记。
+	forced bool
 }
 
 // blank 判断这一行是否全无数据: 队列 / 退避 / 熔断 / 请求 / 错误 / 换候选 /
@@ -504,23 +509,58 @@ func (m *tuiModel) sweepRoutes() {
 }
 
 // modelRows 合并观测面里的模型队列与日志聚合, 按 逻辑名 分组 (同一逻辑名的候选相邻):
-// 只保留真正有过请求的 上游/模型; 所有数据都是 0 / - 的行 (配置里有、但从没请求过)
-// 不进表。观测面的队列 / 锁状态没有逻辑名维度, 按 上游/模型 补到引用它的每组 —
-// 引用关系先查配置 aliases: 只要某逻辑名的候选链包含该 (上游/模型), 就归到那个组
-// (即使窗口内没日志); 配置里也找不到的才落空逻辑名组 (排最末)。
+// 保留真正有过请求的 上游/模型; 逻辑名最近用过 (有非空行) 时, 名下配置的全部候选
+// 也带进来 (从没请求过的强制显示, 供光标选中与粘性标记); 观测面的队列 / 锁状态没有
+// 逻辑名维度, 按 上游/模型 补到引用它的每组 — 引用关系先查配置 aliases: 只要某逻辑名
+// 的候选链包含该 (上游/模型), 就归到那个组 (即使窗口内没日志); 配置里也找不到的才落
+// 空逻辑名组 (排最末); 全 0 / - 且没被用过逻辑名点名的行不进表。组内行按配置候选链
+// 的优先级排序 (与 settings 页面板同口径), 组间仍按最近请求时间。
 func (m *tuiModel) modelRows() []*modelRow {
 	by := modelRowIndex{}
 	m.mergeRouteRows(by)
-	m.mergeCandRows(by, m.aliasOwners())
+	ix := m.loadAliasIndex()
+	m.mergeCandRows(by, ix.owners)
+	used := usedLogicalNames(by)
+	m.forceUsedCandidates(by, ix.owners, used)
 	out := make([]*modelRow, 0, len(by))
 	for _, r := range by {
-		if r.blank() {
-			continue // 全是 0 / - 的行没有信息量 (只是配置里有这个模型), 不占版面
+		if r.blank() && !r.forced {
+			continue // 全 0 / - 且没被用过逻辑名点名: 只是配置里有这个模型, 不占版面
 		}
 		out = append(out, r)
 	}
-	sortModelRows(out)
+	sortModelRows(out, ix.rank)
 	return out
+}
+
+// usedLogicalNames 返回索引里至少有一个非空行的逻辑名: 窗口内有它的请求或锁 / 队列
+// 状态才算「最近用过」; 空逻辑名 (只观测面) 不算。
+func usedLogicalNames(by modelRowIndex) map[string]bool {
+	used := map[string]bool{}
+	for _, r := range by {
+		if r.logical != "" && !r.blank() {
+			used[r.logical] = true
+		}
+	}
+	return used
+}
+
+// forceUsedCandidates 把用过逻辑名名下配置的全部候选补进索引并标 forced: 已存在的行
+// 只顺手标记, 没有的建空行 (blank 也显示)。展开只认配置候选链 (owners 的 key 是
+// "上游\x00模型", 值是该 上游/模型 的引用逻辑名们), 不看观测面有没有报过它; 配置读
+// 不到时 owners 为空, 这一步自然什么都不做。
+func (m *tuiModel) forceUsedCandidates(by modelRowIndex, owners map[string][]string, used map[string]bool) {
+	for key, logicals := range owners {
+		up, model, ok := strings.Cut(key, "\x00")
+		if !ok {
+			continue
+		}
+		for _, logical := range logicals {
+			if used[logical] {
+				by.get(logical, up, model).forced = true
+			}
+		}
+	}
 }
 
 // modelRowIndex 是 逻辑名/上游/模型 -> 聚合行 的索引, get 按需建行。
@@ -557,22 +597,35 @@ func (m *tuiModel) mergeRouteRows(by modelRowIndex) {
 	}
 }
 
-// aliasOwners 读配置的候选链, 返回 (上游, 真实模型) -> 引用它的逻辑名们 (候选链顺序
-// 不算顺序, 只数集合)。组 (别名的别名) 展开后与逻辑名同属一张候选表, 组名也是引用它的
-// 逻辑名。配置读不到 (如 -tui 时 cfgPath 缺失) 返回空表, 退回纯日志分组的老行为。
-func (m *tuiModel) aliasOwners() map[string][]string {
-	owner := map[string][]string{}
+// aliasIndex 是一次配置读取得到的候选索引: owners 是 (上游, 真实模型) -> 引用它的
+// 逻辑名们 (mergeCandRows / forceUsedCandidates 用), rank 是 逻辑名 -> (上游, 模型)
+// 在候选链里的下标 (0 = 最高优先级, 与 settings 页面板 / 运行时候选链同口径;
+// sortModelRows 用)。
+type aliasIndex struct {
+	owners map[string][]string
+	rank   map[string]map[[2]string]int
+}
+
+// loadAliasIndex 读配置展开候选链 (组展开后组名也算逻辑名), 建 owners 与 rank;
+// 配置读不到 (如 -tui 时 cfgPath 缺失) 两表均为空, 调用方按无配置处理。
+func (m *tuiModel) loadAliasIndex() aliasIndex {
+	var ix aliasIndex
 	c, err := loadConfigOpt(m.cfgPath, true)
 	if err != nil {
-		return owner
+		return ix
 	}
+	ix.owners = map[string][]string{}
+	ix.rank = map[string]map[[2]string]int{}
 	for logical, list := range c.expandedAliases() {
-		for _, tgt := range list {
-			k := tgt[0] + "\x00" + tgt[1]
-			owner[k] = append(owner[k], logical)
+		idx := make(map[[2]string]int, len(list))
+		for i, pair := range list {
+			idx[pair] = i
+			key := pair[0] + "\x00" + pair[1]
+			ix.owners[key] = append(ix.owners[key], logical)
 		}
+		ix.rank[logical] = idx
 	}
-	return owner
+	return ix
 }
 
 // mergeCandRows 把观测面的队列 / 锁状态补进索引, 已有同 上游/模型 的行 (任意逻辑名)
@@ -609,8 +662,10 @@ func applyCandState(r *modelRow, md candModelLock) {
 }
 
 // sortModelRows 组间: 有逻辑名的按组内最近请求时间降序 (常用的在前), 空逻辑名 (只观测面)
-// 垫底; 组内: 最近时间降序, 同刻按请求数 / 上游 / 模型兜底 (与旧的混排口径一致)。
-func sortModelRows(out []*modelRow) {
+// 垫底; 组内: 按配置候选链的优先级排 (rank 里的下标, 0 = 首选, 与 settings 页面板
+// 同口径) — 没进过候选链的行 (配置读不到 / 候选集热加载变过) 排在被点名行之后,
+// 再按最近时间 / 请求数 / 上游 / 模型兜底。
+func sortModelRows(out []*modelRow, rank map[string]map[[2]string]int) {
 	groupLast := map[string]time.Time{}
 	for _, r := range out {
 		if r.logical != "" && r.Last.After(groupLast[r.logical]) {
@@ -630,15 +685,25 @@ func sortModelRows(out []*modelRow) {
 				return groupLast[out[i].logical].After(groupLast[out[j].logical])
 			}
 			return out[i].logical < out[j].logical
-		case !out[i].Last.Equal(out[j].Last):
-			return out[i].Last.After(out[j].Last)
-		case out[i].Reqs != out[j].Reqs:
-			return out[i].Reqs > out[j].Reqs
-		case out[i].up != out[j].up:
-			return out[i].up < out[j].up
-		default:
-			return out[i].model < out[j].model
 		}
+		ri, iok := rank[out[i].logical][[2]string{out[i].up, out[i].model}]
+		rj, jok := rank[out[j].logical][[2]string{out[j].up, out[j].model}]
+		if iok != jok {
+			return iok // 配置候选链里的排前面
+		}
+		if iok && ri != rj {
+			return ri < rj
+		}
+		if !out[i].Last.Equal(out[j].Last) {
+			return out[i].Last.After(out[j].Last)
+		}
+		if out[i].Reqs != out[j].Reqs {
+			return out[i].Reqs > out[j].Reqs
+		}
+		if out[i].up != out[j].up {
+			return out[i].up < out[j].up
+		}
+		return out[i].model < out[j].model
 	})
 }
 

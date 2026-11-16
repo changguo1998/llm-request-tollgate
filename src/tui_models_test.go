@@ -40,6 +40,67 @@ func TestModelRowsQueueForAllOwners(t *testing.T) {
 	}
 }
 
+// 用过逻辑名的配置候选全部显示: 逻辑名最近用过 (窗口内有非空行) 时, 名下配置的
+// 上游/模型 无论有没有进过队列都占一行 (未用行 blank 但 forced); 完全没用过的
+// 逻辑名仍不出现 (标题与行都没有)。
+func TestModelRowsExpandsUsedLogicalCandidates(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "tollgate.json")
+	if err := os.WriteFile(cfg, []byte(`{
+	  "upstreams":[
+	    {"id":"u1","base_url":"http://x","models":[
+	      {"id":"m-used","alias":"a"},{"id":"m-idle","alias":"a"}]},
+	    {"id":"u2","base_url":"http://y","models":[
+	      {"id":"m-twin","alias":"a"},{"id":"m-other","alias":"b"}]}
+	  ]
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newTUIModel(cfg)
+	now := time.Now()
+	m.routes = map[string]*routeRow{
+		"a\x00u1\x00m-used": {Logical: "a", Upstream: "u1", Model: "m-used",
+			Reqs: 1, Last: now},
+	}
+	m.pulse.Cands = []candView{{ID: "u1", Models: []candModelLock{{Model: "m-used"}}}}
+	rows := m.modelRows()
+	if len(rows) != 3 {
+		t.Fatalf("逻辑名 a 用过应展开全部 3 个候选, 得到 %d 行: %+v", len(rows), rows)
+	}
+	// 组内按配置候选链顺序 (与 settings 页面板同口径): u1/m-used 首选 ->
+	// u1/m-idle -> u2/m-twin; 不用过的 m-used 靠前与它最近用过无关。
+	wantOrder := []string{"u1/m-used", "u1/m-idle", "u2/m-twin"}
+	for i, r := range rows {
+		if got := r.up + "/" + r.model; got != wantOrder[i] {
+			t.Fatalf("组内应按配置优先级排: 第 %d 行 %s != %s", i, got, wantOrder[i])
+		}
+	}
+	seen := map[string]*modelRow{}
+	for _, r := range rows {
+		seen[r.up+"/"+r.model] = r
+	}
+	for _, upMod := range []string{"u1/m-used", "u1/m-idle", "u2/m-twin"} {
+		r, ok := seen[upMod]
+		if !ok {
+			t.Errorf("缺少用过逻辑名 a 的候选行 %s: %v", upMod, seen)
+			continue
+		}
+		if r.logical != "a" {
+			t.Errorf("%s 应归到 a 组, 得到 logical=%q", upMod, r.logical)
+		}
+	}
+	// 没进过队列的两个候选: blank 但 forced。
+	for _, upMod := range []string{"u1/m-idle", "u2/m-twin"} {
+		r := seen[upMod]
+		if !r.forced || !r.blank() {
+			t.Errorf("%s 应是 forced 空行: %+v", upMod, r)
+		}
+	}
+	// 逻辑名 b 没用过: 它的候选不该出现。
+	if _, ok := seen["u2/m-other"]; ok {
+		t.Errorf("没用过的逻辑名 b 的候选不该出现: %v", seen)
+	}
+}
+
 // 模型表的格子按同一口径拼: Token = cached/total, 首字节 = 最近/短均/长均/谷 四段,
 // 性能 = 最近/短均/长均/峰 四段 (每请求 r*, 无参数时退原始速率); 熔断锁红、退避黄。
 func TestDrawModelsRouteCells(t *testing.T) {

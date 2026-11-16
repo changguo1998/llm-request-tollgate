@@ -446,13 +446,15 @@ func TestFlowUnlockPost(t *testing.T) {
 
 // 光标移动: 上游表与模型表按页面顺序连着走, 边界停住; h/l 在上游行里换目标格
 // (上游名 / 默认组 / 命名组), 模型行只有一格。刚进来没有光标 (与 Esc 之后一样),
-// 第一次 j 选第一行, k 选最后一行。
+// 第一次 j 选第一行, k 选最后一行。模型表组内按配置候选链优先级排: m1 组
+// real-1 > real-2 (候选链顺序), m2 组 real-2b (在 m2 候选链里) 在 real-2 (用过但
+// 不在 m2 候选链) 之前; 没进过队列的 real-2 / real-2b 也占行。
 func TestFlowCursorMoves(t *testing.T) {
 	m := flowFixture(t)
 	if !m.cur.off {
 		t.Fatalf("刚进来不该有光标: %+v", m.cur)
 	}
-	m.flowMove(-1) // 没有光标时 k 直接选最后一行 (m2/u2/real-2)
+	m.flowMove(-1) // 没有光标时 k 直接选最后一行 (m2/u2/real-2, 用过但不在 m2 候选链)
 	if m.cur.off || m.cur.table != 1 || m.cur.logical != "m2" || m.cur.model != "real-2" {
 		t.Fatalf("没光标时 k 应选最后一行: %+v", m.cur)
 	}
@@ -465,20 +467,36 @@ func TestFlowCursorMoves(t *testing.T) {
 	if m.cur.table != 0 || m.cur.up != "u2" || !m.cur.name {
 		t.Fatalf("j 应到 u2 的上游名: %+v", m.cur)
 	}
-	m.flowMove(1) // -> 第一行模型 (m1/u1/real-1)
+	m.flowMove(1) // -> 第一行模型 (m1/u1/real-1, m1 候选链首选)
 	if m.cur.table != 1 || m.cur.logical != "m1" || m.cur.model != "real-1" {
 		t.Fatalf("j 应从上游表走到模型表第一行: %+v", m.cur)
 	}
-	m.flowMove(1) // -> 第二行模型
-	if m.cur.logical != "m2" || m.cur.model != "real-2" {
+	m.flowMove(1) // -> 第二行模型 (m1/u2/real-2, 按优先级排 real-1 之后)
+	if m.cur.logical != "m1" || m.cur.model != "real-2" {
 		t.Fatalf("j 应到第二行模型: %+v", m.cur)
 	}
+	m.flowMove(1) // -> 第三行模型 (m2/u2/real-2b, m2 候选链首选)
+	if m.cur.logical != "m2" || m.cur.model != "real-2b" {
+		t.Fatalf("j 应到第三行模型: %+v", m.cur)
+	}
+	m.flowMove(1) // -> 第四行模型 (m2/u2/real-2, 不在 m2 候选链, 垫后)
+	if m.cur.logical != "m2" || m.cur.model != "real-2" {
+		t.Fatalf("j 应到第四行模型: %+v", m.cur)
+	}
 	m.flowMove(1) // 边界: 停住
-	if m.cur.logical != "m2" {
+	if m.cur.logical != "m2" || m.cur.model != "real-2" {
 		t.Fatalf("最后一行再 j 应停住: %+v", m.cur)
 	}
-	m.flowMove(-1) // 回到第一行模型
-	if m.cur.logical != "m1" {
+	m.flowMove(-1) // -> 第三行 (m2/u2/real-2b)
+	if m.cur.logical != "m2" || m.cur.model != "real-2b" {
+		t.Fatalf("k 应到第三行: %+v", m.cur)
+	}
+	m.flowMove(-1) // -> 第二行 (m1/u2/real-2)
+	if m.cur.logical != "m1" || m.cur.model != "real-2" {
+		t.Fatalf("k 应到第二行: %+v", m.cur)
+	}
+	m.flowMove(-1) // -> 第一行 (m1/u1/real-1)
+	if m.cur.logical != "m1" || m.cur.model != "real-1" {
 		t.Fatalf("k 应回到第一行模型: %+v", m.cur)
 	}
 	m.flowMove(-1) // 回到上游表末行
