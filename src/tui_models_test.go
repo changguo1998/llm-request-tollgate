@@ -219,6 +219,55 @@ func TestDrawModelsRouteCells(t *testing.T) {
 	}
 }
 
+// 「最近」格: 组内最近一次服务的上游上绿; 有进行中请求的行值固定 0s, 同样上绿。
+func TestModelsLastCellHighlight(t *testing.T) {
+	now := time.Now()
+	m := newTUIModel("cfg")
+	m.cols = 200
+	m.rateWin, m.window = time.Hour, 3*time.Hour
+	m.routes = map[string]*routeRow{
+		"a\x00ustc\x00m1": {Logical: "a", Upstream: "ustc", Model: "m1",
+			Reqs: 1, Total: 10, Last: now.Add(-10 * time.Minute)},
+		"a\x00ark\x00m2": {Logical: "a", Upstream: "ark", Model: "m2",
+			Reqs: 1, Total: 10, Last: now.Add(-2 * time.Minute)},
+	}
+	m.pulse.Cands = []candView{
+		{ID: "ustc", Models: []candModelLock{{Model: "m1"}}},
+		{ID: "ark", Models: []candModelLock{{Model: "m2"}}},
+	}
+	c := &tuiCanvas{cols: m.cols}
+	m.drawModelsBody(c)
+
+	// 组内最近一次是 ark/m2 (Last 最晚): 它的「最近」格上绿; ustc/m1 不是, 不上绿。
+	recent := tuiGreen + mages(now.Add(-2*time.Minute)) + tuiReset
+	stale := tuiGreen + mages(now.Add(-10*time.Minute)) + tuiReset
+	if !strings.Contains(c.b.String(), recent) {
+		t.Errorf("最近一次服务的上游的「最近」格应上绿 %q:\n%s", recent, stripANSI(c.b.String()))
+	}
+	if strings.Contains(c.b.String(), stale) {
+		t.Errorf("非最近一次的行不该上绿: %q", stale)
+	}
+
+	// ustc/m1 上有一笔进行中请求 (不是组内最近): 「最近」固定 0s 且上绿。
+	m.pulse.Active = []flow{{Logical: "a", Up: "ustc", Model: "m1"}}
+	c = &tuiCanvas{cols: m.cols}
+	m.drawModelsBody(c)
+	zero := tuiGreen + "0s" + tuiReset
+	if !strings.Contains(c.b.String(), zero) {
+		t.Errorf("进行中请求所在行「最近」应固定 0s 且上绿 %q:\n%s", zero, stripANSI(c.b.String()))
+	}
+	if !strings.Contains(c.b.String(), recent) {
+		t.Errorf("组内最近一次的行仍应上绿 %q", recent)
+	}
+	// 进行中请求还没落到候选 (parse 阶段, Up 空): 不命中任何行, 「最近」照旧。
+	m.pulse.Active = []flow{{Logical: "a", Stage: stageParse}}
+	c = &tuiCanvas{cols: m.cols}
+	m.drawModelsBody(c)
+	if strings.Contains(c.b.String(), zero) {
+		t.Errorf("候选未知的进行中请求不该把「最近」置 0")
+	}
+}
+
 // 第 1 页上游表: 记账组列数取各行最大值, 组数少的行补空; 队列后面跟下一个发车时刻。
 func TestDrawModelsUpstreamTable(t *testing.T) {
 	m := newTUIModel("cfg")
