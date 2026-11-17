@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"strconv"
+	"time"
 )
 
 // flowCursor 是第 1 页的光标锚点。
@@ -191,6 +192,21 @@ func (m *tuiModel) flowMove(d int) {
 func (m *tuiModel) clearFlowCursor() {
 	m.cur = flowCursor{off: true}
 	m.curFollow = false
+}
+
+// tuiFlowIdle 是第 1 页操作反馈与行光标的闲置超时: 超过此时长没有按键, 反馈自动清掉、
+// 光标自动隐藏 (见 flowIdleExpire)。
+const tuiFlowIdle = 10 * time.Second
+
+// flowIdleExpire 是闲置超时清理: 距上次按键满 tuiFlowIdle 后, 清掉操作反馈并隐藏行光标
+// (等效于按了一次 Esc), 免得反馈与反显格留太久。主循环每秒调一次; 中途有按键就由
+// handleKeyEv 重置 lastAct, 不算超时。
+func (m *tuiModel) flowIdleExpire() {
+	if time.Since(m.lastAct) < tuiFlowIdle {
+		return
+	}
+	m.flowMsg, m.flowErr = "", false
+	m.clearFlowCursor()
 }
 
 // flowCol 左右移动光标 (h/l): 上游行在 上游名 / 默认组 / 命名的组合格之间走;

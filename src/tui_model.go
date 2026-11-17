@@ -65,6 +65,7 @@ type tuiModel struct {
 	curFollow bool
 	flowMsg   string
 	flowErr   bool
+	lastAct   time.Time // 上次按键的时刻: 无操作超时清反馈 / 隐藏光标用 (见 tui_cursor.go)
 
 	prio     *tuiEditor   // settings 页 (调度参数 + 权重编辑), runTUI 里装载
 	reloadFn func() error // 同进程模式的热加载回调; 空 = 走 deploy/tollgate.sh hup
@@ -109,6 +110,8 @@ func newTUIModel(cfgPath string) *tuiModel {
 		nameEnds: map[string][]time.Time{},
 		// 第 1 页刚进来时和第 1 次按 Esc 之后一样: 没有反显格, 按 j/k 才开始选行。
 		cur: flowCursor{off: true},
+		// 闲置计时从进场起算: 满 tuiFlowIdle 没按键就清反馈藏光标 (见 flowIdleExpire)。
+		lastAct: time.Now(),
 	}
 	return m
 }

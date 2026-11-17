@@ -180,6 +180,45 @@ func TestFlowCursorStartsCleared(t *testing.T) {
 	}
 }
 
+// 无操作超时: 距上次按键满 tuiFlowIdle 后, 第 1 页的操作反馈自动清空、行光标自动隐藏
+// (等效 Esc); 中途按键重置计时, 新反馈不被下一拍清掉。flowIdleExpire 由主循环每秒调一次。
+func TestFlowIdleClearsFeedbackAndCursor(t *testing.T) {
+	m := flowFixture(t)
+	m.lastAct = time.Now()
+	m.flowOK("已解锁 u1")
+	m.cur = flowCursor{table: 0, up: "u1", name: true}
+
+	// 未超时: 反馈与光标都保持。
+	m.flowIdleExpire()
+	if m.flowMsg == "" || m.cur.off {
+		t.Fatalf("未超时不该清: msg=%q cur=%+v", m.flowMsg, m.cur)
+	}
+
+	// 满 tuiFlowIdle 没按键: 反馈清空, 光标隐藏 (off), 等效 Esc。
+	m.lastAct = time.Now().Add(-tuiFlowIdle - time.Second)
+	m.flowIdleExpire()
+	if m.flowMsg != "" || m.flowErr || !m.cur.off || m.curFollow {
+		t.Fatalf("超时后应清反馈并隐藏光标: msg=%q err=%v cur=%+v follow=%v",
+			m.flowMsg, m.flowErr, m.cur, m.curFollow)
+	}
+
+	// 超时后再按键 (走 handleKeyEv) 算新操作: 计时重置, 新反馈不被下一拍清掉。
+	var pending []byte
+	m.lastAct = time.Time{}
+	m.handleKeyEv(tuiKey{b: 'j'}, &pending)
+	if time.Since(m.lastAct) >= time.Second {
+		t.Fatalf("按键应重置闲置计时: lastAct=%v", m.lastAct)
+	}
+	if m.cur.off {
+		t.Fatalf("按键后光标应重新选中: %+v", m.cur)
+	}
+	m.flowOK("已解锁 u1")
+	m.flowIdleExpire()
+	if m.flowMsg == "" || m.cur.off {
+		t.Fatalf("新操作后反馈与光标不该被清: msg=%q cur=%+v", m.flowMsg, m.cur)
+	}
+}
+
 // tuiInputReady 是分辨 Esc 的探针: 没字节就等满超时返回 false, 有字节立刻返回 true。
 func TestInputReady(t *testing.T) {
 	r, w, err := os.Pipe()

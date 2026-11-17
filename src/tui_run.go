@@ -161,6 +161,7 @@ func runTUILoop(m *tuiModel, app *App) {
 		select {
 		case <-tick.C:
 			refresh(false)
+			m.flowIdleExpire() // 无按键满 tuiFlowIdle: 清反馈 + 隐藏行光标
 			render()
 		case <-resize:
 			render()
@@ -249,7 +250,9 @@ func (m *tuiModel) handleKey(b byte, pending *[]byte) bool {
 }
 
 // handleKeyEv 分派一个按键事件: 单独按下的 Esc 走 escKey, 其余字节照旧走 handleKey。
+// 任何按键都算一次操作, 刷新闲置计时 (flowIdleExpire 满 tuiFlowIdle 才生效)。
 func (m *tuiModel) handleKeyEv(k tuiKey, pending *[]byte) bool {
+	m.lastAct = time.Now()
 	if k.esc {
 		*pending = nil // 单独的 Esc: 没收全的转义序列作废, 不跟它拼
 		return m.escKey()
