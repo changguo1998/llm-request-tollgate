@@ -1093,6 +1093,186 @@ func TestSettingsGateSaveKeepsSymlink(t *testing.T) {
 	}
 }
 
+// 配置是软链时, 权重保存 (saveWeights -> save) 也必须写真实目标, 不能把软链换成
+// 普通文件 (与 saveGate 同一规则; 旧版 save 直接 rename 到软链路径, 会把软链替换掉)。
+func TestSettingsWeightsSaveKeepsSymlink(t *testing.T) {
+	_, real := prioFixture(t)
+	link := filepath.Join(filepath.Dir(real), "config.link.json")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("建软链: %v", err)
+	}
+	e := newTuiEditor(link)
+	if !e.usable() {
+		t.Fatalf("编辑器装载失败: %v", e.err)
+	}
+	e.focus = 0
+	e.modelSel = 0
+	row := e.selected()
+	if row == nil {
+		t.Fatalf("第 0 行应可调权重")
+	}
+	pid, mid, oldPrio := row.provider, modelID(row.model), prioOf(row.model)
+	e.adjust(1) // 调一个模型优先级, 标脏
+	if !e.dirty {
+		t.Fatalf("调优先级后应标脏")
+	}
+	e.saveWeights() // 失败会写进 e.message, 由下面的落盘断言兜住
+	// 临时文件应建在真实目标旁并被 rename 走: 软链路径旁与真实目标旁都不该有 .tmp 残留。
+	for _, residue := range []string{link + ".tmp", real + ".tmp"} {
+		if _, err := os.Lstat(residue); !os.IsNotExist(err) {
+			t.Errorf("不该留下临时文件 %s: %v", residue, err)
+		}
+	}
+	st, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("软链被替换成了普通文件")
+	}
+	raw, err := os.ReadFile(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top struct {
+		Upstreams []struct {
+			ID     string           `json:"id"`
+			Models []map[string]any `json:"models"`
+		} `json:"upstreams"`
+	}
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatalf("真实配置不是合法 JSON: %v", err)
+	}
+	for _, up := range top.Upstreams {
+		if up.ID != pid {
+			continue
+		}
+		for _, m := range up.Models {
+			if m["id"] != mid {
+				continue
+			}
+			if got := m["priority"]; got != float64(oldPrio+1) {
+				t.Errorf("真实配置应带上调整后的权重 %s/%s: priority=%#v, 期望 %d", pid, mid, got, oldPrio+1)
+			}
+			return
+		}
+	}
+	t.Fatalf("真实配置里没找到 %s/%s:\n%s", pid, mid, raw)
+}
+
+// repoRootForTest 在测试进程里定位仓库根 (生成器脚本在 repoRootFor 的三个候选里都
+// 找不到: 测试二进制目录 / 临时配置目录 / src 包目录都没有 scripts, 只能从工作目录
+// 向上找)。找不到就跳过, 与既有生成器测试同口径。
+func repoRootForTest(t *testing.T) string {
+	t.Helper()
+	start, err := os.Getwd()
+	if err != nil {
+		t.Skipf("取工作目录失败: %v", err)
+	}
+	for d := start; ; d = filepath.Dir(d) {
+		if fileExists(filepath.Join(d, "scripts", "gen_tollgate_config.py")) {
+			return d
+		}
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	t.Skip("找不到带 scripts/gen_tollgate_config.py 的仓库根")
+	return ""
+}
+
+// settings 页 s 一条龙 (调度参数 + 权重同改) 在软链配置上走完整链路:
+// saveGate + saveWeights + 生成器都必须写真实目标, 软链全程保持不被换成普通文件。
+func TestSettingsSaveRegenerateKeepsSymlink(t *testing.T) {
+	_, real := prioFixture(t)
+	root := repoRootForTest(t)
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("没有 python3")
+	}
+	link := filepath.Join(filepath.Dir(real), "config.link.json")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("建软链: %v", err)
+	}
+	m := newTUIModel(link)
+	m.prio = newTuiEditor(link)
+	m.prio.root = root // 测试里 repoRootFor 定位不到脚本, 显式指到仓库根
+	m.tab = tabSettings
+	pending := []byte{}
+	send := func(b byte) {
+		if quit := m.handleKey(b, &pending); quit {
+			t.Fatal("不该退出")
+		}
+	}
+	// 调度参数: sem_wait +500 (gate 面板)。
+	before := m.prio.gate.SemWaitMs
+	send('g')
+	m.prio.gateSel = 1
+	send('+')
+	// 权重: 选中模型 -1 (模型面板)。
+	send('m')
+	row := m.prio.selected()
+	if row == nil {
+		t.Fatal("模型面板第 0 行应可调权重")
+	}
+	pid, mid, oldPrio := row.provider, modelID(row.model), prioOf(row.model)
+	send('-')
+	if !m.prio.gateDirty || !m.prio.dirty {
+		t.Fatalf("两处改动都应标脏: gate=%v weight=%v", m.prio.gateDirty, m.prio.dirty)
+	}
+	called := false
+	m.reloadFn = func() error { called = true; return nil }
+	send('s')
+	if !called {
+		t.Fatalf("s 保存后应触发热加载")
+	}
+	st, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("一条龙保存后软链被替换成了普通文件")
+	}
+	for _, residue := range []string{link + ".tmp", real + ".tmp"} {
+		if _, err := os.Lstat(residue); !os.IsNotExist(err) {
+			t.Errorf("不该留下临时文件 %s: %v", residue, err)
+		}
+	}
+	raw, err := os.ReadFile(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Config
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("真实配置不是合法 JSON: %v", err)
+	}
+	if gg := got.gate(); gg.SemWaitMs != before+500 {
+		t.Errorf("真实配置的 sem_wait = %d, 期望 %d", gg.SemWaitMs, before+500)
+	}
+	// 生成器重写后权重还在 (模型仍声明为 -1 = 停用)。
+	var top struct {
+		Upstreams []struct {
+			ID     string           `json:"id"`
+			Models []map[string]any `json:"models"`
+		} `json:"upstreams"`
+	}
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatalf("真实配置不是合法 JSON: %v", err)
+	}
+	for _, up := range top.Upstreams {
+		if up.ID != pid {
+			continue
+		}
+		for _, model := range up.Models {
+			if model["id"] != mid {
+				continue
+			}
+			if model["priority"] != float64(oldPrio-1) {
+				t.Errorf("重生成后权重丢失 %s/%s: priority=%#v, 期望 %d", pid, mid, model["priority"], oldPrio-1)
+			}
+		}
+	}
+}
+
 // 上游列表按优先级降序; 调高某个上游后立刻重排, 选中项跟着它走。
 func TestProviderSortByPriority(t *testing.T) {
 	_, cfg := prioFixture(t)

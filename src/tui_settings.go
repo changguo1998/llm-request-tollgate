@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -330,10 +331,15 @@ func (e *tuiEditor) syncWeights() {
 // save 原子写回配置 (先写 .tmp 再 rename); 2 空格缩进, 键字典序 (map 编码的默认行为)。
 // 先把编辑态权重同步进 e.cfg, 再以磁盘上的最新配置为底 (避免盖掉刚由 saveGate 写的
 // 调度参数), 其余字段原样保留; 组内顺序也可能在模型面板里调过, groups 一并带上。
+// config.local.json 通常是软链: 写到软链的真实目标, 别把软链本身换成普通文件。
 func (e *tuiEditor) save() error {
+	target := e.config
+	if real, err := filepath.EvalSymlinks(e.config); err == nil {
+		target = real
+	}
 	e.syncWeights()
 	top := e.cfg
-	if b, err := os.ReadFile(e.config); err == nil {
+	if b, err := os.ReadFile(target); err == nil {
 		dec := json.NewDecoder(bytes.NewReader(b))
 		dec.UseNumber()
 		var fresh map[string]any
@@ -349,9 +355,9 @@ func (e *tuiEditor) save() error {
 	if err != nil {
 		return err
 	}
-	tmp := e.config + ".tmp"
+	tmp := target + ".tmp"
 	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, e.config)
+	return os.Rename(tmp, target)
 }
