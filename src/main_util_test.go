@@ -175,6 +175,26 @@ func TestServeState(t *testing.T) {
 	if p.Ver != viewVer || len(p.Active) != 1 {
 		t.Errorf("载荷不对: ver=%q active=%+v", p.Ver, p.Active)
 	}
+	if _, err := time.Parse(time.RFC3339Nano, p.StartedAt); err != nil || p.StartedAt == "" {
+		t.Errorf("载荷应带服务启动时刻 started_at: %q (err=%v)", p.StartedAt, err)
+	}
+	if p.Perf != nil {
+		t.Errorf("没有参数表时 perf 应为空, 得到 %+v", p.Perf)
+	}
+
+	// 有速度参考参数表 (每小时重算, 驻内存) 时, 载荷应带上供 TUI 性能列用。
+	app.perfRefMu.Lock()
+	app.perfRef = &PerfRef{byModel: map[string]perfParam{"u1/real-1": {G: 1.5}}}
+	app.perfRefMu.Unlock()
+	rec = httptest.NewRecorder()
+	app.serveState(rec, httptest.NewRequest(http.MethodGet, "/state?since=0", nil))
+	var p2 pulse
+	if err := json.Unmarshal(rec.Body.Bytes(), &p2); err != nil {
+		t.Fatalf("载荷不是合法 JSON: %v", err)
+	}
+	if pr, ok := p2.Perf["u1/real-1"]; !ok || pr.G != 1.5 {
+		t.Errorf("载荷应带速度参考参数表: %+v", p2.Perf)
+	}
 
 	rec = httptest.NewRecorder()
 	app.serveState(rec, httptest.NewRequest(http.MethodPost, "/state", nil))

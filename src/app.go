@@ -63,6 +63,9 @@ type App struct {
 	// 速度参考参数表 (每小时重算, 驻内存): 只存不消费, 供观察面 / TUI / 告警后续使用。
 	perfRefMu sync.RWMutex
 	perfRef   *PerfRef
+	// born 是服务进程的启动时刻: 观测面 /state 的 started_at 由它来, TUI 顶栏据此
+	// 显示服务运行时长 (分开模式不依赖 TUI 自己的启动时刻)。
+	born time.Time
 }
 
 type aliasTarget struct {
@@ -78,6 +81,7 @@ func newApp(c *Config) (*App, error) {
 		cands:     map[string]*cand{},
 		flows:     map[uint64]*flow{},
 		sticky:    newSticky(),
+		born:      time.Now(),
 	}
 	a.applyConfig(c)
 	if err := a.openLog(); err != nil {

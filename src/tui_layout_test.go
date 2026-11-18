@@ -113,6 +113,18 @@ func TestTUIVersionInHeader(t *testing.T) {
 	}
 }
 
+// 顶栏「运行」: 观测面带服务启动时刻 (分开模式) 时显示服务运行时长。
+func TestTUIHeaderServiceUptime(t *testing.T) {
+	m := newTUIModel("cfg")
+	m.live = true
+	m.pulse.StartedAt = time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339Nano)
+	c := &tuiCanvas{cols: 200}
+	m.drawHeader(c)
+	if out := stripANSI(c.b.String()); !strings.Contains(out, "运行 5s") {
+		t.Errorf("头部应显示服务运行时长 5s: %q", out)
+	}
+}
+
 // stripANSI 去掉 CSI 序列, 只留可见文本 (缩进断言要看可见列)。
 func stripANSI(s string) string {
 	var b strings.Builder

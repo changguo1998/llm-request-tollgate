@@ -228,6 +228,10 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
   的偏好直接不列出 (无倒计时, 也无 `*`); 有请求进行中的逻辑名倒计时暂停并按设定值
   (TTL 满值) 满显, 请求结束才从满值开始倒,
   TUI 用它给第 1 页模型表的分组标题画倒计时、给偏好候选行标 `*`),
+  `started_at` (服务进程的启动时刻, RFC3339Nano: TUI 顶栏「运行」优先显示服务运行
+  时长, 没有该字段 (老对端) 时退回 TUI 自己的启动时刻),
+  `perf` (速度参考参数表: `{上游/模型: {g, a, m}}`, 每小时重算; TUI 性能列按
+  `m·(c/d)·(c/b)^(−g)` 算 r*, 缺表退原始解码速率),
   `max_seq`.
 - `active` 每笔: `id` / `logical` / `source` / `path` / `stream` / `start` / `upstream` /
   `backend` / `stage` / `attempt` / `gate`; 接收中的流式请求另带 `recv_tok` (已收到的

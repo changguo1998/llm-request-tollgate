@@ -132,6 +132,12 @@ type pulse struct {
 	MissingAt string      `json:"missing_at,omitempty"`
 	// Sticky 是各逻辑名当前的粘性偏好候选 (纯内存, 无偏好时缺省不出现)。
 	Sticky map[string]stickyView `json:"sticky,omitempty"`
+	// StartedAt 是服务进程的启动时刻 (RFC3339Nano): TUI 顶栏的服务运行时长与跨重启
+	// 检测靠它; 老对端没有该字段时 TUI 退回自己的启动时刻。
+	StartedAt string `json:"started_at,omitempty"`
+	// Perf 是速度参考参数表 (上游/模型 -> g/a/m, 每小时重算): TUI 性能列据此算 r*,
+	// 缺省时退化原始速率。
+	Perf map[string]perfParam `json:"perf,omitempty"`
 }
 
 // isGateDetail 判断 Gate 是不是值得写在链尾的细节: quota / breaker / lowperf / backoff

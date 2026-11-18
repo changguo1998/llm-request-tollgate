@@ -28,6 +28,7 @@ func (m *tuiModel) pollState(app *App, since uint64) uint64 {
 		m.pulse, m.live, m.lastErr = p, true, ""
 		now := time.Now()
 		m.sampleFlowBytes(now)
+		m.setPerf(p.Perf)
 		m.mergeEvents(p.Events)
 		return p.MaxSeq
 	}
@@ -54,8 +55,18 @@ func (m *tuiModel) pollState(app *App, since uint64) uint64 {
 	m.pulse, m.live, m.lastErr = p, true, ""
 	now := time.Now()
 	m.sampleFlowBytes(now)
+	m.setPerf(p.Perf)
 	m.mergeEvents(p.Events)
 	return p.MaxSeq
+}
+
+// setPerf 从观测载荷的速度参考参数表构造性能列的参数源: 有表就用, 没有 (老对端 / 空表)
+// 保持原值 (分开模式退回 nil = 原始速率, 同进程模式保持 app.perfIndex)。
+func (m *tuiModel) setPerf(perf map[string]perfParam) {
+	if len(perf) == 0 {
+		return
+	}
+	m.perfIdx = (&PerfRef{byModel: perf}).index
 }
 
 // sampleFlowBytes 把进行中请求已转发的字节换算成每秒速率: 与上一拍比, 只累加各笔请求

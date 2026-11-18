@@ -182,12 +182,22 @@ func (a *App) inflightLogicals() map[string]bool {
 func (a *App) snapshot(since uint64) pulse {
 	evs, max := a.eventsSince(since)
 	now := time.Now()
-	return pulse{
+	p := pulse{
 		Ver:    viewVer,
 		Listen: a.listenAddr(), Now: now.Format(time.RFC3339Nano),
 		Active: a.flowActives(), Cands: a.candViews(), Events: evs, MaxSeq: max,
 		Sticky: a.stickySnapshot(),
 	}
+	if !a.born.IsZero() {
+		p.StartedAt = a.born.UTC().Format(time.RFC3339Nano)
+	}
+	// 速度参考参数表每小时整体替换 (swap 指针), 锁外读旧表是安全的。
+	a.perfRefMu.RLock()
+	if a.perfRef != nil {
+		p.Perf = a.perfRef.byModel
+	}
+	a.perfRefMu.RUnlock()
+	return p
 }
 
 // serveState 是只读观测面 (GET /state): 进行中的请求 + 候选调度状态 + 新增事件。

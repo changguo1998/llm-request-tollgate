@@ -119,7 +119,9 @@ func TestPollStateHTTP(t *testing.T) {
 			t.Errorf("since 应原样带过去, 得到 %q", got)
 		}
 		p := pulse{Ver: viewVer, Listen: "127.0.0.1:8787", MaxSeq: 9,
-			Events: []viewEvent{{Seq: 8, Ts: time.Now().Format(time.RFC3339Nano), Kind: "ok"}}}
+			StartedAt: time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339Nano),
+			Perf:      map[string]perfParam{"u1/real-1": {G: 1, M: 2}},
+			Events:    []viewEvent{{Seq: 8, Ts: time.Now().Format(time.RFC3339Nano), Kind: "ok"}}}
 		json.NewEncoder(w).Encode(p)
 	}))
 	defer srv.Close()
@@ -131,6 +133,16 @@ func TestPollStateHTTP(t *testing.T) {
 	}
 	if !m.live || m.pulse.Listen != "127.0.0.1:8787" || len(m.events) != 1 {
 		t.Errorf("HTTP 取数不对: live=%v pulse=%+v events=%+v", m.live, m.pulse, m.events)
+	}
+	// 带参数表时性能列应构造参数源并按 r* 算: r* = 2 * (1000/10000*1000) * (1000/100)^(-1) = 20。
+	if m.perfIdx == nil {
+		t.Fatalf("带参数表时应构造性能列参数源")
+	}
+	if got := m.perfIdx("u1", "real-1", 1000, 10000, 100); got != 20 {
+		t.Errorf("性能列应按参数表算 r*, 得到 %v, 期望 20", got)
+	}
+	if got := m.uptime(); got != "5s" {
+		t.Errorf("有服务启动时刻时运行时长应显示约 5s, 得到 %q", got)
 	}
 
 	// 坏载荷: 不判为在线, 记下原因。
@@ -159,5 +171,23 @@ func TestPollStateHTTP(t *testing.T) {
 	}
 	if m3.live || len(m3.pulse.Active) != 0 || !strings.Contains(m3.lastError(), "观测面接口") {
 		t.Errorf("老对端应清空载荷并提示: live=%v err=%q", m3.live, m3.lastError())
+	}
+}
+
+// uptime 顶栏「运行」: 观测面带服务启动时刻时用服务端, 否则退回 TUI 自己的启动时刻。
+func TestTUIUptime(t *testing.T) {
+	m := newTUIModel("cfg")
+	m.start = time.Now().Add(-5 * time.Second)
+	if got := m.uptime(); got != "5s" {
+		t.Errorf("无服务启动时刻应退回 TUI 自己的: %q, 期望 5s", got)
+	}
+	m.pulse.StartedAt = time.Now().Add(-3 * time.Second).UTC().Format(time.RFC3339Nano)
+	if got := m.uptime(); got != "3s" {
+		t.Errorf("有服务启动时刻应优先用服务端: %q, 期望 3s", got)
+	}
+	// 坏时间不崩, 退回 TUI 自己的。
+	m.pulse.StartedAt = "not-a-time"
+	if got := m.uptime(); got != "5s" {
+		t.Errorf("坏时间应退回 TUI 自己的: %q", got)
 	}
 }

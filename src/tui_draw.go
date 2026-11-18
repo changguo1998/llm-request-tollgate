@@ -175,6 +175,15 @@ func (m *tuiModel) prioHint() string {
 	return filepath.Base(m.prio.path)
 }
 
+// uptime 是顶栏「运行」的时长: 观测面带服务启动时刻 (started_at) 时用服务端的,
+// 否则退回 TUI 自己的启动时刻 (老对端 / 无观测面)。
+func (m *tuiModel) uptime() string {
+	if ts, err := time.Parse(time.RFC3339Nano, m.pulse.StartedAt); err == nil && !ts.IsZero() {
+		return durStr(time.Since(ts))
+	}
+	return durStr(time.Since(m.start))
+}
+
 func (m *tuiModel) drawHeader(c *tuiCanvas) {
 	src := "同进程"
 	if m.stateURL != "" {
@@ -200,7 +209,7 @@ func (m *tuiModel) drawHeader(c *tuiCanvas) {
 		"   路由 " + strconv.Itoa(len(rows)) + " 条" +
 		"   首字节 " + m.ttfbCell(a) +
 		"   流量 " + humanRate(m.flowRate) +
-		"   运行 " + durStr(time.Since(m.start)) +
+		"   运行 " + m.uptime() +
 		"   窗口 " + durStr(m.window))
 	stats := "已读日志 " + strconv.Itoa(m.scanned) + " 条   " +
 		strconv.Itoa(a.reqs) + " 请求   " + strconv.Itoa(a.errs) + " 错误   " +
