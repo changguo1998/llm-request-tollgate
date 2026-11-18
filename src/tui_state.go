@@ -57,7 +57,30 @@ func (m *tuiModel) pollState(app *App, since uint64) uint64 {
 	m.sampleFlowBytes(now)
 	m.setPerf(p.Perf)
 	m.mergeEvents(p.Events)
+	if m.markRestart(p.StartedAt) {
+		return 0 // 服务重启: 事件序号从 1 重新累计, 下一拍从 0 重新取
+	}
 	return p.MaxSeq
+}
+
+// markRestart 检测观测面启动时刻变化 (服务重启): 变化时注入一条「服务重启」标记事件
+// (第 2 页可见) 并返回 true, 调用方据此把轮询游标归零 —— 否则旧 since 比新服务的序号
+// 大, 会一路收不到新事件。空值 (老对端) 与首次见到启动时刻不算重启。
+func (m *tuiModel) markRestart(startedAt string) bool {
+	if startedAt == "" {
+		return false
+	}
+	if !m.startSeen {
+		m.startSeen = true
+		m.lastStart = startedAt
+		return false
+	}
+	if startedAt == m.lastStart {
+		return false
+	}
+	m.lastStart = startedAt
+	m.addEvent(routeEvent{Ts: time.Now(), Req: 0, Kind: "restart", Msg: "服务重启 (started_at 变化)"})
+	return true
 }
 
 // setPerf 从观测载荷的速度参考参数表构造性能列的参数源: 有表就用, 没有 (老对端 / 空表)

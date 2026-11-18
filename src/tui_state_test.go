@@ -191,3 +191,65 @@ func TestTUIUptime(t *testing.T) {
 		t.Errorf("坏时间应退回 TUI 自己的: %q", got)
 	}
 }
+
+// markRestart 检测对端重启 (started_at 变化): 注入标记事件, 空值 / 首次 / 不变不算。
+func TestMarkRestart(t *testing.T) {
+	m := newTUIModel("cfg")
+	if m.markRestart("") {
+		t.Error("空值 (老对端) 不算重启")
+	}
+	if m.markRestart("2026-11-10T00:00:00Z") {
+		t.Error("首次见到启动时刻不算重启")
+	}
+	if m.markRestart("2026-11-10T00:00:00Z") {
+		t.Error("启动时刻没变不算重启")
+	}
+	if len(m.events) != 0 {
+		t.Fatalf("没重启时不该有标记事件: %+v", m.events)
+	}
+	if !m.markRestart("2026-11-11T00:00:00Z") {
+		t.Fatal("启动时刻变了应判为重启")
+	}
+	if len(m.events) != 1 || m.events[0].Kind != "restart" {
+		t.Fatalf("重启应注入一条标记事件: %+v", m.events)
+	}
+}
+
+// pollState 在服务重启后把轮询游标归零, 并在事件流里留一条重启标记。
+func TestPollStateRestart(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		p := pulse{Ver: viewVer}
+		switch calls {
+		case 1:
+			p.StartedAt = "2026-11-10T00:00:00Z"
+			p.MaxSeq = 3
+		case 2:
+			p.StartedAt = "2026-11-11T00:00:00Z" // 服务重启
+		case 3:
+			p.Events = []viewEvent{{Seq: 2, Ts: time.Now().Format(time.RFC3339Nano), Kind: "ok", Msg: "recovered"}}
+			p.MaxSeq = 2
+		}
+		json.NewEncoder(w).Encode(p)
+	}))
+	defer srv.Close()
+
+	m := newTUIModel("cfg")
+	m.stateURL = srv.URL
+	if got := m.pollState(nil, 100); got != 3 {
+		t.Fatalf("第一次取数应返回载荷里的 max_seq (3): %d", got)
+	}
+	if got := m.pollState(nil, 3); got != 0 {
+		t.Fatalf("检测到重启应把游标归零: %d", got)
+	}
+	if len(m.events) != 1 || m.events[0].Kind != "restart" {
+		t.Fatalf("重启应注入标记事件: %+v", m.events)
+	}
+	if got := m.pollState(nil, 0); got != 2 {
+		t.Fatalf("归零后应接到新服务的事件: %d", got)
+	}
+	if len(m.events) != 2 || m.events[1].Kind != "ok" {
+		t.Fatalf("重启后的事件应被并入: %+v", m.events)
+	}
+}

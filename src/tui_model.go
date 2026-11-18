@@ -18,11 +18,15 @@ type tuiModel struct {
 	// perfIdx 是性能列的参数来源 (同进程 = app.perfIndex; 远端模式为空时退原始速率)。
 	perfIdx func(up, model string, c, d, b int64) float64
 
-	start   time.Time
-	pulse   pulse
-	live    bool
-	lastErr string
-	mu      sync.Mutex // 保护 lastErr (监听失败可能来自别的 goroutine)
+	start time.Time
+	// lastStart / startSeen 跟踪观测面的服务启动时刻 (started_at): 见到过非空值之后
+	// 再变化 = 服务重启, pollState 借此把轮询游标归零并注入「服务重启」标记 (tui_state.go)。
+	lastStart string
+	startSeen bool
+	pulse     pulse
+	live      bool
+	lastErr   string
+	mu        sync.Mutex // 保护 lastErr (监听失败可能来自别的 goroutine)
 
 	routes map[string]*routeRow
 	events []routeEvent
