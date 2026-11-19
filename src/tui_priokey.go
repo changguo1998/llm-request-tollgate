@@ -65,7 +65,8 @@ func lastLine(out, fallback string) string {
 }
 
 // prioHup 让代理吃上新配置: 同进程模式直接重载 (不依赖 systemd), 观察常驻服务时
-// 走 deploy/tollgate.sh hup 发 SIGHUP。
+// 走 deploy/tollgate.sh hup 发 SIGHUP。热加载成功后顺手重建第 3 页编辑器快照
+// (同进程时 reloadFn 已置位, 此处直接同步刷新, 不留给主循环下一拍)。
 func (m *tuiModel) prioHup() {
 	e := m.prio
 	if e == nil {
@@ -76,7 +77,12 @@ func (m *tuiModel) prioHup() {
 			e.message = "热加载失败: " + err.Error()
 			return
 		}
-		e.message = "已热加载 " + e.config
+		m.prioReloadPending.Store(false) // reloadFn 里已置位, 这里直接同步刷新
+		msg := "已热加载 " + e.config
+		if st := e.reloadFromDisk(); st != "" {
+			msg += ", " + st
+		}
+		e.message = msg
 		return
 	}
 	cmd := exec.Command(filepath.Join(e.root, "deploy", "tollgate.sh"), "hup")
@@ -86,7 +92,11 @@ func (m *tuiModel) prioHup() {
 		e.message = "hup 失败: " + lastLine(string(out), err.Error())
 		return
 	}
-	e.message = "已 hup, 代理生效"
+	msg := "已 hup, 代理生效"
+	if st := e.reloadFromDisk(); st != "" {
+		msg += ", " + st
+	}
+	e.message = msg
 }
 
 // key 处理 settings 页的一个按键; 返回 true = 请求退出 (未保存时先问一次)。

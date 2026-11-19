@@ -181,6 +181,28 @@ func (e *tuiEditor) load() error {
 	return nil
 }
 
+// reloadFromDisk 在热重载 (settings 页 h / SIGHUP) 后重建编辑器快照: 重读 store 与
+// 配置 (模型 / provider 列表与 gate 参数), 让第 3 页跟上服务进程已应用的新路由配置。
+// 有未保存改动或正在行内输入时不重建, 不覆盖用户手上的编辑。
+// 返回要拼进信息行的状态串; 空 = 正在输入, 无需提示。
+func (e *tuiEditor) reloadFromDisk() string {
+	if e.prompt != nil {
+		return "" // 行内输入中: 不在用户打字时重建列表
+	}
+	if e.dirty || e.gateDirty {
+		return "有未保存改动, 列表未刷新"
+	}
+	e.loadGate()
+	if err := e.load(); err != nil {
+		return "列表刷新失败: " + err.Error()
+	}
+	if e.err != "" {
+		return "列表刷新失败: " + e.err
+	}
+	e.err = "" // 上一轮装载失败的残留错误要清掉, 否则成功后还报旧错
+	return "列表已刷新 (" + strconv.Itoa(len(e.providers)) + " 个 provider)"
+}
+
 // cfgUpByID 是配置 upstreams 按 id 的索引, 给合并与同步用。
 func (e *tuiEditor) cfgUpByID() map[string]map[string]any {
 	out := map[string]map[string]any{}

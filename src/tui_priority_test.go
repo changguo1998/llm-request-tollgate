@@ -175,6 +175,93 @@ func TestPrioCandidateOrder(t *testing.T) {
 	}
 }
 
+// 热重载 (settings 页 h / SIGHUP) 后第 3 页应跟随磁盘上的新配置重建列表与 gate 参数;
+// 有未保存改动时不动编辑器, 避免覆盖用户手上的编辑。
+func TestSettingsHotReloadRefreshesEditor(t *testing.T) {
+	_, cfg := prioFixture(t)
+
+	read := func(t *testing.T, path string) map[string]any {
+		t.Helper()
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("读配置: %v", err)
+		}
+		var top map[string]any
+		if err := json.Unmarshal(b, &top); err != nil {
+			t.Fatalf("配置不是合法 JSON: %v", err)
+		}
+		return top
+	}
+	write := func(t *testing.T, path string, top map[string]any) {
+		t.Helper()
+		out, err := json.MarshalIndent(top, "", "    ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, out, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setPri := func(t *testing.T, top map[string]any, id string, v int) {
+		t.Helper()
+		list, _ := top["upstreams"].([]any)
+		for _, raw := range list {
+			if up, ok := raw.(map[string]any); ok && up["id"] == id {
+				up["priority"] = v
+				return
+			}
+		}
+		t.Fatalf("配置里没有上游 %s", id)
+	}
+
+	// 先给配置加一个 gate 参数, 才能验证 gate 跟随热重载。
+	top := read(t, cfg)
+	top["interval_sec"] = 1.0
+	write(t, cfg, top)
+
+	m := newTUIModel(cfg)
+	m.prio = newTuiEditor(cfg)
+	if !m.prio.usable() {
+		t.Fatalf("编辑器装载失败: %v", m.prio.err)
+	}
+	if m.prio.gate.IntervalMs != 1000 {
+		t.Fatalf("gate 应读到 interval_sec=1: %d", m.prio.gate.IntervalMs)
+	}
+	if got := strings.Join(m.prio.providers, ","); got != "group,ustc" {
+		t.Fatalf("初始应按优先级降序 (group 3 > ustc 0): %q", got)
+	}
+
+	// 有未保存改动: 热重载不动编辑器 (列表仍是旧快照)。
+	m.prio.dirty = true
+	if st := m.prio.reloadFromDisk(); st != "有未保存改动, 列表未刷新" {
+		t.Fatalf("脏态应跳过重建: %q", st)
+	}
+	if got := strings.Join(m.prio.providers, ","); got != "group,ustc" {
+		t.Fatalf("脏态热重载不该改列表: %q", got)
+	}
+	m.prio.dirty = false
+
+	// 磁盘上改配置: gate 参数 + 把 ustc 提到 group 前, 再走 h 键同一条路 (prioHup)。
+	top = read(t, cfg)
+	top["interval_sec"] = 2.5
+	setPri(t, top, "ustc", 10)
+	write(t, cfg, top)
+	m.reloadFn = func() error { return nil }
+	m.prioHup()
+	if !strings.Contains(m.prio.message, "列表已刷新") {
+		t.Fatalf("h 热加载后应写刷新信息: %q", m.prio.message)
+	}
+	if m.prio.gate.IntervalMs != 2500 {
+		t.Errorf("gate 应跟随新配置 (interval_sec=2.5): %d", m.prio.gate.IntervalMs)
+	}
+	if got := strings.Join(m.prio.providers, ","); got != "ustc,group" {
+		t.Errorf("provider 顺序应随优先级热更新 (ustc 10 > group 3): %q", got)
+	}
+	if m.prio.dirty || m.prio.gateDirty {
+		t.Error("刷新后不该有未保存状态")
+	}
+}
+
 // 预览的顺序必须和生成器落进配置的一致 —— 这是当初手写排序最怕漂移的地方,
 // 所以直接拿真生成器跑一遍对答案 (没 python3 就跳过)。生成器输出已无顶层 aliases,
 // 逻辑名在 models[].alias 上, 测试用 cfg.rebuildAliases() 重建出候选表再对照。

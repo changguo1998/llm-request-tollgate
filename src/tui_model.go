@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -73,6 +74,9 @@ type tuiModel struct {
 
 	prio     *tuiEditor   // settings 页 (调度参数 + 权重编辑), runTUI 里装载
 	reloadFn func() error // 同进程模式的热加载回调; 空 = 走 deploy/tollgate.sh hup
+	// prioReloadPending 是信号 goroutine 抛给主循环的位: 热加载成功后置位, 主循环
+	// 在下一拍 drainPrioReload 重建第 3 页编辑器快照 (不在信号 goroutine 里动 TUI 状态)。
+	prioReloadPending atomic.Bool
 
 	// 第 1 页上游表的排序键 (provider 优先级), 按配置的 mtime 失效 (权重在配置文件里)。
 	provRank    map[string][2]int

@@ -100,6 +100,8 @@ func startTUIProxy(cfgPath string, m *tuiModel) *App {
 		}
 		app.applyConfig(c)
 		app.evAdd("reload", "", "", "", "reload ok: "+cfgPath)
+		// 置位让主循环把热加载同步到第 3 页编辑器 (信号 goroutine 只置位, 不动 TUI 状态)。
+		m.prioReloadPending.Store(true)
 		return nil
 	}
 	// SIGHUP 热加载别名与上游 (与常驻模式同一语义)。
@@ -146,6 +148,7 @@ func runTUILoop(m *tuiModel, app *App) {
 		out.Flush()
 	}
 	refresh := func(force bool) {
+		m.drainPrioReload()
 		if !force && time.Since(m.refreshed) < 300*time.Millisecond {
 			return
 		}
@@ -176,6 +179,23 @@ func runTUILoop(m *tuiModel, app *App) {
 			render()
 		}
 	}
+}
+
+// drainPrioReload 把 SIGHUP 触发的热加载同步到第 3 页: 只在主循环里重建编辑器快照,
+// 避免在信号 goroutine 里动 TUI 状态 (信号 goroutine 只置位, 见 startTUIProxy)。
+func (m *tuiModel) drainPrioReload() {
+	if !m.prioReloadPending.Swap(false) {
+		return
+	}
+	e := m.prio
+	if e == nil {
+		return
+	}
+	msg := "已热加载 " + e.config
+	if st := e.reloadFromDisk(); st != "" {
+		msg += ", " + st
+	}
+	e.message = msg
 }
 
 // tuiKey 是一个按键事件: b 是读到的字节; esc 为真表示单独按下的 Esc (后面没跟着转义
