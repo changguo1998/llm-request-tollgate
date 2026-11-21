@@ -149,11 +149,11 @@ func TestColorEventBody(t *testing.T) {
 	}
 }
 
-// eventWho: 标识列的请求逻辑名带专属色 (加粗与上游名区分); 配置里没有的名字不上色。
+// eventWho: 标识列的请求逻辑名带专属色; 配置里没有的名字不上色。
 func TestEventWhoLogicalColor(t *testing.T) {
 	m := newTUIModel("cfg")
 	m.logicalColors = map[string]string{"gpt-5": "\x1b[36m"}
-	want := "12/" + tuiBold + "\x1b[36m" + "gpt-5" + tuiReset
+	want := "12/" + "\x1b[36m" + "gpt-5" + tuiReset
 	if got := m.eventWho(routeEvent{Req: 12, Logical: "gpt-5"}); got != want {
 		t.Errorf("标识应为 %q, 得到 %q", want, got)
 	}
@@ -201,7 +201,7 @@ func TestDrawEventsColors(t *testing.T) {
 	c := &tuiCanvas{cols: 120}
 	m.drawEvents(c, 20)
 	out := c.b.String()
-	who := "12/" + tuiBold + "\x1b[36m" + "gpt-5" + tuiReset
+	who := "12/" + "\x1b[36m" + "gpt-5" + tuiReset
 	if !strings.Contains(out, who) {
 		t.Errorf("标识列的逻辑名没带专属色 %q", who)
 	}

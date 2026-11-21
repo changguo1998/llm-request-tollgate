@@ -193,9 +193,9 @@ func (m *tuiModel) drawHeader(c *tuiCanvas) {
 	if !m.live {
 		live = tuiRed + "no-state" + tuiReset
 	}
-	// 第 1 行整行都用前景色 (只有程序名加粗): 灰字在深色终端上太弱。
+	// 第 1 行整行都用前景色: 灰字在深色终端上太弱。
 	// 版本号 (buildVersion) 跟着程序名, 用灰字弱化, 不抢观测信息。
-	c.line(tuiIndent + tuiBold + "tollgate tui" + tuiReset +
+	c.line(tuiIndent + "tollgate tui" +
 		" " + tuiGray + buildVersion() + tuiReset +
 		"  观测 " + src +
 		"   监听 " + m.listen + "   日志 " + m.logPath)
@@ -228,9 +228,9 @@ func (m *tuiModel) drawTabs(c *tuiCanvas) {
 	b.WriteString(tuiIndent)
 	for i, name := range tuiTabs {
 		if i == m.tab {
-			b.WriteString(tuiRev + tuiBold + " " + name + " " + tuiReset)
+			b.WriteString(tuiRev + " " + name + " " + tuiReset)
 		} else {
-			b.WriteString(tuiGray + " " + strconv.Itoa(i+1) + " " + name + " " + tuiReset)
+			b.WriteString(" " + strconv.Itoa(i+1) + " " + name + " ")
 		}
 		b.WriteString(" ")
 	}

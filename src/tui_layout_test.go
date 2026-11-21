@@ -351,10 +351,10 @@ func TestFlowTryCells(t *testing.T) {
 	if rows[1][0] != "" || rows[1][1] != "" || rows[1][2] != "" {
 		t.Errorf("回退行标识列应留空: %v", rows[1][:3])
 	}
-	// 逻辑名带专属色 + 加粗 (与事件页标识列同一写法); 没有配色的名字原样输出。
+	// 逻辑名带专属色 (与事件页标识列同一写法); 没有配色的名字原样输出。
 	m.logicalColors = map[string]string{"m1": tuiGreen}
-	if got := m.flowRows()[0][1]; got != tuiBold+tuiGreen+"m1"+tuiReset {
-		t.Errorf("逻辑名应带专属色与加粗, 得到 %q", got)
+	if got := m.flowRows()[0][1]; got != tuiGreen+"m1"+tuiReset {
+		t.Errorf("逻辑名应带专属色, 得到 %q", got)
 	}
 	if got := m.flowRows()[0][0]; got != "101" {
 		t.Errorf("编号列不上色, 得到 %q", got)
@@ -968,8 +968,11 @@ func TestModelTableHangingIndent(t *testing.T) {
 			}
 		case strings.Contains(txt, "u1/real-1"), strings.Contains(txt, "u2/real-2"):
 			rows++
-			if !strings.HasPrefix(ln, modelIndent) {
-				t.Errorf("数据行应在 %d 格缩进: %q", len(modelIndent), ln)
+			// 数据行 = tuiIndent + 标记位 (2 格): 无星号 4 空格 (= modelIndent),
+			// 有星号 3 空格 + *, 上游名与列名行文字同列。
+			if !strings.HasPrefix(ln, tuiIndent) ||
+				(!strings.HasPrefix(ln, modelIndent) && !strings.HasPrefix(ln, "   *")) {
+				t.Errorf("数据行应在 %d 格缩进 (标记位 2 格, 有星号时第 4 列是 *): %q", len(modelIndent), ln)
 			}
 		}
 	}

@@ -39,7 +39,7 @@ func tableHeadAt(indent string, cols []tuiCol, vis []bool) string {
 	for i, col := range cols {
 		head[i] = tuiTrunc(col.title, col.w)
 	}
-	return indent + tuiBold + strings.Join(alignRow(cols, head, vis), tuiColSep) + tuiReset
+	return indent + strings.Join(alignRow(cols, head, vis), tuiColSep) + tuiReset
 }
 
 // tableTop 画标题行与列名行 (空表也画, 版式不跳)。

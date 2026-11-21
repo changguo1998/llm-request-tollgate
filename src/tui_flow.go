@@ -38,7 +38,7 @@ func (m *tuiModel) flowRows() [][]string {
 				if f.Stream {
 					tag = "是"
 				}
-				// 逻辑名带专属色 (加粗), 与事件页标识列同一写法。
+				// 逻辑名带专属色, 与事件页标识列同一写法。
 				cells = append(cells, strconv.FormatUint(f.ID, 10), m.logicalName(f.Logical), tag)
 			} else {
 				cells = append(cells, "", "", "") // 回退行: 标识列留空

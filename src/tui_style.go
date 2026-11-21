@@ -10,7 +10,6 @@ import (
 
 const (
 	tuiReset = "\x1b[0m"
-	tuiBold  = "\x1b[1m"
 	tuiRev   = "\x1b[7m"
 	tuiRed   = "\x1b[31m"
 	tuiGreen = "\x1b[32m"
@@ -54,9 +53,9 @@ var logicalPalette = []string{
 //	灰   = 说明 (标题 / 单位 / 位置行 / 空)
 //	青   = 接收中这一段的实时性能 (第 1 页阶段链尾; 无状态含义, 只表示正在收)
 //	前景色 = 事件正文的其余文字
-//	加粗+专属色 = 逻辑名 (events 标识列; 标准色先用、用完再上浅色)
-//	专属色 = 供应商名 (各页的 上游/模型 单元格与事件正文)
-//	加粗 = 表头; 反显 = 当前选中行。
+//	专属色 = 逻辑名与供应商名 (逻辑名: events 标识列 / 请求表 / 模型表分组标题;
+//	          供应商名: 各页的 上游/模型 单元格与事件正文)
+//	反显 = 当前选中行。
 func colorDur(ms int64, color string) string {
 	if ms <= 0 {
 		return ""

@@ -218,10 +218,11 @@ func upstreamCols(maxNamed int) []tuiCol {
 }
 
 // modelLine 是模型/路由聚合表的一显示行: header 非空 = 逻辑名标题行 (整行已上色),
-// 否则是数据行 (cells 与 modelCols 一一对应)。
+// 否则是数据行 (cells 与 modelCols 一一对应; marker 是行前 2 格标记位, 不进列宽)。
 type modelLine struct {
 	header             string
 	logical, up, model string
+	marker             string
 	cells              []string
 }
 
@@ -255,11 +256,12 @@ func (m *tuiModel) modelRouteLines(rows []*modelRow) []modelLine {
 			lockColor = tuiYell
 		}
 		lock := colorDur(r.LockMs, lockColor)
-		// 粘性偏好标记: 该逻辑名当前粘性选中的候选在 上游/模型 前标 *。所有行统一
-		// 占一个标记位 (非偏好行补空格), 模型名从同一列开始, 不让 * 把对齐顶歪。
-		marker := " "
+		// 粘性偏好标记: 该逻辑名当前粘性选中的候选在 上游/模型 前标 *。标记位固定
+		// 2 格, 作行前缀不进列宽: 非偏好行 2 空格, 偏好行 空格+*, 上游名与列名行
+		// 标题文字同列 (这 2 格恰是表体相对逻辑名的悬挂 modelHang)。
+		marker := "  "
 		if p, ok := m.pulse.Sticky[r.logical]; ok && p.Upstream == r.up && p.Model == r.model {
-			marker = "*"
+			marker = " *"
 		}
 		if i == 0 || r.logical != prev {
 			lines = append(lines, modelLine{header: m.modelGroupHeader(r.logical)})
@@ -283,14 +285,15 @@ func (m *tuiModel) modelRouteLines(rows []*modelRow) []modelLine {
 		if hot {
 			age = tuiGreen + age + tuiReset
 		}
-		// 与 modelCols 的顺序一一对应 (colKeep 按下标裁列)。
+		// 与 modelCols 的顺序一一对应 (colKeep 按下标裁列)。首列不含 marker
+		// (marker 是行前缀, 不占列宽, 见 drawModelTable)。
 		cells := []string{
-			marker + m.upModel(r.up, r.model),
+			m.upModel(r.up, r.model),
 			strconv.Itoa(r.Queue), paused, lock,
 			// 缓存命中与总 token 合成一格 (cached/total)。
 			token, ttfb, perf, age,
 		}
-		lines = append(lines, modelLine{logical: r.logical, up: r.up, model: r.model, cells: cells})
+		lines = append(lines, modelLine{logical: r.logical, up: r.up, model: r.model, marker: marker, cells: cells})
 	}
 	return lines
 }
@@ -309,7 +312,7 @@ func (m *tuiModel) inflightModels() map[string]bool {
 	return out
 }
 
-// modelGroupHeader 是模型表的分组标题: 逻辑名 (专属色加粗) + 有粘性偏好时的剩余倒计时
+// modelGroupHeader 是模型表的分组标题: 逻辑名 (专属色) + 有粘性偏好时的剩余倒计时
 // (mm:ss, 不带文字); 配置里找不到归属的行写 (未归属)。
 func (m *tuiModel) modelGroupHeader(logical string) string {
 	if logical == "" {
@@ -414,7 +417,7 @@ func modelHeadLine(indent string, cols []tuiCol, vis []bool, vfull []int) string
 	for i, col := range cols {
 		head[i] = tuiTrunc(col.title, col.w)
 	}
-	return indent + tuiBold + modelJoin(cols, head, vis, vfull) + tuiReset
+	return indent + modelJoin(cols, head, vis, vfull) + tuiReset
 }
 
 // modelGroupLine 拼组名显示行 (含左缩进): 组名文本在最左 (tuiIndent 起, 悬挂在表体
@@ -466,11 +469,16 @@ func (m *tuiModel) drawModelTable(c *tuiCanvas, rows []*modelRow, cur flowCursor
 			continue
 		}
 		cells := pickRow(keep, ln.cells)
+		// 数据行前缀 = tuiIndent(2) + 标记位(2), 合计与列名行 modelIndent 同宽:
+		// 上游名因此与列名行标题文字同列 (标记位即 modalHang 那 2 格)。选中时反显
+		// 从标记位起 (marker 不进列宽, 反显只作用在行前缀与首格)。
+		prefix := tuiIndent + ln.marker
 		if has && cur.table == 1 && cur.logical == ln.logical && cur.up == ln.up && cur.model == ln.model {
+			prefix = tuiIndent + tuiRev + ln.marker
 			cells = markCell(cells, 0)
 			curLine = head + 1 + i
 		}
-		c.line(modelIndent + modelJoin(cols, cells, vis, vfull))
+		c.line(prefix + modelJoin(cols, cells, vis, vfull))
 	}
 	return curLine
 }

@@ -559,7 +559,8 @@ func TestFlowCursorHighlight(t *testing.T) {
 
 	m.cur = flowCursor{table: 1, logical: "m1", up: "u1", model: "real-1"}
 	raw = m.draw()
-	if !strings.Contains(raw, tuiRev+" "+m.upColors["u1"]+"u1") {
+	// 选中的模型行: 反显从标记位起 (行前缀反显 + 首格反显, 这里无星号 = 2 空格)。
+	if !strings.Contains(raw, tuiRev+"  "+tuiRev+m.upColors["u1"]+"u1") {
 		t.Errorf("选中的模型行应反显 上游/模型 格: %q", raw)
 	}
 }

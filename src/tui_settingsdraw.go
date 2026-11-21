@@ -128,7 +128,7 @@ type settingsLine struct {
 	text string
 }
 
-// settingsModelLines 把模型面板的可选行摊成显示行: 逻辑名变化时插一行加粗分组标题
+// settingsModelLines 把模型面板的可选行摊成显示行: 逻辑名变化时插一行分组标题
 // (别名或组名); 组候选行只列成员逻辑名, 不带 M/P 权重 (组不是权重条目)。返回选中行的
 // 显示下标。粘性偏好与锁状态不在配置页 (第 1 页管, 这里只管配置)。
 func (m *tuiModel) settingsModelLines(e *tuiEditor, cs []tuiCand) ([]settingsLine, int) {
@@ -165,14 +165,13 @@ func (m *tuiModel) settingsModelLines(e *tuiEditor, cs []tuiCand) ([]settingsLin
 	return lines, selLine
 }
 
-// settingsLogicalHeader 拼逻辑名分组标题: 别名加粗 / 组名加粗换黄色 (不带「组」字
-// 区分, 靠颜色)。粘性倒计时在第 1 页模型表的分组标题上, 不在这里。
+// settingsLogicalHeader 拼逻辑名分组标题: 组名黄色, 别名前景色 (不带「组」字区分,
+// 靠颜色)。粘性倒计时在第 1 页模型表的分组标题上, 不在这里。
 func settingsLogicalHeader(isGroup bool, logical string) string {
-	attr := tuiBold
 	if isGroup {
-		attr = tuiBold + tuiYell
+		return tuiYell + logical + tuiReset
 	}
-	return attr + logical + tuiReset
+	return logical
 }
 
 // settingsScrollWindow 按显示行算滚动窗口: 模型列表横向分两栏, 一屏 = 2*window 个

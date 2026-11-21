@@ -85,8 +85,8 @@ type tuiModel struct {
 	// 上游专属色 (每帧按上游表顺序重算), 各页的 上游/模型 单元格共用。
 	upColors map[string]string
 
-	// 逻辑名专属色 (配置里的逻辑名 + 组名, 按窗口内请求的衰减权重排序分配; 各页共用,
-	// 名字后叠一层加粗, 与正文里的供应商名区分)。logicalNames 按配置 mtime 缓存, 变了才重读。
+	// 逻辑名专属色 (配置里的逻辑名 + 组名, 按窗口内请求的衰减权重排序分配, 各页共用;
+	// 与正文里的供应商名靠颜色区分)。logicalNames 按配置 mtime 缓存, 变了才重读。
 	logicalColors   map[string]string
 	logicalNames    []string
 	logicalNamesMod time.Time

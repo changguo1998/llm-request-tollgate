@@ -711,8 +711,8 @@ func TestPrioDraw(t *testing.T) {
 	if strings.Contains(frame, "预览") {
 		t.Errorf("候选预览栏已移除, 模型列表应分两栏")
 	}
-	if !strings.Contains(frame, tuiBold+"deepseek-v4.1-flash"+tuiReset) ||
-		!strings.Contains(frame, tuiBold+"solo"+tuiReset) {
+	if !strings.Contains(frame, tuiTitle+"deepseek-v4.1-flash"+tuiReset) ||
+		!strings.Contains(frame, tuiTitle+"solo"+tuiReset) {
 		t.Errorf("模型列表应按逻辑名分组 (缺分组标题 deepseek-v4.1-flash / solo)")
 	}
 
@@ -775,7 +775,7 @@ func TestSettingsPrioWidthAndProviderColors(t *testing.T) {
 	}
 }
 
-// 模型列表按逻辑名分组 (sticky 页同款: 组与组之间用加粗逻辑名隔开), 组内按候选顺序
+// 模型列表按逻辑名分组 (sticky 页同款: 组与组之间用逻辑名标题隔开), 组内按候选顺序
 // 列出模型行 (含优先级与 provider 专属色)。
 func TestSettingsModelListGroupedRows(t *testing.T) {
 	_, cfg := prioFixture(t)
@@ -785,7 +785,7 @@ func TestSettingsModelListGroupedRows(t *testing.T) {
 	frame := m.draw()
 	plain := stripANSI(frame)
 
-	// 1. 加粗分组标题依次是 deepseek-v4.1-flash、solo (字典序, 与 sticky 同款)。
+	// 1. 分组标题依次是 deepseek-v4.1-flash、solo (字典序, 与 sticky 同款)。
 	gi := strings.Index(plain, "  deepseek-v4.1-flash")
 	si := strings.Index(plain, "  solo")
 	if gi < 0 || si < 0 || gi > si {
@@ -864,7 +864,7 @@ func TestSettingsModelColumnFillsHeight(t *testing.T) {
 	if got := m.prio.vis; got < body-3 {
 		t.Fatalf("模型列应顶到消息行上方: vis=%d, body=%d (期望 ≈%d)", got, body, body-2)
 	}
-	if !strings.Contains(frame, tuiBold+"g"+tuiReset) {
+	if !strings.Contains(frame, tuiTitle+"g"+tuiReset) {
 		t.Fatalf("模型列表应按逻辑名分组 (缺分组标题 g)")
 	}
 	lines := strings.Split(strings.TrimRight(frame, "\n"), "\n")

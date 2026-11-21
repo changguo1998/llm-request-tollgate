@@ -312,14 +312,13 @@ func (m *tuiModel) upModel(up, model string) string {
 	return m.upName(up) + "/" + model
 }
 
-// logicalName 给逻辑名上它的专属色, 再叠一层加粗: 标识列的逻辑名是粗体, 正文里的
-// 供应商名是细体, 同屏不会看混。配置里没有的名字 (如已删掉的别名) 原样返回。
+// logicalName 给逻辑名上它的专属色; 配置里没有的名字 (如已删掉的别名) 原样返回。
 func (m *tuiModel) logicalName(name string) string {
 	if name == "" {
 		return ""
 	}
 	if c := m.logicalColors[name]; c != "" {
-		return tuiBold + c + name + tuiReset
+		return c + name + tuiReset
 	}
 	return name
 }
