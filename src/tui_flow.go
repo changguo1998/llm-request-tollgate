@@ -10,47 +10,62 @@ import (
 	"time"
 )
 
-// 第 1 页一张表: 前三列是请求标识, 最后一列是阶段链 (与事件页同形, 各阶段按调度顺序
-// 用 " → " 连起来, 看起来像分了子列, 但只是一条链)。换候选 / 同候选重试另起一行,
-// 前三列留空, 链从并发池重新开始 (与上一行的链首左对齐)。
-// 列宽下限: 编号 7 / 逻辑名 6 / 流式 1, 阶段链沿用事件列的 40; 有内容或有空间时再按内容涨。
+// 第 1 页一张表: 前三列是请求标识, 最后一列是阶段网格 (到过的阶段一格一阶段, 格首带
+// 1,2,3… 序号, 格宽按阶段位统一, 各请求的第 n 个阶段纵向对齐; 列放不下时折行, 折出的
+// 新显示行重新从 1 计数)。换候选 / 同候选重试另起一行, 前三列留空, 链从并发池重新开始
+// (与上一行的链首左对齐)。
+// 列宽下限: 编号 7 / 逻辑名 6 / 流式 1, 阶段网格列沿用事件列的 40; 有内容或有空间时再按内容涨。
 var activeCols = []tuiCol{
 	{"编号", 7, true, true, 2}, {"逻辑名", 6, true, false, 0},
 	{"流式", 1, true, false, 1},
 	{"阶段", 40, true, false, 0},
 }
 
+// flowLine 是请求表的一显示行 (一次尝试): 前三列标识 + 各阶段格 (不带序号) + 链尾附加。
+// 阶段格单独存是为了对齐: 网格渲染时统一格子宽、序号前置, 各请求的第 n 阶段能纵向对齐。
+type flowLine struct {
+	head   []string // 编号 / 逻辑名 / 流式 (回退行为空串)
+	stages []string // 各阶段显示串 (如 "sem(u1) 3s", 不带序号)
+	tail   []string // 链尾: 卡住原因 / 接收中的实时性能 / 结局词
+}
+
 // flowRows 把进行中的请求摊成显示行: 每笔请求的每一次尝试一行, 最新的请求在最上面,
-// 同一笔请求内按尝试先后从上到下排 (回退另起一行, 前三列留空)。
+// 同一笔请求内按尝试先后从上到下排 (回退另起一行, 前三列留空)。阶段链列 = 阶段格用
+// " → " 连起再挂链尾 (供列宽计算与对齐, 网格画法见 flowGrid)。
 func (m *tuiModel) flowRows() [][]string {
+	return flowRowsFromLines(m.flowLines())
+}
+
+// flowLines 是 flowRows 的结构化版本: 阶段与链尾分开, 供对齐网格渲染用。
+func (m *tuiModel) flowLines() []flowLine {
 	flows := append([]flow(nil), m.pulse.Active...)
 	sort.Slice(flows, func(i, j int) bool { return flows[i].ID > flows[j].ID })
-	var out [][]string
+	out := make([]flowLine, 0, len(flows))
 	for _, f := range flows {
 		tries := f.Tries
 		if len(tries) == 0 { // 对端没给每尝试数据时, 按当前阶段画一行
 			tries = []flowTry{{Up: f.Up, Model: f.Model, Cur: f.Stage, Segs: make([]float64, stageCount)}}
 		}
 		for i, tr := range tries {
-			cells := make([]string, 0, len(activeCols))
+			ln := flowLine{stages: m.stageTokens(f, tr), tail: m.stageTail(f, tr)}
 			if i == 0 {
 				tag := "否"
 				if f.Stream {
 					tag = "是"
 				}
 				// 逻辑名带专属色, 与事件页标识列同一写法。
-				cells = append(cells, strconv.FormatUint(f.ID, 10), m.logicalName(f.Logical), tag)
+				ln.head = []string{strconv.FormatUint(f.ID, 10), m.logicalName(f.Logical), tag}
 			} else {
-				cells = append(cells, "", "", "") // 回退行: 标识列留空
+				ln.head = []string{"", "", ""} // 回退行: 标识列留空
 			}
-			cells = append(cells, m.stageChain(f, tr))
-			out = append(out, cells)
+			out = append(out, ln)
 		}
 	}
 	return out
 }
 
-// stageChain 把一次尝试写成一条阶段链 (与事件页同形): 到过的阶段按流程顺序用 " → " 连起,
+// stageChain 把一次尝试写成一条阶段链的平铺串 (与 flowRowsFromLines / 列宽口径同一形状;
+// 屏幕显示走 flowGrid 的对齐网格, 这里供测试核对): 到过的阶段按流程顺序用 " → " 连起,
 // 每段写「短词 耗时」; 没到过的阶段不出现在链里。当前阶段实时走, 卡住原因 / 接收中的实时
 // 吞吐 / 该段的结局词写在链尾 (链尾就是这条尝试走到的地方)。
 func (m *tuiModel) stageChain(f flow, tr flowTry) string {
