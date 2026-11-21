@@ -45,14 +45,14 @@ func tableHeadAt(indent string, cols []tuiCol, vis []bool) string {
 // tableTop 画标题行与列名行 (空表也画, 版式不跳)。
 func tableTop(c *tuiCanvas, title string, cols []tuiCol, vis []bool) {
 	if title != "" {
-		c.line(tuiDim + tuiIndent + title + tuiReset)
+		c.line(tuiGray + tuiIndent + title + tuiReset)
 	}
 	c.line(tableHead(cols, vis))
 }
 
 // tableEmptyLine 是空表的占位行。
 func tableEmptyLine(c *tuiCanvas) {
-	c.line(tuiDim + "  (空)" + tuiReset)
+	c.line(tuiGray + "  (空)" + tuiReset)
 }
 
 // tablePosLine 画滚动位置行: 总行数 + 当前窗口范围 (1 基), 只有内容高过窗口 (taller) 才画。
@@ -61,7 +61,7 @@ func tablePosLine(c *tuiCanvas, total, top, end int, taller bool) {
 	if !taller {
 		return
 	}
-	c.line(tuiDim + "  " + strconv.Itoa(total) + " 行, 当前 " +
+	c.line(tuiGray + "  " + strconv.Itoa(total) + " 行, 当前 " +
 		strconv.Itoa(top+1) + "-" + strconv.Itoa(end) + tuiReset)
 }
 

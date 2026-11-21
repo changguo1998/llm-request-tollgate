@@ -11,7 +11,6 @@ import (
 const (
 	tuiReset = "\x1b[0m"
 	tuiBold  = "\x1b[1m"
-	tuiDim   = "\x1b[2m"
 	tuiRev   = "\x1b[7m"
 	tuiRed   = "\x1b[31m"
 	tuiGreen = "\x1b[32m"
@@ -26,6 +25,9 @@ const (
 	tuiLive = "\x1b[36m"
 	// tuiEditBg 是 settings 页进入输入编辑 (=) 时的强调背景色 (蓝底), 区别于普通反显。
 	tuiEditBg = "\x1b[44m"
+	// tuiGray 是说明性文字与数值小数位的灰色 (亮黑前景): 不用 SGR 2 暗显, 因为部分终端
+	// 不实现 dim, 整数与小数就分不出颜色; 亮黑在 16 色终端上普遍渲染为中性灰。
+	tuiGray = "\x1b[90m"
 )
 
 // upPalette 是上游的专属色: 状态用红 / 黄 / 绿的正色 (31 / 32 / 33), 这里用青 / 品红 /

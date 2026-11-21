@@ -496,13 +496,13 @@ func humanTPS(v float64) string {
 	if n < 1 { // 不足 1: 4 位全灰小数 (万分位)
 		f := int(math.Round(n * 10000))
 		if f >= 10000 { // 进位到 1
-			return "1" + tuiDim + "000" + tuiReset
+			return "1" + tuiGray + "000" + tuiReset
 		}
 		fs := strconv.Itoa(f)
 		for len(fs) < 4 {
 			fs = "0" + fs
 		}
-		return tuiDim + fs + tuiReset
+		return tuiGray + fs + tuiReset
 	}
 	s := int(math.Round(n * 1000)) // 1 到 999: 保留 3 位小数
 	if s >= 1000000 {              // 999.9995 以上进位成 1000
@@ -516,7 +516,7 @@ func humanTPS(v float64) string {
 	for len(fracStr) < prec {
 		fracStr = "0" + fracStr
 	}
-	return ints + tuiDim + fracStr + tuiReset
+	return ints + tuiGray + fracStr + tuiReset
 }
 
 // plainTPS 是纯文本写法 (阶段链尾的实时速率用): 千以内保留一位小数, 千以上缩写,

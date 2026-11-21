@@ -121,7 +121,7 @@ func (m *tuiModel) drawUpstreamTable(c *tuiCanvas, cands []candView, cur flowCur
 	head := c.countLines()
 	c.line(tableHead(cols, vis))
 	if len(rows) == 0 {
-		c.line(tuiDim + "  (空)" + tuiReset)
+		c.line(tuiGray + "  (空)" + tuiReset)
 	}
 	curLine := -1
 	for i, r := range rows {
@@ -313,12 +313,12 @@ func (m *tuiModel) inflightModels() map[string]bool {
 // (mm:ss, 不带文字); 配置里找不到归属的行写 (未归属)。
 func (m *tuiModel) modelGroupHeader(logical string) string {
 	if logical == "" {
-		return tuiDim + "(未归属)" + tuiReset
+		return tuiGray + "(未归属)" + tuiReset
 	}
 	hdr := m.logicalName(logical)
 	if p, ok := m.pulse.Sticky[logical]; ok {
 		if rem := time.Duration(p.RemainingMs) * time.Millisecond; rem > 0 {
-			hdr += "  " + tuiDim + durStr(rem) + tuiReset
+			hdr += "  " + tuiGray + durStr(rem) + tuiReset
 		}
 	}
 	return hdr
@@ -457,7 +457,7 @@ func (m *tuiModel) drawModelTable(c *tuiCanvas, rows []*modelRow, cur flowCursor
 	head := c.countLines()
 	c.line(modelHeadLine(modelIndent, cols, vis, vfull))
 	if len(lines) == 0 {
-		c.line(tuiDim + modelIndent + "(空)" + tuiReset)
+		c.line(tuiGray + modelIndent + "(空)" + tuiReset)
 	}
 	curLine := -1
 	for i, ln := range lines {
@@ -497,11 +497,11 @@ func ttfbNum(ms int64) string {
 	case sec >= 100:
 		return strconv.FormatInt(sec, 10)
 	case sec >= 10:
-		return strconv.FormatInt(sec, 10) + tuiDim + strconv.FormatInt((ms%1000)/100, 10) + tuiReset
+		return strconv.FormatInt(sec, 10) + tuiGray + strconv.FormatInt((ms%1000)/100, 10) + tuiReset
 	case sec >= 1:
-		return strconv.FormatInt(sec, 10) + tuiDim + fmt.Sprintf("%02d", (ms%1000)/10) + tuiReset
+		return strconv.FormatInt(sec, 10) + tuiGray + fmt.Sprintf("%02d", (ms%1000)/10) + tuiReset
 	default:
-		return tuiDim + fmt.Sprintf("%03d", ms) + tuiReset
+		return tuiGray + fmt.Sprintf("%03d", ms) + tuiReset
 	}
 }
 

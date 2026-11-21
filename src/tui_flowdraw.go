@@ -30,7 +30,7 @@ func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 		}
 	}
 	if len(rows) == 0 {
-		full.line(tuiDim + "  (没有进行中的请求)" + tuiReset)
+		full.line(tuiGray + "  (没有进行中的请求)" + tuiReset)
 	}
 	m.followCursor(curLine, body)
 	m.drawWindow(c, full, max(1, body))

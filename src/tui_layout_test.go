@@ -83,7 +83,7 @@ func TestDrawFillsTerminalHeight(t *testing.T) {
 			}
 			// 键位提示用正常前景色: 不带 dim。
 			for _, line := range strings.Split(out, "\r\n") {
-				if strings.Contains(line, "q 退出") && strings.Contains(line, tuiDim) {
+				if strings.Contains(line, "q 退出") && strings.Contains(line, tuiGray) {
 					t.Errorf("rows=%d tab=%d: 键位提示不该是 dim 色", rows, tab)
 				}
 			}
@@ -104,7 +104,7 @@ func TestTUIVersionInHeader(t *testing.T) {
 	if !strings.Contains(out, "tollgate tui") {
 		t.Fatalf("头部应含 TUI 名: %q", out)
 	}
-	if !strings.Contains(out, tuiDim+buildVersion()+tuiReset) {
+	if !strings.Contains(out, tuiGray+buildVersion()+tuiReset) {
 		t.Errorf("头部应带灰字版本号 %q: %q", buildVersion(), out)
 	}
 	first := strings.SplitN(out, "\r\n", 2)[0]

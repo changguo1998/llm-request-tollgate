@@ -74,7 +74,7 @@ func TestHumanTokens(t *testing.T) {
 // humanTPS: 性能列千以内, 整数前景色 + 灰色小数凑满 4 格 —— 不足 1 省略整数 0, 4 位全灰
 // 小数 (万分位, 补 0); 其余整数位数越少灰小数越多。千以上 3 位 + 单位。
 func TestHumanTPS(t *testing.T) {
-	gray := func(s string) string { return tuiDim + s + tuiReset }
+	gray := func(s string) string { return tuiGray + s + tuiReset }
 	cases := map[float64]string{
 		0:      gray("0000"), // 0.0000
 		0.01:   gray("0100"), // 0.01 -> 0.0100

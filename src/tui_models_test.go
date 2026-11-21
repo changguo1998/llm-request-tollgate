@@ -202,7 +202,7 @@ func TestDrawModelsRouteCells(t *testing.T) {
 		t.Fatalf("模型行没画出来:\n%s", out)
 	}
 	// Token / 首字节 / 性能三格各自的四段/斜杠串 (首字节与性能的统计在 cell 里现算)。
-	gray := func(d string) string { return tuiDim + d + tuiReset }
+	gray := func(d string) string { return tuiGray + d + tuiReset }
 	// 首字节每段 2 格: 1 位整数 (前景色) + 灰色十分位, 不带单位 (秒)。
 	for _, want := range []string{
 		humanTokens(1000) + "/" + humanTokens(2000),
@@ -346,12 +346,12 @@ func TestGroupCellNamesAndLocks(t *testing.T) {
 func TestTtfbPerfCellEmptyShortWindow(t *testing.T) {
 	now := time.Now()
 	ts := []ttfbPoint{{ts: now.Add(-30 * time.Minute), ms: 400}}
-	one := tuiDim + "400" + tuiReset // 0.4 秒 (400ms): 不足 1 秒, 3 位灰色小数全灰
+	one := tuiGray + "400" + tuiReset // 0.4 秒 (400ms): 不足 1 秒, 3 位灰色小数全灰
 	if got := ttfbCell(ts, now, 5*time.Minute, 3*time.Hour); got != one+" "+ttfbDash+" "+one+" "+one {
 		t.Errorf("首字节短窗空应显示 ---: %q", got)
 	}
 	ps := []perfPoint{{ts: now.Add(-30 * time.Minute), c: 100, d: 1000, b: 1000}}
-	v := "100" + tuiDim + "0" + tuiReset // 100.0, 整数前景 + 灰色小数
+	v := "100" + tuiGray + "0" + tuiReset // 100.0, 整数前景 + 灰色小数
 	if got := perfCell(ps, now, 5*time.Minute, 3*time.Hour, "u", "m", nil); got != v+" "+cellDash+" "+v+" "+v {
 		t.Errorf("性能短窗空应显示 --: %q", got)
 	}
@@ -360,7 +360,7 @@ func TestTtfbPerfCellEmptyShortWindow(t *testing.T) {
 // ttfbNum: 单位恒为秒, 3 位有效数字, 整数前景色 + 灰色小数 (最多 3 位到毫秒); 不足 1 秒
 // 时 3 位灰小数补 0; 1 到 99 秒按整数位数减小数位数凑满 3 格; 100 秒以上整数秒撑宽。
 func TestTtfbNum(t *testing.T) {
-	gray := func(d string) string { return tuiDim + d + tuiReset }
+	gray := func(d string) string { return tuiGray + d + tuiReset }
 	cases := map[int64]string{
 		0:         gray("000"),      // 0.000s
 		5:         gray("005"),      // 0.005s
@@ -404,7 +404,7 @@ func TestPerfTtfbFourValueStats(t *testing.T) {
 		{ts: now.Add(-2 * time.Minute), c: 200, d: 1000, b: 1000},
 		{ts: now.Add(-10 * time.Minute), c: 300, d: 1000, b: 1000},
 	}
-	gray := func(d string) string { return tuiDim + d + tuiReset }
+	gray := func(d string) string { return tuiGray + d + tuiReset }
 	wantPerf := "100" + gray("0") + " " + "150" + gray("0") + " " + "200" + gray("0") + " " + "300" + gray("0")
 	if got := perfCell(ps, now, 5*time.Minute, time.Hour, "u", "m", nil); got != wantPerf {
 		t.Errorf("性能四段应为 最近100/短均150/长均200/峰300, 得到 %q", got)

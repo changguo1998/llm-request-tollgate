@@ -347,7 +347,7 @@ func (m *tuiModel) eventsTitle(matched int) string {
 // drawEventsEmpty 是筛选没有命中时的占位行。
 func (m *tuiModel) drawEventsEmpty(c *tuiCanvas) {
 	if m.ev.active() {
-		c.line(tuiDim + "  (筛选没有命中)" + tuiReset)
+		c.line(tuiGray + "  (筛选没有命中)" + tuiReset)
 		return
 	}
 	tableEmptyLine(c)
