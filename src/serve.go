@@ -114,6 +114,13 @@ type serveState struct {
 	servedIdx  int  // 成功候选的 alias 下标 (仅成功时有意义)
 
 	finalStatus int
+
+	// 流式打断态: relay 实时判定 (解码超过打断超时 + 实时性能低于绝对/相对门槛) 命中后
+	// 置位, 供收尾时打低性能锁、记日志字段与发 abort 观测事件。
+	aborted   bool
+	abortMs   int64   // 打断时刻的解码时长 (从首字节起算, ms)
+	abortR    float64 // 打断时刻的实时性能值 r*
+	abortHist float64 // 打断时刻的历史平均 (性能样本均值)
 }
 
 // newServeState 读请求体并建好观测面; 请求本身不合法时直接应答并返回 nil。

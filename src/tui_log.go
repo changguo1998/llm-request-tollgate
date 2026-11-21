@@ -187,6 +187,14 @@ func replayEventOf(r logRec, ts time.Time) (routeEvent, bool) {
 	case r.Gate != "":
 		return routeEvent{Ts: ts, Req: r.Req, Kind: "gate", Logical: r.Logical, Upstream: r.Upstream,
 			Model: r.Model, Status: r.Status, Msg: "sem" + stageSep + "reject(" + gateWord(r.Gate) + ")"}, true
+	case r.Abort:
+		msg := "recv" + stageSep + "abort(r " + ftoa(r.AbortR, 1)
+		if r.AbortHist > 0 {
+			msg += " / hist " + ftoa(r.AbortHist, 1)
+		}
+		msg += ")"
+		return routeEvent{Ts: ts, Req: r.Req, Kind: "abort", Logical: r.Logical, Upstream: r.Upstream,
+			Model: r.Model, Status: r.Status, Msg: msg}, true
 	case r.Status >= 400 || r.Err != "":
 		return routeEvent{Ts: ts, Req: r.Req, Kind: "error", Logical: r.Logical, Upstream: r.Upstream,
 			Model: r.Model, Status: r.Status, Msg: "send" + stageSep + "fail(" + replayFailParam(r) + ")"}, true

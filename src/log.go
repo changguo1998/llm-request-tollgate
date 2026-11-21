@@ -47,6 +47,12 @@ type logRec struct {
 	Bytes        int64   `json:"bytes,omitempty"`       // 转发给客户端的响应体字节数
 	Bps          float64 `json:"bps,omitempty"`         // 接收的字节吞吐 bytes/s (流式才有)
 	DurationMs   int64   `json:"duration_ms,omitempty"` // 请求耗时 (收到请求到写完响应), 供非空闲吞吐
+	// Abort / AbortMs / AbortR / AbortHist 是流式打断 (解码超过打断超时且实时性能过低):
+	// 打断不是正常收尾, 该请求的性能样本也不计入低性能锁历史。
+	Abort     bool    `json:"abort,omitempty"`      // 流被打断
+	AbortMs   int64   `json:"abort_ms,omitempty"`   // 打断时刻的解码时长 (从首字节起算, ms)
+	AbortR    float64 `json:"abort_r,omitempty"`    // 打断时刻的实时性能值 r*
+	AbortHist float64 `json:"abort_hist,omitempty"` // 打断时刻的历史平均 (判相对门槛的基准)
 }
 
 // logDayOf 返回时间所在本地日历天 (轮转边界按本地日期算)。

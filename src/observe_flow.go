@@ -349,9 +349,22 @@ func (a *App) candOf(id string) *cand {
 	return c
 }
 
-// finish 是这笔请求的成功收尾: 唯一发 ok 事件 (recv → ok(200))。失败结局已在各候选
-// 失败点由 outcome 发出 (模型找不到时由 pickAttempts 补 parse → fail(404)),
-// 这里不再重复。只记状态变化: 仅仅首字节慢、但没触发任何锁的请求不在这里留痕。
+// abort 记打断结局事件 (取代正常收尾的 ok): 打断是"接收中主动掐断", 文案带实时性能与
+// 历史平均, 不发 ok。置 done 让 finish 不再补 ok 事件。
+func (o *flowObs) abort(r, hist float64) {
+	o.done = true
+	msg := "recv" + stageSep + "abort(r " + ftoa(r, 1)
+	if hist > 0 {
+		msg += " / hist " + ftoa(hist, 1)
+	}
+	msg += ")"
+	o.a.evAddReq(o.id, "abort", o.logical, o.up, o.model, msg)
+}
+
+// finish 是这笔请求的成功收尾: 唯一发 ok 事件 (recv → ok(200)); 打断已在 abort 里发过
+// 事件并置 done, 这里不再重复。失败结局已在各候选失败点由 outcome 发出 (模型找不到时由
+// pickAttempts 补 parse → fail(404)), 这里不再重复。只记状态变化: 仅仅首字节慢、但没
+// 触发任何锁的请求不在这里留痕。
 func (o *flowObs) finish(status int) {
 	if o.done {
 		return

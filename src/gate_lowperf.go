@@ -186,3 +186,64 @@ func (a *App) notePerfRequest(upID, model string, tok int, decodeMs, ttfbMs, byt
 		a.savePerfState()
 	}
 }
+
+// shouldAbortStream 是流式打断判定的纯函数部分 (四个条件, 顺序固定):
+//  1. 打断超时 > 0 (0 = 关闭打断, 调用方已判断豁免名单);
+//  2. 解码时长 d 超过打断超时 (从首字节起算, 与高延迟阈值 / TTFB 无关);
+//  3. 实时性能 r 低于低性能锁的平均门槛 (lowperf_avg_max);
+//  4. 实时性能 r 低于历史平均的 lowperf_rel_max 倍 (历史样本不足不判相对条件)。
+//
+// r 为 0 (无输出 token / 无字节等退化情形) 不打断。perfN/perfSum 是历史性能
+// (各笔 r* 之和 / 笔数)。
+func shouldAbortStream(dMs int64, r float64, perfN int64, perfSum float64, g GateCfg) bool {
+	if g.AbortTimeoutMs <= 0 {
+		return false
+	}
+	if dMs <= int64(g.AbortTimeoutMs) {
+		return false
+	}
+	if r <= 0 || r >= float64(g.LowPerfAvgMax) {
+		return false
+	}
+	if perfN < minPerfSamples || perfSum <= 0 {
+		return false
+	}
+	hist := perfSum / float64(perfN)
+	return r < g.LowPerfRelMax*hist
+}
+
+// perfHist 取该模型的历史性能样本 (笔数与和, 落盘口径), 供实时打断判定用相对门槛;
+// 没有样本时返回 ok=false。
+func (c *cand) perfHist(model string) (n int64, sum float64, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if g := c.peekGate(model); g != nil && g.perfN > 0 {
+		return g.perfN, g.perfSum, true
+	}
+	return 0, 0, false
+}
+
+// windowLowPerfPeak 取该模型性能窗内样本的峰值 (r*, 无样本时为 0): 打断打锁时用它当
+// peak, 没有样本才退实时值当 peak。
+func (c *cand) windowLowPerfPeak(model string) float64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if g := c.peekGate(model); g != nil {
+		if _, peak := perfStats(g.tps); peak > 0 {
+			return peak
+		}
+	}
+	return 0
+}
+
+// modelLowPerfLocked 是否该模型已在低性能锁内: 打断打锁前用它避免重复加锁 (重锁翻倍
+// 不该被同一轮打断反复触发)。只查模型自己的锁, 不看组的额度锁。
+func (c *cand) modelLowPerfLocked(model string) bool {
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if g := c.peekGate(model); g != nil {
+		return g.lock.active(now) && g.lock.reason == lowPerfReason
+	}
+	return false
+}

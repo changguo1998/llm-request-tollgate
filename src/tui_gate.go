@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ var gateLabels = []string{
 	"sticky_ttl_sec", "probe_enabled",
 	"concurrency_lock_sec", "quota_lock_sec", "breaker_lock_sec", "lowperf_lock_sec",
 	"perf_window_sec", "lowperf_peak_max", "lowperf_avg_max", "lowperf_rel_max", "lowperf_ttfb_max_sec",
+	"abort_timeout_sec",
 }
 
 // gateCN 与 gateLabels 一一对应的中文显示名 (设置页用)。
@@ -30,6 +32,7 @@ var gateCN = []string{
 	"粘性失效窗口", "恢复探测",
 	"并发锁时长", "额度锁时长", "熔断锁时长", "低性能锁时长",
 	"性能窗口", "低吞吐峰值", "低吞吐平均", "低吞吐历史比", "高延迟阈值",
+	"打断超时",
 }
 
 // 特殊字段的下标 (code 里按下标分支, 集中在这些常量上, 重排顺序只改 gateLabels/gateCN)。
@@ -41,6 +44,7 @@ const (
 	gateIdxRel     = 13 // 低吞吐历史比门槛 (百分比)
 	gateIdxTtfb    = 14 // 高延迟阈值 (0 = 关闭该项)
 	gateIdxProbe   = 5  // 恢复探测开关
+	gateIdxAbort   = 15 // 流式打断超时 (0 = 关闭打断)
 )
 
 // gateStep 是 +/- 一次调整的步长 (退避序列返回 0 = 不用加减键)。
@@ -62,6 +66,8 @@ func gateStep(i int) int {
 		return 1 // 低吞吐门槛套在 r* 上 / 历史比 1%
 	case 14:
 		return 1000 // 高延迟阈值
+	case 15:
+		return 1000 // 打断超时 (1s 步进; 0 = 关闭)
 	}
 	return 0
 }
@@ -102,6 +108,8 @@ func (e *tuiEditor) gateField(i int) int {
 		return int(math.Round(g.LowPerfRelMax * 100)) // 百分比显示
 	case 14:
 		return g.LowPerfTtfbMaxMs
+	case 15:
+		return g.AbortTimeoutMs
 	}
 	return 0
 }
@@ -165,17 +173,20 @@ func (e *tuiEditor) gateNumUnit(i int) (num, unit string) {
 // isSecField 是否时间类字段 (显示/输入都用秒)。
 func isSecField(i int) bool {
 	switch i {
-	case 0, 1, 2, 4, 6, 7, 8, 9, 10, 14:
+	case 0, 1, 2, 4, 6, 7, 8, 9, 10, 14, 15:
 		return true
 	}
 	return false
 }
 
-// parseSec 把"秒"(可小数) 解析成内部毫秒。
+// parseSec 把"秒"(可小数) 解析成内部毫秒; 负数一律报错 (不允许负时长, 0 由调用方按字段决定)。
 func parseSec(text string) (int, error) {
 	f, err := strconv.ParseFloat(strings.TrimSpace(text), 64)
-	if err != nil || f < 0 {
+	if err != nil {
 		return 0, err
+	}
+	if f < 0 {
+		return 0, fmt.Errorf("negative duration")
 	}
 	return secToMs(f), nil
 }
@@ -242,6 +253,8 @@ func gateBounds(i int) (lo, hi int) {
 		return 1, 100
 	case 14:
 		return 0, 86400000
+	case 15:
+		return 0, 86400000 // 打断超时: 0 = 关闭打断
 	}
 	return 0, 0
 }
@@ -307,10 +320,10 @@ func (e *tuiEditor) setProbeSwitch(text string) {
 	}
 }
 
-// setSecInput 解析时间字段 (非负秒数, 可小数); 高延迟阈值允许 0 (= 关闭判定)。
+// setSecInput 解析时间字段 (非负秒数, 可小数); 高延迟阈值与打断超时允许 0 (= 关闭判定)。
 func (e *tuiEditor) setSecInput(i int, text string) {
 	ms, err := parseSec(text)
-	if err != nil || (ms == 0 && i != gateIdxTtfb) {
+	if err != nil || (ms == 0 && i != gateIdxTtfb && i != gateIdxAbort) {
 		e.message = gateCN[i] + " 要非负秒数 (可小数)"
 		return
 	}
@@ -358,6 +371,8 @@ func (e *tuiEditor) setSecField(i, ms int) {
 		e.gate.PerfWindowMs = ms
 	case 14:
 		e.gate.LowPerfTtfbMaxMs = ms // 0 = 关闭高延迟判定
+	case 15:
+		e.gate.AbortTimeoutMs = ms // 0 = 关闭打断
 	}
 }
 
@@ -447,6 +462,7 @@ func (e *tuiEditor) gateFlat(g GateCfg) map[string]any {
 		"lowperf_rel_max":      g.LowPerfRelMax,
 		"lowperf_ttfb_max_sec": msToSec(g.LowPerfTtfbMaxMs),
 		"lowperf_lock_sec":     msToSec(g.LowPerfLockMs),
+		"abort_timeout_sec":    msToSec(g.AbortTimeoutMs),
 		"retry_backoff_sec":    msListToSec(g.RetryBackoffMs),
 		"sticky_ttl_sec":       msToSec(g.StickyTTLMs),
 		"probe_enabled":        e.probeOn,

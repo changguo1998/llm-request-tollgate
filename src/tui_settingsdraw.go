@@ -77,7 +77,7 @@ func (m *tuiModel) settingsGateLines(e *tuiEditor, body int) []string {
 			}
 		}
 		col1 = append(col1, text)
-		if i == 5 || i == 9 { // 显示分组: 其他 | 锁时长 | 低性能设置, 区之间空一行
+		if i == 5 || i == 9 { // 显示分组: 其他 | 锁时长 | 低性能设置 (含打断超时), 区之间空一行
 			col1 = append(col1, "")
 		}
 	}

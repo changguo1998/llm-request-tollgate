@@ -82,7 +82,11 @@ type Config struct {
 	LowPerfTtfbMaxSec  float64 `json:"lowperf_ttfb_max_sec"` // 高延迟阈值 (秒); 0 = 关闭
 	LowPerfLockSec     float64 `json:"lowperf_lock_sec"`
 	// LowPerfExempt 是低性能锁豁免名单: 名单内的真实模型 id 禁止触发低性能锁。
-	LowPerfExempt   []string  `json:"lowperf_exempt,omitempty"`
+	LowPerfExempt []string `json:"lowperf_exempt,omitempty"`
+	// AbortTimeoutSec 是流式打断超时 (秒): 解码时长 (从首字节起算) 超过它、且实时
+	// 性能过低时, 打断这条流并给该 上游/模型 打低性能锁。指针区分「未写」(nil =
+	// 缺省 60s) 与「显式 0」(0 = 关闭打断)。
+	AbortTimeoutSec *float64  `json:"abort_timeout_sec,omitempty"`
 	RetryBackoffSec []float64 `json:"retry_backoff_sec"`
 	// StickyTtlSec 是粘性失效窗口 (秒, 可小数): 逻辑名空闲 (最后一次请求结束) 超过它,
 	// 粘性偏好作废, 下笔按优先级重选。缺省 5min (0 = 取缺省)。
@@ -224,6 +228,7 @@ func (c *Config) gate() GateCfg {
 		LowPerfRelMax: c.LowPerfRelMax,
 		LowPerfLockMs: secToMs(c.LowPerfLockSec), LowPerfTtfbMaxMs: secToMs(c.LowPerfTtfbMaxSec),
 		LowPerfExempt:  c.LowPerfExempt,
+		AbortTimeoutMs: secToMs(c.limitAbortTimeoutSec()),
 		RetryBackoffMs: secListToMs(c.RetryBackoffSec),
 		StickyTTLMs:    secToMs(c.StickyTtlSec),
 	}
@@ -237,6 +242,8 @@ func (c *Config) setGate(g GateCfg) {
 	c.LowPerfPeakMax, c.LowPerfAvgMax, c.LowPerfRelMax = g.LowPerfPeakMax, g.LowPerfAvgMax, g.LowPerfRelMax
 	c.LowPerfLockSec, c.LowPerfTtfbMaxSec = msToSec(g.LowPerfLockMs), msToSec(g.LowPerfTtfbMaxMs)
 	c.LowPerfExempt = g.LowPerfExempt
+	v := msToSec(g.AbortTimeoutMs) // 显式写回 (含 0 = 关闭), 不丢"已显式关闭"这一事实
+	c.AbortTimeoutSec = &v
 	c.RetryBackoffSec = msListToSec(g.RetryBackoffMs)
 	c.StickyTtlSec = msToSec(g.StickyTTLMs)
 }
@@ -259,8 +266,12 @@ type GateCfg struct {
 	LowPerfTtfbMaxMs int     `json:"lowperf_ttfb_max_ms"` // 高延迟阈值 (平均首字节时延, ms); 0 = 关闭该项
 	LowPerfLockMs    int     `json:"lowperf_lock_ms"`
 	// LowPerfExempt 是低性能锁豁免名单: 名单内的模型禁止触发低性能锁 (按真实模型 id 匹配)。
-	LowPerfExempt  []string `json:"lowperf_exempt,omitempty"`
-	RetryBackoffMs []int    `json:"retry_backoff_ms"`
+	LowPerfExempt []string `json:"lowperf_exempt,omitempty"`
+	// AbortTimeoutMs 是流式打断超时 (ms): 解码时长 (从首字节起算) 超过它、且实时性能
+	// 低于低性能锁的绝对与相对门槛时, 打断这条流并打低性能锁; 0 = 关闭打断。与高延迟
+	// 阈值 (lowperf_ttfb_max_ms, 那是 TTFB) 不是同一个量。
+	AbortTimeoutMs int   `json:"abort_timeout_ms"`
+	RetryBackoffMs []int `json:"retry_backoff_ms"`
 	// StickyTTLMs 是粘性失效窗口: 逻辑名空闲超过它, 偏好作废重选。缺省 5min。
 	StickyTTLMs int `json:"sticky_ttl_ms"`
 }
@@ -270,6 +281,17 @@ const gateIntervalMs = 500
 
 // defaultLowPerfRelMax 是低吞吐相对门槛的缺省值 (当前平均 / 历史平均 < 20%)。
 const defaultLowPerfRelMax = 0.2
+
+// defaultAbortTimeoutSec 是流式打断超时的缺省值 (秒); 显式 0 = 关闭打断。
+const defaultAbortTimeoutSec = 60.0
+
+// limitAbortTimeoutSec 是流式打断超时的实际值 (秒): 未写取缺省 60, 显式 0 = 关闭。
+func (c *Config) limitAbortTimeoutSec() float64 {
+	if c.AbortTimeoutSec == nil {
+		return defaultAbortTimeoutSec
+	}
+	return *c.AbortTimeoutSec
+}
 
 // normGate 按缺省值补齐门控参数。
 func normGate(g GateCfg) GateCfg {
@@ -309,6 +331,8 @@ func normGate(g GateCfg) GateCfg {
 	if g.LowPerfLockMs <= 0 {
 		g.LowPerfLockMs = 300000
 	}
+	// AbortTimeoutMs 不在 normGate 补缺省: 0 是有意义的「关闭打断」。缺省 60s 在
+	// Config.limitAbortTimeoutSec 解析 (配置未写时), 一旦到了 GateCfg 就原样保留。
 	if g.StickyTTLMs <= 0 {
 		g.StickyTTLMs = 300000 // 5min
 	}

@@ -17,7 +17,7 @@ func TestAdjustGateBounds(t *testing.T) {
 		6: {1000, 86400000}, 7: {1000, 86400000}, 8: {1000, 86400000},
 		9: {1000, 86400000}, 10: {1000, 86400000},
 		11: {1, 100000}, 12: {1, 100000}, 13: {1, 100},
-		14: {0, 86400000},
+		14: {0, 86400000}, 15: {0, 86400000},
 	}
 	for i, b := range bounds {
 		e.gateSel = i
@@ -108,7 +108,7 @@ func TestGateLabelsNoBlockWindow(t *testing.T) {
 			t.Errorf("gateLabels 不应含 block_window 键: %q", k)
 		}
 	}
-	if len(gateLabels) != 15 || len(gateCN) != len(gateLabels) {
-		t.Fatalf("gateLabels 应为 15 项且与 gateCN 等长, 实际 %d/%d", len(gateLabels), len(gateCN))
+	if len(gateLabels) != 16 || len(gateCN) != len(gateLabels) {
+		t.Fatalf("gateLabels 应为 16 项且与 gateCN 等长, 实际 %d/%d", len(gateLabels), len(gateCN))
 	}
 }

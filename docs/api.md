@@ -142,6 +142,15 @@ key):
    `lowperf_ttfb_max_ms` 时延门槛 (超限视为失败重锁), 且解锁后一个观察窗口内再次变慢时,
    重锁时长逐次翻倍 (基础 ×2/×4/×8 封顶) —— 免得「放行一笔又锁上」的周期抖动.
 
+**流式打断** (`abort_timeout_sec`, 缺省 60s, 0 = 关闭): 只对流式请求生效, 转发过程中
+每约 200ms 判一次 —— 当解码时长 (从首字节起算, 不是 TTFB) 超过打断超时, 且实时性能
+(r*, 与低性能锁同一口径) 低于 `lowperf_avg_max`、并且低于历史平均的 `lowperf_rel_max`
+倍时 (历史样本不足 2 笔不判), 主动掐断这条流: 客户端收到一条 `event: error` 后关流
+(HTTP 状态保持 200, 头已发出, 见 §5.4), 该 `上游/模型` 按低性能锁形态加锁
+(`lowperf_lock_ms`, 走观察期翻倍), 但**这次请求的性能样本不计入历史** —— 免得越打断
+历史平均越低、相对门槛越宽. 豁免名单 `lowperf_exempt` 同样生效; 已在低性能锁内的模型
+不重复加锁.
+
 ## 5. 代理合成的错误
 
 ### 5.1 一览
@@ -191,6 +200,10 @@ key):
 event: error
 data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_error"}}
 ```
+
+流式打断 (解码时长超过打断超时且实时性能过低, 见 §4) 也走这条 error 事件收尾:
+头已发出, HTTP 状态保持 200, 客户端只能看到流内的 error 事件; 打断请求不计性能样本,
+但会给该 `上游/模型` 打低性能锁.
 
 ## 6. 只读观测面
 
@@ -245,6 +258,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
   `logical` / `upstream` / `model` / `msg`. `kind`: `stage` (请求阶段战报, 短词链
   `from(参数) → to(参数)`: 进 sem 是 `new(逻辑名) / switch(新候选) / retry(候选) → sem(供应商)`, 之后
   `sem → freq → queue(候选) → send → recv`) / `ok` (成功收尾 `recv → ok(200)`) /
+  `abort` (流式打断的结局 `recv → abort(r 3.5 / hist 58)`, 与 `ok` 互斥, 见 §4) /
   `error` (每段候选失败的结局: `send → fail(归类词|状态码|connection)` 或
   `sem → reject(原因)`, 请求整体结局 = 链上最后一条) / `gate` (进入退避 `backoff`) /
   `lock` (`lock(quota 组名 05:00)` / `lock(breaker 05:00)` /
@@ -267,7 +281,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 { "version": "1fc741d" }
 ```
 
-- `version`: 语义化版本号 (当前 `0.2.0`), 定义在 `src/version.go` 的 `var version`,
+- `version`: 语义化版本号 (当前 `0.9.0`), 定义在 `src/version.go` 的 `var version`,
   随代码变更递增 (规则见根目录 AGENTS.md); 常规构建直接用源码里的版本,
   发布构建可用 `make VERSION=x build` 覆盖注入, 都不经 make 时回退为二进制嵌入的
   git 提交号, 都拿不到写 `dev`.
@@ -301,6 +315,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 | `lock_skips` / `backoff_skips` | 候选被锁 / 在退避而被跳过的次数 |
 | `ttfb_ms` / `decode_ms` / `tps` | 首字节时延 / 解码段时长(首字节到流末, 仅流式) / 解码吞吐 tokens/s (流式才有) |
 | `bytes` / `bps` | 转发给客户端的响应体字节数 / 接收的字节吞吐 bytes/s (流式才有 bps) |
+| `abort` / `abort_ms` / `abort_r` / `abort_hist` | 流被打断 (解码超过打断超时且实时性能过低, 见 §4): 布尔标记 / 打断时刻的解码时长 (从首字节起算, ms) / 打断时刻的实时性能 r* / 打断时刻的历史平均 (判相对门槛的基准); 打断请求不计入低性能锁历史样本 |
 | `duration_ms` | 请求耗时 (收到请求到写完响应), 供不把空闲计入分母的吞吐 |
 
 一笔请求通常落一行; 若候选链里有上游真实返回了 HTTP 错误, 每个这样的错误都会

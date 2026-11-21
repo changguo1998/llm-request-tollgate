@@ -337,6 +337,9 @@ var eventOKRe = regexp.MustCompile(`\b(ok)(\([^)]*\))`)
 // eventFailRe 匹配失败结局 fail(原因): 整个词上红字。
 var eventFailRe = regexp.MustCompile(`\bfail\([^)]*\)`)
 
+// eventAbortRe 匹配打断结局 abort(参数): 与失败同色红字 (打断不是正常收尾)。
+var eventAbortRe = regexp.MustCompile(`\babort\([^)]*\)`)
+
 // paintOver 把一层语义色叠到已经带专属色的片段上: 片段内嵌的 reset 会清掉颜色,
 // 这里在每个 reset 之后补回语义色, 末尾再收一次。
 func paintOver(color, s string) string {
@@ -360,6 +363,7 @@ func (m *tuiModel) colorEventBody(s string) string {
 	}
 	s = eventAbnRe.ReplaceAllStringFunc(s, func(tok string) string { return paintOver(tuiYell, tok) })
 	s = eventFailRe.ReplaceAllStringFunc(s, func(tok string) string { return paintOver(tuiRed, tok) })
+	s = eventAbortRe.ReplaceAllStringFunc(s, func(tok string) string { return paintOver(tuiRed, tok) })
 	return eventOKRe.ReplaceAllString(s, tuiGreen+"$1$2"+tuiReset)
 }
 

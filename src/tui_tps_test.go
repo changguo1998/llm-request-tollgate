@@ -105,7 +105,7 @@ func TestRelayStreamCountsReasoning(t *testing.T) {
 	}, "\n"))
 	var got []int
 	ro := relayStream(httptest.NewRecorder(), body, "m1", "real-m1", time.Now(), false,
-		func(tokens int, _ int64, firstAt time.Time) { got = append(got, tokens) })
+		func(tokens int, _ int64, _ time.Time, _ *relayHint) { got = append(got, tokens) })
 	if len(got) == 0 || got[len(got)-1] <= 0 {
 		t.Fatalf("思考增量应计入输出 token, 得到 %v", got)
 	}

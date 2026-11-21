@@ -17,13 +17,27 @@ type relayOut struct {
 	TtfbMs   int64
 	DecodeMs int64
 	Bytes    int64 // 转发给客户端的响应体字节数 (SSE 行 + 补发的 error 事件)
+	// Aborted 表示流被实时判定打断 (解码超时 + 实时性能过低), 不是正常 [DONE] 收尾;
+	// AbortMs / AbortR 是打断时刻的解码时长与实时性能值 (仅 Aborted 时有意义)。
+	Aborted bool
+	AbortMs int64
+	AbortR  float64
+}
+
+// relayHint 是每次实时回写带回的判定结果: live 回调查完打断条件后, 经它告诉 relay
+// 是否应停止转发; 打断时带上判定时刻的解码时长与实时性能值, 供上层记账。
+type relayHint struct {
+	Abort   bool
+	AbortMs int64
+	AbortR  float64
 }
 
 // relayStream 按行透传 SSE, 期间提取流末 usage 并统计已转发的响应字节数。
 // 流未以 [DONE] 正常结束时, 发一个 SSE error 事件后关流, 不伪造正常结束。
-// live 每约 200ms 回写一次已收到的输出 token 数、响应字节数与首字节时刻, 可为 nil。
+// live 每约 200ms 回写一次已收到的输出 token 数、响应字节数与首字节时刻, 可为 nil;
+// 回写经 hint 带回判定结果, hint.Abort = true 时立即停止读取 (等上层收尾)。
 // 返回提取到的 usage 与是否缺失。
-func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel string, start time.Time, isResponses bool, live func(tokens int, bytes int64, firstAt time.Time)) relayOut {
+func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel string, start time.Time, isResponses bool, live func(tokens int, bytes int64, firstAt time.Time, hint *relayHint)) relayOut {
 	flusher, _ := w.(http.Flusher)
 	sc := bufio.NewScanner(body)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
@@ -31,6 +45,8 @@ func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel strin
 	acc := relayAcc{}
 	var firstAt, lastAt time.Time // 首字节 / 末字节时刻 (被动时延采样)
 	var lastLive time.Time        // 上次回写实时吞吐的时刻 (节流用)
+	var abort bool                // 实时判定命中: 停止读取, 走非正常结束分支收尾
+	var hint relayHint
 
 	write := func(s string) {
 		if _, err := io.WriteString(w, s); err != nil {
@@ -52,18 +68,26 @@ func relayStream(w http.ResponseWriter, body io.Reader, logical, realModel strin
 			line = acc.feed(line, isResponses, logical, realModel)
 		}
 		write(line + "\n")
-		// 实时吞吐: 最多 200ms 回写一次, 不每行都去抢 flowMu。
-		if live != nil && !firstAt.IsZero() && now.Sub(lastLive) >= 200*time.Millisecond {
+		// 实时吞吐与打断判定: 最多 200ms 一次, 不每行都去抢 flowMu。流已到终态
+		// ([DONE] / responses 的终态事件) 后不再判 —— 正常收尾的流不该被误判成打断。
+		if live != nil && !firstAt.IsZero() && !acc.done && now.Sub(lastLive) >= 200*time.Millisecond {
 			lastLive = now
-			live(acc.est, bytesOut, firstAt)
+			hint = relayHint{}
+			live(acc.est, bytesOut, firstAt, &hint)
+			if hint.Abort {
+				abort = true
+				break
+			}
 		}
 	}
 	if !acc.done {
-		// 流未正常结束: 用流内约定形态表达错误。
+		// 流未正常结束 (含打断): 用流内约定形态表达错误。
 		write("event: error\n")
 		write(`data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_error"}}` + "\n\n")
 	}
-	return relayResult(acc.usage, acc.est, firstAt, lastAt, start, bytesOut)
+	ro := relayResult(acc.usage, acc.est, firstAt, lastAt, start, bytesOut)
+	ro.Aborted, ro.AbortMs, ro.AbortR = abort, hint.AbortMs, hint.AbortR
+	return ro
 }
 
 // relayAcc 累计一次流式转发的用量与终态 (逐行喂入)。
