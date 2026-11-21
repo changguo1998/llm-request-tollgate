@@ -9,7 +9,7 @@ import (
 // version 是构建版本号 (语义化版本, 规则见根目录 AGENTS.md): 提交时同步递增。
 // 发布构建可用 -ldflags "-X main.version=…" 覆盖;
 // 没注入时 (默认编译 / go test) 直接用这里, 兜底才读二进制嵌入的 git 提交。
-var version = "0.10.0"
+var version = "0.10.1"
 
 // buildVersion 组装对外展示的版本串:
 //   - 编译期注入了非 dev 版本: 直接用注入值;

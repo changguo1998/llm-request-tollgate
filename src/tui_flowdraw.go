@@ -3,7 +3,6 @@
 package main
 
 import (
-	"strconv"
 	"strings"
 )
 
@@ -12,8 +11,8 @@ const drawFlowChainCol = 3
 
 // drawFlow 是第 1 页: 自上而下依次是 上游状态表 / 模型-路由聚合表 / 请求表 (每笔请求
 // 按尝试一行, 最新请求在最上面)。三张表一起滚动, 页面上没有固定表头; 请求表的阶段链
-// 列按「阶段网格」渲染: 每阶段一格 (序号在前, 格宽全局统一), 各请求的第 n 阶段纵向对齐,
-// 格子间用 " → " 分隔; 列放不下时折行, 折出来的新显示行重新从 1 计数。
+// 列按「阶段网格」渲染: 每阶段一格, 格宽按阶段位统一, 各请求的第 n 个阶段纵向对齐,
+// 格子间用 " → " 分隔; 列放不下时折行, 折出的新显示行接着往下排。
 func (m *tuiModel) drawFlow(c *tuiCanvas, body int) {
 	full := &tuiCanvas{cols: c.cols}
 	curLine := m.drawModelsBody(full) // 上游状态 + 模型/路由聚合, 排在最前
@@ -68,7 +67,7 @@ func flowRowsFromLines(lines []flowLine) [][]string {
 // flowSepW 是阶段分隔符 " → " 的显示宽 (stageSep 由三部分组成: 空格 + 箭头 + 空格)。
 const flowSepW = 3
 
-// flowPosWidth 算每个阶段位 (0 基, 排满所有显示行) 的格宽: 序数 "N " + 该位最宽内容。
+// flowPosWidth 算每个阶段位 (0 基, 排满所有显示行) 的格宽: 取该位各显示行最宽的内容。
 // 位宽按位取最大, 各显示行的第 n 个阶段就能从同一列起。
 func flowPosWidth(lines []flowLine) []int {
 	maxPos := 0
@@ -80,7 +79,7 @@ func flowPosWidth(lines []flowLine) []int {
 	w := make([]int, maxPos)
 	for _, ln := range lines {
 		for i, s := range ln.stages {
-			if n := tuiWidth(s) + 2; n > w[i] {
+			if n := tuiWidth(s); n > w[i] {
 				w[i] = n
 			}
 		}
@@ -111,7 +110,7 @@ func flowBlocks(w []int, colW int) [][2]int {
 	return out
 }
 
-// paddedFlowChain 把一条阶段链按位宽补齐成一整行 (不做折行, 编号 1..P): 供 tableLayout
+// paddedFlowChain 把一条阶段链按位宽补齐成一整行 (不做折行): 供 tableLayout
 // 算阶段列宽用 —— 网格的实宽是各阶段位补宽后的总和, 不是未补齐的内容宽, 否则长格一被
 // 补宽, 原本一排能放下的请求也会被误折行。
 func paddedFlowChain(stages, tail []string, posW []int) string {
@@ -123,8 +122,7 @@ func paddedFlowChain(stages, tail []string, posW []int) string {
 	}
 	parts := make([]string, 0, len(stages))
 	for i, s := range stages {
-		cell := tuiTrunc(strconv.Itoa(i+1)+" "+s, posW[i])
-		parts = append(parts, tuiPad(cell, posW[i]))
+		parts = append(parts, tuiPad(tuiTrunc(s, posW[i]), posW[i]))
 	}
 	line := strings.Join(parts, stageSep)
 	if len(tail) > 0 {
@@ -133,9 +131,9 @@ func paddedFlowChain(stages, tail []string, posW []int) string {
 	return line
 }
 
-// flowGrid 把一条阶段链排成对齐的显示行: 每阶段一格 (序数前置), 格宽按位统一, 各显示行
-// 的第 n 个阶段的起点落在同一列; 位排不下时折行, 折出的新显示行重新从 1 计数。链尾挂在
-// 最后一行末尾 (超宽截断)。返回每显示行的字符串 (不含前几列)。
+// flowGrid 把一条阶段链排成对齐的显示行: 每阶段一格, 格宽按位统一, 各显示行的第 n 个阶段
+// 的起点落在同一列; 位排不下时折行, 折出的新显示行接着往下排。链尾挂在最后一行末尾
+// (超宽截断)。返回每显示行的字符串 (不含前几列)。
 func flowGrid(stages, tail []string, w []int, blocks [][2]int, colW int) []string {
 	if len(stages) == 0 {
 		if len(tail) == 0 {
@@ -152,8 +150,7 @@ func flowGrid(stages, tail []string, w []int, blocks [][2]int, colW int) []strin
 		last := start+n >= len(stages) // 这条链的最后一格落在这块
 		parts := make([]string, 0, n)
 		for p := start; p < start+n && p < len(stages); p++ {
-			cell := tuiTrunc(strconv.Itoa(p-start+1)+" "+stages[p], w[p])
-			parts = append(parts, tuiPad(cell, w[p]))
+			parts = append(parts, tuiPad(tuiTrunc(stages[p], w[p]), w[p]))
 		}
 		line := strings.Join(parts, stageSep)
 		if last && len(tail) > 0 {

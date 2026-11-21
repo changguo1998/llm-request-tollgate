@@ -60,7 +60,7 @@ func TestFlowGridAlign(t *testing.T) {
 		{stages: []string{"queue(real1) 0.5s", "recv 4s"}, tail: []string{"quota 05:00"}},
 	}
 	w := flowPosWidth(lines)
-	if w[0] != 19 || w[1] != 9 || w[2] != 6 { // 位 0 = max(10,17)+2, 位 1 = 7+2, 位 2 = 4+2
+	if w[0] != 17 || w[1] != 7 || w[2] != 4 { // 位 0 = max(10,17), 位 1 = 7, 位 2 = 4
 		t.Fatalf("位宽应按位取最大: %v", w)
 	}
 	blocks := flowBlocks(w, 80)
@@ -69,29 +69,30 @@ func TestFlowGridAlign(t *testing.T) {
 	}
 	g0 := stripANSI(flowGrid(lines[0].stages, lines[0].tail, w, blocks, 80)[0])
 	g1 := stripANSI(flowGrid(lines[1].stages, lines[1].tail, w, blocks, 80)[0])
-	i0 := strings.Index(g0, "2 ")
-	i1 := strings.Index(g1, "2 ")
+	// 第 2 阶段的格子 (freq / recv) 应落在同一列。
+	i0 := strings.Index(g0, "freq")
+	i1 := strings.Index(g1, "recv")
 	if i0 < 0 || i1 < 0 {
 		t.Fatalf("两行都应显示第 2 阶段: %q / %q", g0, g1)
 	}
 	if i0 != i1 {
 		t.Errorf("第 2 阶段应同一列: 行0 在 %d, 行1 在 %d\n%q\n%q", i0, i1, g0, g1)
 	}
-	if !strings.Contains(g0, "3 send") {
-		t.Errorf("行0 应有第 3 阶段: %q", g0)
+	if !strings.HasPrefix(g0, "sem(") || !strings.HasPrefix(g1, "queue(") {
+		t.Errorf("格子应直接以阶段词起头, 不带序号: %q / %q", g0, g1)
 	}
 	if !strings.HasSuffix(g1, "quota 05:00") {
 		t.Errorf("链尾应挂最后: %q", g1)
 	}
-	// 短行只出到自己的阶段数, 但也从 1 起头、位宽对齐。
-	if !strings.HasPrefix(g1, "1 ") {
-		t.Errorf("行1 应从 1 起头: %q", g1)
+	// 短行只出到自己的阶段数。
+	if strings.Contains(g0, "recv") || strings.Contains(g1, "send") {
+		t.Errorf("短行不该多出没走过的阶段: %q / %q", g0, g1)
 	}
 }
 
-// 阶段网格折行: 位排不下时折行, 折出的新显示行重新从 1 计数; 每块总宽不超阶段列宽;
-// 链尾挂在最后一行末尾。
-func TestFlowGridWrapRenumber(t *testing.T) {
+// 阶段网格折行: 位排不下时折行, 折出的新显示行接着往下排; 每块总宽不超阶段列宽;
+// 链尾挂在最后一行末尾; 阶段词折行后仍按序齐全。
+func TestFlowGridWrap(t *testing.T) {
 	lines := []flowLine{{
 		stages: []string{"new(m1) 2s", "sem(u1) 3s", "freq 5s", "queue(mm) 10s", "send", "recv 4s"},
 	}}
@@ -118,10 +119,15 @@ func TestFlowGridWrapRenumber(t *testing.T) {
 	if len(grid) < 2 {
 		t.Fatalf("窄列应折成多行: %v", grid)
 	}
+	flat := stripANSI(strings.Join(grid, " "))
+	for _, tok := range []string{"new(", "sem(", "freq", "queue(", "send", "recv"} {
+		if !strings.Contains(flat, tok) {
+			t.Errorf("折行后阶段应仍按序齐全, 缺 %q: %q", tok, flat)
+		}
+	}
 	for i, g := range grid {
-		g = stripANSI(g)
-		if !strings.HasPrefix(g, "1 ") {
-			t.Errorf("第 %d 显示行应从 1 起头: %q", i+1, g)
+		if strings.TrimSpace(stripANSI(g)) == "" {
+			t.Errorf("第 %d 显示行不应为空: %q", i+1, g)
 		}
 	}
 	if !strings.HasSuffix(stripANSI(grid[len(grid)-1]), "fail(502)") {
@@ -129,7 +135,7 @@ func TestFlowGridWrapRenumber(t *testing.T) {
 	}
 }
 
-// 整页画出来也按位对齐: 两个请求的第 2 阶段 ("→ 2 ") 落在同一列。
+// 整页画出来也按位对齐: 两个请求的第 2 阶段 (freq) 落在同一列, 且不带序号前缀。
 func TestFlowGridDrawnAligned(t *testing.T) {
 	openTestPTY(t, 40, 140)
 	m := newTUIModel("cfg")
@@ -144,21 +150,21 @@ func TestFlowGridDrawnAligned(t *testing.T) {
 				Segs: []float64{2, 3, 5, 10, 0.5, 4}}}},
 	}
 	out := stripANSI(m.draw())
-	if !strings.Contains(out, "1 sem(") {
-		t.Fatal("阶段列应有序数 1 前置")
+	if !strings.Contains(out, "sem(ustc)") {
+		t.Fatal("阶段列应有阶段词")
 	}
-	var col2 []int
+	var colF []int
 	for _, ln := range strings.Split(out, "\r\n") {
-		if i := strings.Index(ln, "→ 2 "); i >= 0 {
-			col2 = append(col2, i+2) // "2" 的列
+		if i := strings.Index(ln, "freq"); i >= 0 {
+			colF = append(colF, i)
 		}
 	}
-	if len(col2) < 2 {
-		t.Fatalf("至少两行应显示第 2 阶段: %v", col2)
+	if len(colF) < 2 {
+		t.Fatalf("至少两行应显示第 2 阶段 freq: %v", colF)
 	}
-	for _, c := range col2[1:] {
-		if c != col2[0] {
-			t.Errorf("第 2 阶段列应一致: %v", col2)
+	for _, c := range colF[1:] {
+		if c != colF[0] {
+			t.Errorf("第 2 阶段列应一致: %v", colF)
 		}
 	}
 }
