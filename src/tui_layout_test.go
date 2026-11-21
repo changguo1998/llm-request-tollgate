@@ -308,12 +308,11 @@ func TestAutoColsFillsToBoundary(t *testing.T) {
 	}
 }
 
-// active 页主表在 120 列终端上不该丢列: 8 列 (编号 / 逻辑名 / 流式 + 5 个阶段) 都可见。
+// active 页主表在 120 列终端上不该丢列: 3 列 (编号 / 逻辑名 / 阶段) 都可见。
 func TestActiveTableKeepsAllColsAt120(t *testing.T) {
 	rows := [][]string{{
-		"12345", "claude-3-5-sonnet", "是",
-		"sem(group) 0.2s", "freq(group) 0.1s", "queue(group/claude-sonnet-4-5-20250929) 0.5s",
-		"send 0.5s", "recv 2.8s",
+		"12345", "claude-3-5-sonnet",
+		"sem(group) 0.2s → freq(group) 0.1s → queue(group/claude-sonnet-4-5-20250929) 0.5s → send 0.5s → recv 2.8s",
 	}}
 	cols := autoCols(activeCols, rows, 120)
 	if w := tableWidth(cols); w > 120 {
@@ -346,10 +345,10 @@ func TestFlowTryCells(t *testing.T) {
 		t.Fatalf("一次回退应占两行, 得到 %d", len(rows))
 	}
 	if rows[0][0] != "101" || rows[0][1] != "m1" {
-		t.Errorf("首行标识列不对: %v", rows[0][:3])
+		t.Errorf("首行标识列不对: %v", rows[0][:2])
 	}
-	if rows[1][0] != "" || rows[1][1] != "" || rows[1][2] != "" {
-		t.Errorf("回退行标识列应留空: %v", rows[1][:3])
+	if rows[1][0] != "" || rows[1][1] != "" {
+		t.Errorf("回退行标识列应留空: %v", rows[1][:2])
 	}
 	// 逻辑名带专属色 (与事件页标识列同一写法); 没有配色的名字原样输出。
 	m.logicalColors = map[string]string{"m1": tuiGreen}
@@ -359,14 +358,34 @@ func TestFlowTryCells(t *testing.T) {
 	if got := m.flowRows()[0][0]; got != "101" {
 		t.Errorf("编号列不上色, 得到 %q", got)
 	}
+	// 流式请求在逻辑名后标 ~, 非流式不带。
+	fs := f
+	fs.Stream = true
+	fs.Tries = []flowTry{{Up: "u1", Model: "real1", Cur: stageQueue,
+		Segs: []float64{0, 0.3, 0, 0, 0, 0}}}
+	fn := f
+	fn.Stream = false
+	fn.Tries = []flowTry{{Up: "u1", Model: "real1", Cur: stageQueue,
+		Segs: []float64{0, 0.3, 0, 0, 0, 0}}}
+	m.pulse.Active = []flow{fs, fn}
+	gotStream := stripANSI(m.flowRows()[0][1])
+	if gotStream != "m1~" {
+		t.Errorf("流式请求逻辑名应带 ~, 得到 %q", gotStream)
+	}
+	m.pulse.Active = []flow{fn}
+	if got := stripANSI(m.flowRows()[0][1]); got != "m1" {
+		t.Errorf("非流式请求逻辑名不该带 ~, 得到 %q", got)
+	}
 	// 首行: 一条链写到发送 (含结局词), 接收还没到, 不出现在链里。
+	m.pulse.Active = []flow{f}
+	rows = m.flowRows()
 	want := "sem(u1) → freq → queue(real1) → send " +
 		tuiRed + "fail(502)" + tuiReset
-	if got := rows[0][3]; got != want {
+	if got := rows[0][2]; got != want {
 		t.Errorf("首行的阶段链应为 %q, 得到 %q", want, got)
 	}
 	// 回退行: 从并发池重新开始, 当前在频率队列 (实时走); 耗时用前景色。
-	raw := rows[1][3]
+	raw := rows[1][2]
 	if !strings.HasPrefix(stripANSI(raw), "sem(u2) → freq 2s") {
 		t.Errorf("回退行应从并发池重新开始: %q", raw)
 	}
@@ -450,8 +469,8 @@ func TestFlowTablesAndEventsScroll(t *testing.T) {
 		Models: []candModelLock{{Model: "m1", Queue: 1}}}}
 	m.tab = tabActive
 	out := m.draw()
-	// 第 1 页一张请求表: 表头只写前三列, 阶段列不写列名 (阶段由格首短词说明)。
-	for _, title := range []string{"编号", "逻辑名", "流式"} {
+	// 第 1 页一张请求表: 表头只写前两列, 阶段列不写列名 (阶段由格首短词说明)。
+	for _, title := range []string{"编号", "逻辑名"} {
 		if !strings.Contains(stripANSI(out), title) {
 			t.Errorf("active 页缺少列名 %q", title)
 		}
@@ -575,7 +594,7 @@ func TestFlowHeaderAlwaysShown(t *testing.T) {
 	m := newTUIModel("cfg")
 	m.tab = tabActive
 	out := stripANSI(m.draw())
-	for _, name := range []string{"编号", "逻辑名", "流式"} {
+	for _, name := range []string{"编号", "逻辑名"} {
 		if !strings.Contains(out, name) {
 			t.Errorf("空表也应显示列名 %q", name)
 		}

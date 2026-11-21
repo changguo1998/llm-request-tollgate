@@ -10,21 +10,21 @@ import (
 	"time"
 )
 
-// 第 1 页一张表: 前三列是请求标识, 最后一列是阶段网格 (到过的阶段一格一阶段, 格宽按阶段
-// 位统一, 各请求的第 n 个阶段纵向对齐; 列放不下时折行, 折出的新显示行接着往下排)。换候选
-// / 同候选重试另起一行, 前三列留空, 链从并发池重新开始 (与上一行的链首左对齐)。
-// 列宽下限: 编号 7 / 逻辑名 6 / 流式 1, 阶段网格列沿用事件列的 40; 有内容或有空间时再按内容涨。
+// 第 1 页一张表: 前两列是请求标识 (编号 / 逻辑名; 流式请求的逻辑名后标 ~, 非流式不带),
+// 最后一列是阶段网格 (到过的阶段一格一阶段, 格宽按阶段位统一, 各请求的第 n 个阶段纵向
+// 对齐; 列放不下时折行, 折出的新显示行接着往下排)。换候选 / 同候选重试另起一行, 前两列
+// 留空, 链从并发池重新开始 (与上一行的链首左对齐)。
+// 列宽下限: 编号 7 / 逻辑名 6, 阶段网格列沿用事件列的 40; 有内容或有空间时再按内容涨。
 var activeCols = []tuiCol{
 	{"编号", 7, true, true, 2}, {"逻辑名", 6, true, false, 0},
-	{"流式", 1, true, false, 1},
 	{"阶段", 40, true, false, 0},
 }
 
-// flowLine 是请求表的一显示行 (一次尝试): 前三列标识 + 各阶段格 (不带序号) + 链尾附加。
+// flowLine 是请求表的一显示行 (一次尝试): 前两列标识 + 各阶段格 + 链尾附加。
 // 阶段格单独存是为了对齐: 网格渲染时按阶段位统一格宽, 各请求的第 n 阶段能纵向对齐。
 type flowLine struct {
-	head   []string // 编号 / 逻辑名 / 流式 (回退行为空串)
-	stages []string // 各阶段显示串 (如 "sem(u1) 3s", 不带序号)
+	head   []string // 编号 / 逻辑名 (流式请求逻辑名后带 ~; 回退行为空串)
+	stages []string // 各阶段显示串 (如 "sem(u1) 3s")
 	tail   []string // 链尾: 卡住原因 / 接收中的实时性能 / 结局词
 }
 
@@ -48,14 +48,15 @@ func (m *tuiModel) flowLines() []flowLine {
 		for i, tr := range tries {
 			ln := flowLine{stages: m.stageTokens(f, tr), tail: m.stageTail(f, tr)}
 			if i == 0 {
-				tag := "否"
+				// 逻辑名带专属色, 与事件页标识列同一写法; 流式请求在逻辑名后标 ~,
+				// 非流式不带 — 原来的独立「流式」列并入逻辑名这一格。
+				name := m.logicalName(f.Logical)
 				if f.Stream {
-					tag = "是"
+					name += "~"
 				}
-				// 逻辑名带专属色, 与事件页标识列同一写法。
-				ln.head = []string{strconv.FormatUint(f.ID, 10), m.logicalName(f.Logical), tag}
+				ln.head = []string{strconv.FormatUint(f.ID, 10), name}
 			} else {
-				ln.head = []string{"", "", ""} // 回退行: 标识列留空
+				ln.head = []string{"", ""} // 回退行: 标识列留空
 			}
 			out = append(out, ln)
 		}

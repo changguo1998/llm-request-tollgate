@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-// drawFlowChainCol 是阶段链所在列 (最后列, 与事件页的事件列一样独占剩余宽度)。
-const drawFlowChainCol = 3
+// drawFlowChainCol 是阶段网格所在列 (最后列, 与事件页的事件列一样独占剩余宽度)。
+const drawFlowChainCol = 2
 
 // drawFlow 是第 1 页: 自上而下依次是 上游状态表 / 模型-路由聚合表 / 请求表 (每笔请求
 // 按尝试一行, 最新请求在最上面)。三张表一起滚动, 页面上没有固定表头; 请求表的阶段链
