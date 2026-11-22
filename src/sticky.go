@@ -131,16 +131,34 @@ func (s *sticky) reset(logical string) int {
 	return n
 }
 
-// prune 配置热加载后清掉失效偏好: 逻辑名没了或下标越界 (候选集变化) 一律作废,
-// 让流量从配置顺序重新积累。调用方持 a.mu (applyConfig 重建 aliases 后调用)。
-func (s *sticky) prune(aliases map[string][]aliasTarget) {
+// remap 配置热加载后按候选身份重钉偏好下标: 候选链顺序变 (第 3 页调优先级) 时偏好跟着
+// 同一 上游/模型 走, 而不是留在原位置点错候选; 逻辑名没了、偏好下标在旧表里越界或
+// 偏好候选被移除时作废, 让流量从配置顺序重新积累 (与候选被移除后的旧行为一致)。
+// old 是热加载前的别名表 (偏好下标都按它解析), cur 是新表; 调用方持 a.mu
+// (applyConfig 重建 aliases 前后各传一份), 锁序 a.mu -> s.mu。
+func (s *sticky) remap(old, cur map[string][]aliasTarget) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for logical, p := range s.prefs {
-		list, ok := aliases[logical]
-		if !ok || p.pref < 0 || p.pref >= len(list) {
+		oldList, ok := old[logical]
+		curList, ok2 := cur[logical]
+		if !ok || !ok2 || p.pref < 0 || p.pref >= len(oldList) {
 			delete(s.prefs, logical)
+			continue
 		}
+		at := oldList[p.pref]
+		idx := -1
+		for i, t := range curList {
+			if t.Upstream == at.Upstream && t.Model == at.Model {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			delete(s.prefs, logical) // 偏好候选被移除: 作废, 下笔按配置顺序重新积累
+			continue
+		}
+		p.pref = idx // 候选还在: 偏好跟着它走 (顺序变了就重钉下标)
 	}
 }
 

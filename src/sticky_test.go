@@ -72,20 +72,65 @@ func TestStickyLongLockReasons(t *testing.T) {
 	}
 }
 
-// prune 热加载后清掉越界偏好; 有效偏好保留。
+// remap 热加载后: 候选还按身份跟随新顺序, 逻辑名没了或偏好候选被移除的作废。
 func TestStickyPruneInvalidatesOnConfigChange(t *testing.T) {
 	s := newSticky()
-	s.served("m1", 1, 0, true, false) // m1 长期锁顶班 -> 偏好 = 1
-	s.served("m2", 0, 0, true, false) // m2 记录存在, 偏好 = 0 (服务在偏好上)
-	s.prune(map[string][]aliasTarget{
+	old := map[string][]aliasTarget{
 		"m1": {{Upstream: "u1", Model: "r1"}, {Upstream: "u2", Model: "r2"}},
-		"m3": {{Upstream: "u1", Model: "r1"}}, // m2 从配置里消失
+		"m2": {{Upstream: "u1", Model: "r1"}},
+	}
+	s.served("m1", 1, 0, true, false) // m1 长期锁顶班 -> 偏好 = 1 (u2/r2)
+	s.served("m2", 0, 0, true, false) // m2 记录存在, 偏好 = 0 (服务在偏好上)
+	s.remap(old, map[string][]aliasTarget{
+		"m1": {{Upstream: "u2", Model: "r2"}, {Upstream: "u1", Model: "r1"}}, // m1 顺序重排
+		"m3": {{Upstream: "u1", Model: "r1"}},                                // m2 从配置里消失
 	})
-	if got, _ := s.prefIdx("m1", 2, 0, time.Time{}); got != 1 {
-		t.Fatalf("候选集未变时偏好应保留, 实为 %d", got)
+	if got, _ := s.prefIdx("m1", 2, 0, time.Time{}); got != 0 {
+		t.Fatalf("顺序重排后偏好应跟随 u2/r2 到新下标 0, 实为 %d", got)
 	}
 	if got, _ := s.prefIdx("m2", 1, 0, time.Time{}); got != 0 {
 		t.Fatalf("逻辑名消失后偏好应作废回落 0, 实为 %d", got)
+	}
+}
+
+// 第 1 页置粘性偏好到候选链第二位, 第 3 页调优先级后候选重排: 偏好应跟着同一
+// 上游/模型 走 (新下标), 而不是留在原位置点错候选 (复现: 重排前偏好下标 1 钉在
+// 固定位置, 重排后仍返回 1, 但 1 已经是别的候选)。
+func TestStickyFollowsModelOnPriorityReorder(t *testing.T) {
+	cfg := &Config{
+		Upstreams: []UpstreamCfg{
+			{ID: "u1", BaseURL: "http://127.0.0.1:1/v1"},
+			{ID: "u2", BaseURL: "http://127.0.0.1:2/v1"},
+		},
+		Aliases: map[string][][2]string{"m1": {{"u1", "real-1"}, {"u2", "real-2"}}},
+	}
+	app := newTestAppCfg(t, cfg)
+	// 第 1 页 Enter: 置偏好到 u2/real-2 (候选链第二位, 下标 1)。
+	app.sticky.set("m1", 1)
+	if got, _ := app.sticky.prefIdx("m1", 2, 0, time.Time{}); got != 1 {
+		t.Fatalf("置偏好后应为 1, 实为 %d", got)
+	}
+	// 第 3 页调优先级: u2/real-2 提到 u1/real-1 前面, 保存后热加载。
+	app.applyConfig(&Config{
+		Upstreams: []UpstreamCfg{
+			{ID: "u1", BaseURL: "http://127.0.0.1:1/v1"},
+			{ID: "u2", BaseURL: "http://127.0.0.1:2/v1"},
+		},
+		Aliases: map[string][][2]string{"m1": {{"u2", "real-2"}, {"u1", "real-1"}}},
+	})
+	// 偏好应跟随模型身份: u2/real-2 现为首位 (下标 0), 而不是留在 1 点错到 u1/real-1。
+	if got, _ := app.sticky.prefIdx("m1", 2, 0, time.Time{}); got != 0 {
+		t.Fatalf("重排后偏好应跟随模型到新下标 0, 实为 %d (仍钉在旧下标会点错候选)", got)
+	}
+	// 候选被移除的照旧作废: u2 不在链里了, 回落到配置首候选。
+	app.applyConfig(&Config{
+		Upstreams: []UpstreamCfg{
+			{ID: "u1", BaseURL: "http://127.0.0.1:1/v1"},
+		},
+		Aliases: map[string][][2]string{"m1": {{"u1", "real-1"}}},
+	})
+	if got, _ := app.sticky.prefIdx("m1", 1, 0, time.Time{}); got != 0 {
+		t.Fatalf("偏好候选被移除后应回落首候选, 实为 %d", got)
 	}
 }
 

@@ -113,10 +113,12 @@ func (a *App) applyConfig(c *Config) {
 		a.cands = map[string]*cand{}
 	}
 	a.upstreams, a.groups, a.groupOrder = a.rebuildUpstreams(c)
+	old := a.aliases
 	a.aliases = buildAliasTargets(c, a.groups)
-	// 粘性偏好跨热加载保留, 但候选集变化后越界的作废 (配置顺序重新积累)。
+	// 粘性偏好跨热加载保留, 但候选还按身份跟随新顺序 (第 3 页调优先级后不点错候选),
+	// 逻辑名没了或偏好候选被移除的作废, 从配置顺序重新积累。
 	if a.sticky != nil {
-		a.sticky.prune(a.aliases)
+		a.sticky.remap(old, a.aliases)
 	}
 	a.ensureTransport(rh)
 }
