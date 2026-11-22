@@ -24,10 +24,40 @@ const (
 	tuiLive = "\x1b[36m"
 	// tuiEditBg 是 settings 页进入输入编辑 (=) 时的强调背景色 (蓝底), 区别于普通反显。
 	tuiEditBg = "\x1b[44m"
-	// tuiGray 是说明性文字与数值小数位的灰色 (亮黑前景): 不用 SGR 2 暗显, 因为部分终端
-	// 不实现 dim, 整数与小数就分不出颜色; 亮黑在 16 色终端上普遍渲染为中性灰。
-	tuiGray = "\x1b[90m"
 )
+
+// tuiGrayByTheme 是说明性文字与数值小数位的颜色查表: 下标 0 = 深色主题用亮黑 (90,
+// 中性灰), 1 = 浅色主题用浅蓝 (94, 亮蓝)。两个槽都随终端主题变明度, 但亮黑在浅色背景上
+// 偏淡、深白 (37) 更淡, 所以浅色主题改用蓝系 —— 蓝在浅背景上压得住, 又不至于像纯黑那样
+// 和正文抢。按主题查表取定值, 不按前景/背景色值计算。
+// 不用 SGR 2 暗显: 部分终端不实现 dim, 整数与小数就分不出颜色。
+var tuiGrayByTheme = [2]string{"\x1b[90m", "\x1b[94m"}
+
+// tuiLightTheme 是本次运行是否浅色主题: settings 页的主题行切换, 只在内存里 ——
+// 不写配置、不进 store, 重启回到深色。
+var tuiLightTheme bool
+
+// tuiGray 是当前主题的说明文字色 (查表结果, 深色是亮黑灰 / 浅色是浅蓝): 全 TUI 的
+// 说明性文字与小数位共用, 切主题只换这一处。名字沿用历史的 gray, 不按灰/蓝分开叫。
+var tuiGray = tuiGrayByTheme[0]
+
+// setTuiTheme 切主题: 记住状态, 并按表换上说明文字色。
+func setTuiTheme(light bool) {
+	tuiLightTheme = light
+	idx := 0
+	if light {
+		idx = 1
+	}
+	tuiGray = tuiGrayByTheme[idx]
+}
+
+// themeCN 是当前主题的中文名 (settings 页主题行显示用)。
+func themeCN() string {
+	if tuiLightTheme {
+		return "浅色"
+	}
+	return "深色"
+}
 
 // upPalette 是上游的专属色: 状态用红 / 黄 / 绿的正色 (31 / 32 / 33), 这里用青 / 品红 /
 // 蓝系 (含亮色变体) 与亮红 / 亮绿 / 亮黄, 按上游在第 1 页上游表的固定顺序轮流分配, 各页同色。
@@ -50,7 +80,7 @@ var logicalPalette = []string{
 //	绿   = 健康 (live / 事件正文的 ok(200) / 错误数 0)
 //	红   = 错误与锁 (事件正文的 fail(...) / 错误 / 熔断锁 / 额度锁 / 并发锁 / 连续错误 > 0)
 //	黄   = 等待与降级 (事件正文的 switch / retry / 退避 / 低性能锁 / 排队 / 超发试探 / 顶部错误提示)
-//	灰   = 说明 (标题 / 单位 / 位置行 / 空)
+//	灰   = 说明 (标题 / 单位 / 位置行 / 空; 深色主题是亮黑, 浅色主题是浅蓝, 见 tuiGrayByTheme)
 //	青   = 接收中这一段的实时性能 (第 1 页阶段链尾; 无状态含义, 只表示正在收)
 //	前景色 = 事件正文的其余文字
 //	专属色 = 逻辑名与供应商名 (逻辑名: events 标识列 / 请求表 / 模型表分组标题;

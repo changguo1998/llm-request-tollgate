@@ -14,8 +14,10 @@ import (
 	"strings"
 )
 
-// gateLabels 是设置页里 gate 参数的顺序与名字, 与 GateCfg 的字段一一对应;
-// 同类配置归到一起: 其他 (调度等待 + 粘性失效窗口 + 恢复探测) -> 各锁时长 -> 低性能判定, 区之间空一行。
+// gateLabels 是设置页里 gate 参数的顺序与名字, 与 GateCfg 的字段一一对应 (最后一项
+// theme 例外: 它是只在本进程生效的浅色主题开关, 不进配置, 见 gateIdxTheme);
+// 同类配置归到一起: 其他 (调度等待 + 粘性失效窗口 + 恢复探测) -> 各锁时长 -> 低性能判定 -> 主题,
+// 区之间空一行。
 // 时间字段与配置文件的顶层键一致用秒 (`*_sec`, 可小数), 单位见各 gateText;
 // 退避序列只能用 = 按逗号输入 (秒); probe_enabled 是开关 (0/1 = 关/开)。
 var gateLabels = []string{
@@ -24,6 +26,7 @@ var gateLabels = []string{
 	"concurrency_lock_sec", "quota_lock_sec", "breaker_lock_sec", "lowperf_lock_sec",
 	"perf_window_sec", "lowperf_peak_max", "lowperf_avg_max", "lowperf_rel_max", "lowperf_ttfb_max_sec",
 	"abort_timeout_sec",
+	"theme", // 主题 (深/浅): 只在内存里, 不写配置
 }
 
 // gateCN 与 gateLabels 一一对应的中文显示名 (设置页用)。
@@ -33,6 +36,7 @@ var gateCN = []string{
 	"并发锁时长", "额度锁时长", "熔断锁时长", "低性能锁时长",
 	"性能窗口", "低吞吐峰值", "低吞吐平均", "低吞吐历史比", "高延迟阈值",
 	"打断超时",
+	"主题",
 }
 
 // 特殊字段的下标 (code 里按下标分支, 集中在这些常量上, 重排顺序只改 gateLabels/gateCN)。
@@ -45,7 +49,11 @@ const (
 	gateIdxTtfb    = 14 // 高延迟阈值 (0 = 关闭该项)
 	gateIdxProbe   = 5  // 恢复探测开关
 	gateIdxAbort   = 15 // 流式打断超时 (0 = 关闭打断)
+	gateIdxTheme   = 16 // 主题开关 (深/浅): 只在内存里, 不写配置, 必须是 gateLabels 末项
 )
+
+// themeHint 是主题行的编辑提示: 它只有深/浅两态, 用 +/- 翻转, 不开口子输入。
+const themeHint = "主题用 +/- 切换 (只在内存, 不写配置)"
 
 // gateStep 是 +/- 一次调整的步长 (退避序列返回 0 = 不用加减键)。
 func gateStep(i int) int {
@@ -68,6 +76,8 @@ func gateStep(i int) int {
 		return 1000 // 高延迟阈值
 	case 15:
 		return 1000 // 打断超时 (1s 步进; 0 = 关闭)
+	case gateIdxTheme:
+		return 1 // 主题: 每次翻转深/浅
 	}
 	return 0
 }
@@ -110,13 +120,18 @@ func (e *tuiEditor) gateField(i int) int {
 		return g.LowPerfTtfbMaxMs
 	case 15:
 		return g.AbortTimeoutMs
+	case gateIdxTheme: // 主题开关: 全局显示状态, 不在编辑器快照里
+		if tuiLightTheme {
+			return 1
+		}
+		return 0
 	}
 	return 0
 }
 
 // gateText 是设置页里那一行的值+单位: 时间字段与配置一致按秒 (可小数, 单位 s),
 // 退避序列写成逗号秒串; 两个低吞吐门槛是 r* 性能阈值, 显示不带单位, 历史比按百分比,
-// 开关写 开/关。
+// 开关写 开/关, 主题写 深色/浅色。
 func (e *tuiEditor) gateText(i int) string {
 	if i == gateIdxRetry {
 		parts := make([]string, 0, len(e.gate.RetryBackoffMs))
@@ -136,6 +151,9 @@ func (e *tuiEditor) gateText(i int) string {
 			return "开"
 		}
 		return "关"
+	}
+	if i == gateIdxTheme {
+		return themeCN()
 	}
 	return fsec(e.gateField(i)) + " s" // 秒, 可小数
 }
@@ -166,6 +184,9 @@ func (e *tuiEditor) gateNumUnit(i int) (num, unit string) {
 			return "", "开"
 		}
 		return "", "关"
+	}
+	if i == gateIdxTheme {
+		return "", themeCN() // 主题没有数字, 深色/浅色直接摆进单位列
 	}
 	return fsec(e.gateField(i)), "s"
 }
@@ -208,9 +229,15 @@ func (e *tuiEditor) loadGate() {
 	e.gateErr = ""
 }
 
-// adjustGate 用 +/- 改一个参数; 退避序列只走 = 输入。
+// adjustGate 用 +/- 改一个参数; 退避序列只走 = 输入。主题行是开关: 切了不标脏
+// (它只在内存里, 不写配置, 也不参与保存)。
 func (e *tuiEditor) adjustGate(delta int) {
 	i := e.gateSel
+	if i == gateIdxTheme {
+		setTuiTheme(!tuiLightTheme)
+		e.message = "主题 = " + themeCN() + " (只在内存, 不写配置)"
+		return
+	}
 	step := gateStep(i)
 	if step == 0 {
 		e.message = "退避序列用 = 按逗号输入"
@@ -255,6 +282,8 @@ func gateBounds(i int) (lo, hi int) {
 		return 0, 86400000
 	case 15:
 		return 0, 86400000 // 打断超时: 0 = 关闭打断
+	case gateIdxTheme:
+		return 0, 1 // 主题开关 (深 / 浅)
 	}
 	return 0, 0
 }
@@ -267,6 +296,9 @@ func (e *tuiEditor) setGatePrompt(i int, text string) {
 		e.setRetrySeq(text)
 	case i == gateIdxProbe:
 		e.setProbeSwitch(text)
+	case i == gateIdxTheme:
+		// 主题不接受输入: 只有深/浅两态, 用 +/- 翻转就够了。
+		e.message = themeHint
 	case i == gateIdxRel:
 		e.setRelInput(text)
 	case isSecField(i):
@@ -448,6 +480,7 @@ func (e *tuiEditor) saveGate() error {
 }
 
 // gateFlat 是写回配置的调度参数扁平键 (顶层, 秒; 开关写 bool)。
+// 主题 (gateIdxTheme) 不在这里: 它只在内存里, 不落盘, 也不参与保存。
 func (e *tuiEditor) gateFlat(g GateCfg) map[string]any {
 	return map[string]any{
 		"interval_sec":         msToSec(g.IntervalMs),

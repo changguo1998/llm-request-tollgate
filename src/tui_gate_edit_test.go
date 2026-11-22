@@ -101,14 +101,19 @@ func TestSetGatePromptInvalid(t *testing.T) {
 	}
 }
 
-// block_window_sec 已清理: gate 编辑列表不再含它, 长度与中文名一一对应。
+// block_window_sec 已清理: gate 编辑列表不再含它, 长度与中文名一一对应
+// (含末尾的内存主题开关)。
 func TestGateLabelsNoBlockWindow(t *testing.T) {
 	for _, k := range gateLabels {
 		if strings.Contains(k, "block_window") {
 			t.Errorf("gateLabels 不应含 block_window 键: %q", k)
 		}
 	}
-	if len(gateLabels) != 16 || len(gateCN) != len(gateLabels) {
-		t.Fatalf("gateLabels 应为 16 项且与 gateCN 等长, 实际 %d/%d", len(gateLabels), len(gateCN))
+	if len(gateLabels) != 17 || len(gateCN) != len(gateLabels) {
+		t.Fatalf("gateLabels 应为 17 项且与 gateCN 等长, 实际 %d/%d", len(gateLabels), len(gateCN))
+	}
+	if gateLabels[len(gateLabels)-1] != "theme" || gateIdxTheme != len(gateLabels)-1 {
+		t.Fatalf("主题开关应是 gateLabels 末项且 gateIdxTheme 指向它: %v / %d",
+			gateLabels[len(gateLabels)-1], gateIdxTheme)
 	}
 }

@@ -169,7 +169,7 @@ func settingsManyModels(t *testing.T, n int) (string, string) {
 	return filepath.Join(dir, "llm-models.json"), filepath.Join(dir, "tollgate.json")
 }
 
-// settings 全局参数三区分组: 其他 (调度等待 + 粘性 + 探测) | 锁时长 | 低性能设置,
+// settings 全局参数四区分组: 其他 (调度等待 + 粘性 + 探测) | 锁时长 | 低性能设置 | 主题,
 // 区之间各空一行; 区内的键顺序与 gateLabels 一致。
 func TestSettingsGateSections(t *testing.T) {
 	_, cfg := prioFixture(t)
@@ -193,9 +193,11 @@ func TestSettingsGateSections(t *testing.T) {
 		want = append(want, gateCN[i]) // 锁时长
 	}
 	want = append(want, "")
-	for i := 10; i < len(gateCN); i++ {
-		want = append(want, gateCN[i]) // 低性能设置
+	for i := 10; i <= gateIdxAbort; i++ {
+		want = append(want, gateCN[i]) // 低性能设置 (含打断超时)
 	}
+	want = append(want, "")
+	want = append(want, gateCN[gateIdxTheme]) // 主题: 只在内存里的显示开关
 	if len(seq) != len(want) {
 		t.Fatalf("全局参数应有 %d 行 (含 2 空行), 得到 %d:\n%v", len(want), len(seq), seq)
 	}

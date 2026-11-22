@@ -149,6 +149,10 @@ func (e *tuiEditor) gateKey(b byte) bool {
 		e.adjust(-1)
 	case '=':
 		i := e.gateSel
+		if i == gateIdxTheme { // 主题只有两态: 不开输入框, 直接提示用 +/-
+			e.message = themeHint
+			return true
+		}
 		e.prompt = &tuiPrompt{label: "新的 " + gateCN[i] + ":", commit: func(v string) {
 			e.setGatePrompt(i, v)
 		}}
