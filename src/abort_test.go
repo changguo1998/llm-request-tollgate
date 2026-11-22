@@ -202,8 +202,8 @@ func TestCheckStreamAbortExemptAndHit(t *testing.T) {
 	}
 }
 
-// checkLowPerf 的展示判定: 四路低性能阈值 (绝对平均过低 / 相对过低 / 解码时长过长 /
-// 首字节时延过长) 任一命中即 true, 只供 TUI 变色, 不置打断态; 豁免名单内的模型不判。
+// checkLowPerf 的展示判定: 三路低性能阈值 (lb低吞吐绝对/相对 / 解码时长过长 / 首字节
+// 时延过长) 各自独立命中并分别上色, 只供 TUI 变色, 不置打断态; 豁免名单内的模型不判。
 func TestCheckLowPerf(t *testing.T) {
 	app := newTestApp(t, "http://127.0.0.1:1", GateCfg{IntervalMs: 5}, nil)
 	cd := app.candOf("u1")
@@ -222,21 +222,22 @@ func TestCheckLowPerf(t *testing.T) {
 		tokens   int
 		bytes    int64
 		firstAgo time.Duration
-		want     bool
+		want     lowPerfHits
 	}{
 		// r = tokens/firstAgo(ms)*1000; sentAt 固定 1s 前 (ttfb = 1s - firstAgo)。
-		{"未命中", base, 1, 100, 40 * time.Millisecond, false},     // r≈24.4, >= 20 且 >= 15
-		{"绝对平均过低", base, 10, 100, 800 * time.Millisecond, true}, // r≈12.5 < 15
-		{"相对过低", base, 1, 100, 53 * time.Millisecond, true},     // r≈18.5 < 20, 且 >= 15
-		{"解码时长过长", GateCfg{LowPerfAvgMax: 15, AbortTimeoutMs: 500}, 10, 100, time.Second, true},
-		{"高延迟(ttfb过长)", GateCfg{LowPerfTtfbMaxMs: 300}, 0, 0, 500 * time.Millisecond, true}, // ttfb=500ms>300
-		{"豁免名单", exempt, 10, 100, 800 * time.Millisecond, false},
+		{"未命中", base, 1, 100, 40 * time.Millisecond, lowPerfHits{}},                // r≈25, >= 20 且 >= 15
+		{"绝对平均过低", base, 10, 100, 800 * time.Millisecond, lowPerfHits{perf: true}}, // r≈12.5 < 15
+		{"相对过低", base, 1, 100, 53 * time.Millisecond, lowPerfHits{perf: true}},     // r≈18.9 < 20, 且 >= 15
+		{"解码时长过长", GateCfg{LowPerfAvgMax: 15, AbortTimeoutMs: 500}, 10, 100, time.Second,
+			lowPerfHits{decode: true, perf: true}}, // d=1s>500ms, r=10<15 也 <20
+		{"高延迟(ttfb过长)", GateCfg{LowPerfTtfbMaxMs: 300}, 0, 0, 500 * time.Millisecond, lowPerfHits{ttfb: true}}, // ttfb=500ms>300
+		{"豁免名单", exempt, 10, 100, 800 * time.Millisecond, lowPerfHits{}},
 	}
 	for _, c := range cases {
 		st := &serveState{app: app, gate: c.g, servedUp: &UpstreamCfg{ID: "u1"}, heldCand: cd,
 			sentAt: now.Add(-time.Second)}
 		if got := st.checkLowPerf("real-1", c.tokens, c.bytes, now.Add(-c.firstAgo)); got != c.want {
-			t.Errorf("%s: checkLowPerf = %v, 期望 %v", c.name, got, c.want)
+			t.Errorf("%s: checkLowPerf = %+v, 期望 %+v", c.name, got, c.want)
 		}
 		if st.aborted {
 			t.Errorf("%s: checkLowPerf 只做展示判定, 不该置打断态", c.name)

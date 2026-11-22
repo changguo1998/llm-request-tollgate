@@ -122,17 +122,27 @@ func (m *tuiModel) stageTokens(f flow, tr flowTry) []string {
 		toks = append(toks, w+dur(stageModelWait))
 	}
 	if reach(stageSend) {
-		toks = append(toks, "send"+dur(stageSend))
+		toks = append(toks, "send"+colorStage(f.SlowTTFB, dur(stageSend)))
 	}
 	if reach(stageRecv) {
-		toks = append(toks, "recv"+dur(stageRecv))
+		toks = append(toks, "recv"+colorStage(f.SlowDecode, dur(stageRecv)))
 	}
 	return toks
 }
 
+// colorStage 给阶段耗时部分上黄 (命中对应低性能阈值时), 否则原样返回。TTFB 上在 send
+// 格, 解码时长上在 recv 格 —— 只给耗时上色, 不改阶段单词; 网格宽度照常按可见字符算。
+func colorStage(yes bool, s string) string {
+	if !yes {
+		return s
+	}
+	return tuiYell + s + tuiReset
+}
+
 // stageTail 是链尾 (这条尝试走到的地方): 卡住原因 / 接收中的实时性能 / 结局词。
-// 实时性能平时青色 (tuiLive, 只表示正在收); 这笔至少命中一个低性能阈值 (flow.Slow)
-// 时改黄色警示 (只变色, 不触发锁)。
+// 实时性能平时青色 (tuiLive, 只表示正在收); 这笔命中低吞吐的绝对或相对门槛 (flow.SlowPerf)
+// 时才改黄色警示 (只变色, 不触发锁)。TTFB 与解码时长两类阈值不在这里上色, 分别改
+// 阶段链里 send / recv 那格的耗时 (见 stageTokens)。
 func (m *tuiModel) stageTail(f flow, tr flowTry) []string {
 	var tail []string
 	if tr.Cur >= 0 && isGateDetail(f.Gate) {
@@ -141,7 +151,7 @@ func (m *tuiModel) stageTail(f flow, tr flowTry) []string {
 	if tr.Cur == stageRecv {
 		if s := m.livePerf(f); s != "" {
 			col := tuiLive
-			if f.Slow {
+			if f.SlowPerf {
 				col = tuiYell
 			}
 			tail = append(tail, col+s+tuiReset)

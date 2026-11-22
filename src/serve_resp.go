@@ -103,36 +103,46 @@ func (s *serveState) checkStreamAbort(realModel string, tokens int, bytes int64,
 	hint.Abort, hint.AbortMs, hint.AbortR = true, d, r
 }
 
-// checkLowPerf 判这笔流是否至少命中一个低性能阈值 (只供展示: TUI 把解码性能值改黄,
-// 不触发锁)。四路任一命中即 true:
-//  1. 首字节时延超过高延迟阈值 (lowperf_ttfb_max_ms, 0 = 关闭该项);
-//  2. 实时性能 r* 低于低吞吐的绝对平均门槛 (lowperf_avg_max, 0 = 关闭该项);
-//  3. 实时性能 r* 低于历史平均的 lowperf_rel_max 倍 (历史样本不足不判);
-//  4. 解码时长 (从首字节起算) 超过打断超时 (abort_timeout_sec, 0 = 关闭该项)。
+// lowPerfHits 是一次 checkLowPerf 判定命中的阈值分类: 命中哪一路就只把哪一处上黄
+// (只展示, 不触发锁)。三路相互独立, 可同时命中。
+type lowPerfHits struct {
+	ttfb   bool // 首字节时延超过高延迟阈值 (lowperf_ttfb_max_ms) -> send 耗时黄
+	decode bool // 解码时长超过打断超时 (abort_timeout_sec)          -> recv 耗时黄
+	perf   bool // 实时性能命中低吞吐绝对/相对门槛 (avg/rel)          -> 实时性能数字黄
+}
+
+// checkLowPerf 判这笔流命中哪些低性能阈值 (只供展示: TUI 按命中分类分别把 send 耗时 /
+// recv 耗时 / 实时性能数字上黄, 不触发锁)。三路独立判定:
+//  1. 首字节时延超过高延迟阈值 (lowperf_ttfb_max_ms, 0 = 关闭该项) -> ttfb;
+//  2. 解码时长超过打断超时 (abort_timeout_sec, 0 = 关闭该项)       -> decode;
+//  3. 实时性能 r* 低于低吞吐的绝对平均门槛 (lowperf_avg_max, 0 = 关闭该项)
+//     或低于历史平均的相对门槛 (lowperf_rel_max, 历史样本不足不判)  -> perf。
 //
-// 与 checkStreamAbort 互不依赖: 打断要四条件齐备 (超时 + 绝对 + 相对) 才掐流, 这里
-// 命中任一就标黄, 打断关闭/未超时也能警示。豁免名单内的模型不判 (与低性能锁同口径)。
-func (s *serveState) checkLowPerf(realModel string, tokens int, bytes int64, firstAt time.Time) bool {
+// 与 checkStreamAbort 互不依赖: 打断要四条件齐备才掐流, 这里各路独立命中即分别上黄,
+// 打断关闭/未超时也能警示。豁免名单内的模型不判 (与低性能锁同口径)。
+func (s *serveState) checkLowPerf(realModel string, tokens int, bytes int64, firstAt time.Time) lowPerfHits {
+	var h lowPerfHits
 	if s.aborted {
-		return true // 已经判定要打断: 解码时长与性能早已超限, 收尾前保持黄
+		// 已判定要打断: 解码时长与性能早已超限, 收尾前保持各处上黄。
+		return lowPerfHits{decode: true, perf: true}
 	}
 	g := s.gate
 	if g.lowPerfExempt(realModel) {
-		return false
+		return h // 豁免名单内的模型不判 (与低性能锁同口径)
 	}
 	if g.AbortTimeoutMs > 0 && msCeil(time.Since(firstAt)) > int64(g.AbortTimeoutMs) {
-		return true // 解码时长超过打断超时
+		h.decode = true // 解码时长超过打断超时
 	}
 	if thr := g.lowPerfTtfbMax(); thr > 0 && firstAt.Sub(s.sentAt) > thr {
-		return true // 首字节时延超过高延迟阈值
+		h.ttfb = true // 首字节时延超过高延迟阈值
 	}
 	if tokens <= 0 || bytes <= 0 {
-		return false // 吞吐类门槛要样本齐备才能比
+		return h // 吞吐类门槛要样本齐备才能比
 	}
 	d := msCeil(time.Since(firstAt))
 	r := s.app.perfIndex(s.servedUp.ID, realModel, int64(tokens), d, bytes)
 	if g.LowPerfAvgMax > 0 && r < float64(g.LowPerfAvgMax) {
-		return true // 实时性能低于绝对平均门槛
+		h.perf = true // 实时性能低于绝对平均门槛
 	}
 	c := s.heldCand
 	if c == nil {
@@ -141,11 +151,11 @@ func (s *serveState) checkLowPerf(realModel string, tokens int, bytes int64, fir
 	if c != nil {
 		if n, sum, ok := c.perfHist(realModel); ok && sum > 0 && n > 0 {
 			if r < g.LowPerfRelMax*(sum/float64(n)) {
-				return true // 实时性能低于历史平均的相对门槛
+				h.perf = true // 实时性能低于历史平均的相对门槛
 			}
 		}
 	}
-	return false
+	return h
 }
 
 // applyAbort 处理打断收尾: 给该 上游/模型 打低性能锁 (沿用 addLockLowPerf 形态, 已在该

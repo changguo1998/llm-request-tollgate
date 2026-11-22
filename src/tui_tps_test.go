@@ -56,14 +56,14 @@ func TestFlowCellLiveTps(t *testing.T) {
 	if strings.Count(got, tuiLive) != 1 {
 		t.Errorf("青色只该出现在性能上: %q", got)
 	}
-	// 至少命中一个低性能阈值时, 实时性能改黄 (只变色, 不触发锁)。
+	// 命中低吞吐的绝对/相对门槛 (SlowPerf) 时, 实时性能改黄 (只变色, 不触发锁)。
 	slow := recv
-	slow.Slow = true
+	slow.SlowPerf = true
 	if got := m.stageChain(slow, slow.Tries[0]); !strings.Contains(got, tuiYell+"120.0"+tuiReset) {
-		t.Errorf("命中低性能阈值后实时性能应改黄: %q", got)
+		t.Errorf("命中低吞吐门槛后实时性能应改黄: %q", got)
 	}
 	if got := m.stageChain(slow, slow.Tries[0]); strings.Contains(got, tuiLive+"120.0"+tuiReset) {
-		t.Errorf("命中低性能阈值后不该再是青色: %q", got)
+		t.Errorf("命中低吞吐门槛后不该再是青色: %q", got)
 	}
 	for _, unwanted := range []string{"60.0", " t/s", "KB/s"} { // 只写修正后的性能, 不带单位, 不再写原始/下载
 		if strings.Contains(got, unwanted) {
