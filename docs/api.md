@@ -249,7 +249,9 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 - `active` 每笔: `id` / `logical` / `source` / `path` / `stream` / `start` / `upstream` /
   `backend` / `stage` / `attempt` / `gate`; 接收中的流式请求另带 `recv_tok` (已收到的
   输出 token 估计数)、`recv_bytes` (已转发的响应字节数) 与 `recv_start` (首字节到达时刻,
-  Unix 毫秒), 后三个用来算这笔的实时性能 (r*, 按当前参数表现算; 缺响应字节或缺参数退原始解码速率); `tries` 是这笔请求的每一次尝试 (换候选 / 同候选
+  Unix 毫秒), 后三个用来算这笔的实时性能 (r*, 按当前参数表现算; 缺响应字节或缺参数退原始解码速率);
+  接收中另带 `slow` (展示标记: 至少命中一个低性能阈值 —— TTFB 过长 / 绝对或相对平均过低 /
+  解码时长过长, 任一命中即 true; 只给 TUI 把解码性能值改黄, 不触发低性能锁); `tries` 是这笔请求的每一次尝试 (换候选 / 同候选
   重试就多一段), 每段带 `upstream` / `backend` / `segs` (该段各阶段已结算耗时, 秒, 下标 =
   `stage`) / `cur` (当前阶段, `-1` = 该段已结束) / `cur_at` (当前阶段进入时刻, Unix 毫秒,
   TUI 用它现算正在走的那一格) / `stop` (失败停在哪个阶段) / `fail` (结局词

@@ -147,6 +147,18 @@ func TestFlowLive(t *testing.T) {
 	if f.Stage != stageRecv {
 		t.Errorf("flowLive 不该改阶段, 得到 %d", f.Stage)
 	}
+	if f.Slow {
+		t.Error("flowSlow 没写时 Slow 应为 false")
+	}
+	a.flowSlow(id, true)
+	if f := a.flowActives()[0]; !f.Slow {
+		t.Errorf("flowSlow 应把 Slow 写 true: %+v", f)
+	}
+	a.flowSlow(id, false)
+	if f := a.flowActives()[0]; f.Slow {
+		t.Errorf("flowSlow 应把 Slow 写回 false: %+v", f)
+	}
+	a.flowSlow(9999, true)             // 未知编号: 什么都不做
 	a.flowLive(9999, 1, 1, time.Now()) // 未知编号: 什么都不做
 	a.flowEnd(id)
 	a.flowLive(id, 7, 7, time.Now()) // 已结束: 同样忽略

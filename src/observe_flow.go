@@ -269,6 +269,17 @@ func (a *App) flowLive(id uint64, tokens int, bytes int64, firstAt time.Time) {
 	a.flowMu.Unlock()
 }
 
+// flowSlow 刷新接收中这笔的「至少命中一个低性能阈值」展示标记 (只写展示字段, 不碰
+// 阶段与耗时)。由 relay 的实时回写随 flowLive 一起调用; 代价是每次回写多拿一次流锁,
+// 但一秒几次的粒度完全可以接受。
+func (a *App) flowSlow(id uint64, slow bool) {
+	a.flowMu.Lock()
+	if f := a.flows[id]; f != nil {
+		f.Slow = slow
+	}
+	a.flowMu.Unlock()
+}
+
 // flowObs 把一笔请求的展示状态与事件喂给观测面 (TUI)。只读地看调度器, 不改调度:
 // 它只读 cand 的锁/队列快照, 不做任何等待或记账。
 type flowObs struct {

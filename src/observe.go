@@ -46,6 +46,10 @@ type flow struct {
 	RecvTok   int       `json:"recv_tok,omitempty"`   // 接收中: 已收到的输出 token 数 (流式估算)
 	RecvBytes int64     `json:"recv_bytes,omitempty"` // 接收中: 已转发的响应字节数 (流式)
 	RecvStart int64     `json:"recv_start,omitempty"` // 接收中: 首字节到达时刻 (Unix 毫秒)
+	// Slow 是展示标记: 至少命中了一个低性能阈值 (TTFB 过长 / 绝对或相对平均过低 / 解码
+	// 时长过长), 只给 TUI 把解码性能值改黄色 (警示), 不触发低性能锁 —— 锁仍要窗口内
+	// 所有条件齐备才算。由 relay 实时回写 (serve_resp.go: checkLowPerf)。
+	Slow bool `json:"slow,omitempty"`
 	// Tries 是这笔请求的每一次尝试 (换候选 / 同候选重试就多一段): 第 1 页一段一行。
 	Tries []flowTry `json:"tries,omitempty"`
 

@@ -130,7 +130,9 @@ func (m *tuiModel) stageTokens(f flow, tr flowTry) []string {
 	return toks
 }
 
-// stageTail 是链尾 (这条尝试走到的地方): 卡住原因 / 接收中的实时性能 (青色) / 结局词。
+// stageTail 是链尾 (这条尝试走到的地方): 卡住原因 / 接收中的实时性能 / 结局词。
+// 实时性能平时青色 (tuiLive, 只表示正在收); 这笔至少命中一个低性能阈值 (flow.Slow)
+// 时改黄色警示 (只变色, 不触发锁)。
 func (m *tuiModel) stageTail(f flow, tr flowTry) []string {
 	var tail []string
 	if tr.Cur >= 0 && isGateDetail(f.Gate) {
@@ -138,7 +140,11 @@ func (m *tuiModel) stageTail(f flow, tr flowTry) []string {
 	}
 	if tr.Cur == stageRecv {
 		if s := m.livePerf(f); s != "" {
-			tail = append(tail, tuiLive+s+tuiReset)
+			col := tuiLive
+			if f.Slow {
+				col = tuiYell
+			}
+			tail = append(tail, col+s+tuiReset)
 		}
 	}
 	if tr.Fail != "" {
