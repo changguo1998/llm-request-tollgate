@@ -49,12 +49,12 @@ func TestThemeToggleOnlyInMemory(t *testing.T) {
 	if !strings.Contains(e.message, "+/-") || tuiLightTheme {
 		t.Errorf("= 输入应只提示用 +/- 且不改主题: %q", e.message)
 	}
-	// 按键路径同理: 不开输入框。
+	// 按键路径同理: 不开输入态。
 	e.focus, e.gateSel = 2, gateIdxTheme
 	e.prompt, e.message = nil, ""
 	e.key('=')
 	if e.prompt != nil || !strings.Contains(e.message, "+/-") {
-		t.Errorf("主题行按 = 应直接提示用 +/-, 不开输入框: prompt=%v msg=%q", e.prompt, e.message)
+		t.Errorf("主题行按 = 应直接提示用 +/-, 不开输入态: prompt=%v msg=%q", e.prompt, e.message)
 	}
 
 	// 保存调度参数时不该把主题写进配置。

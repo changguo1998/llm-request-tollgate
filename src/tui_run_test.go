@@ -1,4 +1,4 @@
-// tui_run_test.go: 主循环按键分派的回归 (拆分 handleKey / runTUI 前的特征测试)。
+// tui_run_test.go: 主循环按键分派的守成测试 (拆分 handleKey / runTUI 前的特征测试)。
 
 package main
 

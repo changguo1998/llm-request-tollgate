@@ -1,4 +1,4 @@
-// tui_gate_edit_test.go: settings 页调度参数编辑的回归 (拆分 adjustGate / setGatePrompt 前).
+// tui_gate_edit_test.go: settings 页调度参数编辑的守成测试 (拆分 adjustGate / setGatePrompt 前).
 
 package main
 

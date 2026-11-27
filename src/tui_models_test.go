@@ -1,4 +1,4 @@
-// tui_models_test.go: 第 1 页模型视角的回归 (拆分 modelRows 与绘制前的特征测试)。
+// tui_models_test.go: 第 1 页模型视角的守成测试 (拆分 modelRows 与绘制前的特征测试)。
 
 package main
 

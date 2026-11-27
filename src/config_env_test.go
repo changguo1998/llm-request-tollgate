@@ -1,4 +1,4 @@
-// config_env_test.go: key_env 读取口径的回归 (拆分 loadConfigOpt 前的特征测试)。
+// config_env_test.go: key_env 读取口径的守成测试 (拆分 loadConfigOpt 前的特征测试)。
 
 package main
 

@@ -5,12 +5,14 @@ package main
 import (
 	"strconv"
 	"strings"
+	"time"
 )
 
 // drawSettings 画设置页: 三列并排 —— 第 1 列 全局参数 + 供应商, 第 2 / 3 列是模型
-// 列表的两栏 (按逻辑名分组, 组与组之间用逻辑名隔开, 两栏连续铺排),
-// 底部消息行。各区标题中文, 焦点区用 [ 标题 ] 括起; 标题用 tuiTitle 色。列宽按内容算,
-// 模型两栏平分剩余宽度, 一直顶到终端右边界; 模型列顶到内容区底部 (消息行上方), 不留空白。
+// 列表的两栏 (按逻辑名分组, 组与组之间用逻辑名隔开, 两栏连续铺排), 底部信息区
+// (常驻告警 / 瞬时结果 / 临时输入)。各区标题中文, 焦点区用 [ 标题 ] 括起; 标题用 tuiTitle 色。
+// 列宽按内容算, 模型两栏平分剩余宽度, 一直顶到终端右边界; 模型列顶到内容区底部 (信息区
+// 上方), 不留空白。信息区要占几行已由 draw() 从 body 里扣掉, 没有信息时一行都不占。
 // 供应商与模型列里的 provider 名沿用第 1 页上游表的专属色 (upNameAttr), 选中行反显保留。
 func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 	e := m.prio
@@ -22,15 +24,34 @@ func (m *tuiModel) drawSettings(c *tuiCanvas, body int) {
 	col1 := m.settingsParamsCol(e, body)
 	col2, col3 := m.settingsModelCols(e, body)
 	m.settingsGrid(c, col1, col2, col3, body)
-	c.line(m.prioMessage(e))
+	m.settingsInfo(c, e)
 }
 
-// settingsParamsCol 画第 1 列: 全局参数 + 供应商。供应商高度 = 内容区去掉参数区与
-// 固定留白, 超出的不画; 配置读不到时只显示错误。
+// settingsInfo 画底部信息区, 自上而下位置固定: 常驻告警 (红字, 逐条一行, 不消失) ->
+// 瞬时结果 (10 秒后消失, 同一时刻最多一条, 失败红字 / 说明用前景色) -> 临时输入
+// (模型列表的 / 过滤)。只占文字本身的宽度, 不整行反显, 也不补齐铺满。
+func (m *tuiModel) settingsInfo(c *tuiCanvas, e *tuiEditor) {
+	for _, s := range e.alerts() {
+		c.line(tuiRed + tuiIndent + s + tuiReset)
+	}
+	if text, isErr, ok := e.noticeText(time.Now()); ok {
+		col := ""
+		if isErr {
+			col = tuiRed
+		}
+		c.line(col + tuiIndent + text + tuiReset)
+	}
+	if e.hasBottomPrompt() {
+		c.line(tuiIndent + e.prompt.label + " " + tuiRev + e.prompt.buffer + " " + tuiReset)
+	}
+}
+
+// settingsParamsCol 画第 1 列: 全局参数 + 供应商。供应商高度 = 内容区 (信息区已扣除)
+// 去掉参数区与区间的空行, 超出的不画; 配置读不到时只显示错误。
 func (m *tuiModel) settingsParamsCol(e *tuiEditor, body int) []string {
 	provH := 0
 	if e.usable() {
-		provH = min(len(e.providers), max(1, body-(1+len(gateLabels))-7))
+		provH = min(len(e.providers), max(1, body-(1+len(gateLabels))-6))
 	}
 	col1 := m.settingsGateLines(e, body)
 	col1 = append(col1, "")
@@ -48,7 +69,8 @@ func (m *tuiModel) settingsParamsCol(e *tuiEditor, body int) []string {
 }
 
 // settingsGateLines 画全局参数区: 标签左对齐; 冒号后补齐到固定数字列, 数字右对齐
-// (小数点/最后一位对齐), 单位第一字母对齐; 焦点行反显, 正在输入时换编辑底色。
+// (小数点/最后一位对齐), 单位第一字母对齐; 焦点行反显。按 = 进入原位输入时, 该行只把
+// 数值格换成输入缓冲 (反显当光标), 单位照旧跟在后面, 不再整行换底色。
 func (m *tuiModel) settingsGateLines(e *tuiEditor, body int) []string {
 	col1 := make([]string, 0, body)
 	col1 = append(col1, settingsTitle("全局参数", e.focus == 2))
@@ -68,13 +90,19 @@ func (m *tuiModel) settingsGateLines(e *tuiEditor, body int) []string {
 	for i := range gateLabels {
 		n, u := e.gateNumUnit(i)
 		pad := labelW - tuiWidth(gateCN[i])
-		text := tuiIndent + gateCN[i] + ": " + strings.Repeat(" ", pad) + tuiPadLeft(n, numW) + " " + u
-		if e.focus == 2 && i == e.gateSel {
-			if e.prompt != nil {
-				text = tuiEditBg + text + tuiReset // 正在 = 编辑: 蓝底强调
-			} else {
-				text = tuiRev + text + tuiReset
+		val, w := n, numW
+		if e.editingGate(i) {
+			val = tuiRev + e.prompt.buffer + tuiReset
+			if e.prompt.buffer == "" {
+				val = tuiRev + " " + tuiReset // 空缓冲也要看得见光标
 			}
+			if b := tuiWidth(e.prompt.buffer); b > w {
+				w = b // 输入比原值长时把数字列撑开, 不截断
+			}
+		}
+		text := tuiIndent + gateCN[i] + ": " + strings.Repeat(" ", pad) + tuiPadLeft(val, w) + " " + u
+		if e.focus == 2 && i == e.gateSel && !e.editingGate(i) {
+			text = tuiRev + text + tuiReset
 		}
 		col1 = append(col1, text)
 		// 显示分组: 其他 | 锁时长 | 低性能设置 (含打断超时) | 主题, 区之间空一行
@@ -100,8 +128,8 @@ func (m *tuiModel) settingsProviderLine(e *tuiEditor, i int, name string) string
 }
 
 // settingsModelCols 画第 2 / 3 列: 模型列表按逻辑名分组后横向分两栏, 连续铺排。
-// 模型列独立铺满内容区: 标题 1 行 + 底部消息行 1 行, 其余行全部给模型 (可滚动),
-// 不再被第 1 列的高度公式压短。
+// 模型列独立铺满内容区: 标题 1 行, 其余行全部给模型 (可滚动), 底部信息区的行数
+// 已在 draw() 里扣掉。
 func (m *tuiModel) settingsModelCols(e *tuiEditor, body int) ([]string, []string) {
 	cs := e.cands()
 	rows := e.filtered()
@@ -175,10 +203,11 @@ func settingsLogicalHeader(isGroup bool, logical string) string {
 	return logical
 }
 
-// settingsScrollWindow 按显示行算滚动窗口: 模型列表横向分两栏, 一屏 = 2*window 个
-// 显示行 (左栏 + 右栏), 选中行始终钉在这屏里 (焦点在模型面板时); 返回每栏行数。
+// settingsScrollWindow 按显示行算滚动窗口: body 是已扣除底部信息区的行数,
+// window = max(1, body-1) (模型列标题占 1 行), 两栏合计 2*window 个显示行; 选中行始终
+// 钉在这屏里 (焦点在模型面板时); 返回每栏行数。
 func settingsScrollWindow(e *tuiEditor, nLines, nRows, body, selLine int) int {
-	window := max(1, body-2)
+	window := max(1, body-1) // 标题占 1 行, 其余给模型
 	if nLines > 0 {
 		window = min(window, nLines)
 	}
@@ -221,12 +250,13 @@ func settingsPane(dst []string, lines []settingsLine, from, to int) []string {
 }
 
 // settingsGrid 三列并排 (模型列表占第 2 / 3 两列): 第 1 列按内容宽, 模型两栏平分
-// 剩余宽度, 顶到终端右边界; 内容区不足的行补空, 让三列贴满整个内容高度。
+// 剩余宽度, 顶到终端右边界; 内容区不足的行补空, 让三列贴满整个内容高度 (body 已扣除
+// 底部信息区占的行)。
 func (m *tuiModel) settingsGrid(c *tuiCanvas, col1, col2, col3 []string, body int) {
 	w1 := colWidth(col1)
 	w2 := max(6, (m.cols-2-w1-3)/2)
 	w3 := max(6, m.cols-2-w1-2-w2-1)
-	gridH := max(1, body-1)
+	gridH := max(1, body)
 	for i := 0; i < gridH; i++ {
 		c.line(tuiPad(atSlice(col1, i), w1) + " " + tuiPad(atSlice(col2, i), w2) + " " + tuiPad(atSlice(col3, i), w3))
 	}
@@ -257,29 +287,4 @@ func settingsTitle(text string, focused bool) string {
 		return tuiTitle + "[ " + text + " ]" + tuiReset
 	}
 	return tuiTitle + text + tuiReset
-}
-
-// prioMessage 拼底部消息行 (输入态、未保存提醒、错误都在这一行)。
-func (m *tuiModel) prioMessage(e *tuiEditor) string {
-	text := e.message
-	if e.prompt != nil {
-		text = e.prompt.label + " " + e.prompt.buffer
-	}
-	if e.dirty {
-		text += " [优先级未保存]"
-	}
-	if e.gateDirty {
-		text += " [调度参数未保存]"
-	}
-	if e.gateErr != "" {
-		text += " 配置读不到: " + e.gateErr
-	}
-	if e.err != "" {
-		text += " " + e.err
-	}
-	bg := tuiRev
-	if e.prompt != nil {
-		bg = tuiEditBg // = 编辑输入态: 整行换强调背景色
-	}
-	return bg + tuiPad(tuiIndent+text+" ", m.cols-1) + tuiReset
 }

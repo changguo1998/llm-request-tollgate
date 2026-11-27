@@ -174,7 +174,7 @@ func TestEventRangeOverridesKeep(t *testing.T) {
 	}
 }
 
-// f / t 打开输入框, 回车提交, Esc 取消, c 清除; 其他页不受影响。
+// f / t 打开输入态, 回车提交, Esc 取消, c 清除; 其他页不受影响。
 func TestEventFilterKeys(t *testing.T) {
 	m := newTUIModel("cfg")
 	m.tab = tabEvents
@@ -183,7 +183,7 @@ func TestEventFilterKeys(t *testing.T) {
 	// f: 输入 fail 后回车。
 	m.handleKey('f', &pending)
 	if m.evPrompt == nil {
-		t.Fatal("f 应打开文本筛选输入框")
+		t.Fatal("f 应打开文本筛选输入态")
 	}
 	for _, b := range []byte("fail") {
 		m.handleKey(b, &pending)
@@ -231,7 +231,7 @@ func TestEventFilterKeys(t *testing.T) {
 	m.tab = tabActive
 	m.handleKey('f', &pending)
 	if m.evPrompt != nil {
-		t.Fatal("active 页的 f 不该打开筛选输入框")
+		t.Fatal("active 页的 f 不该打开筛选输入态")
 	}
 }
 

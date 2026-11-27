@@ -1,4 +1,4 @@
-// summary_test.go: -summary / -usage 汇总口径的回归 (拆分 runSummary / runUsage 前).
+// summary_test.go: -summary / -usage 汇总口径的守成测试 (拆分 runSummary / runUsage 前).
 
 package main
 

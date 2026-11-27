@@ -16,8 +16,9 @@ func (m *tuiModel) draw() string {
 		m.cols = 60
 	}
 	c := &tuiCanvas{cols: m.cols}
-	// 版式: 标题 / 实时状态 / 统计状态 / 页签 / 内容 / ... / 反馈 / 键位 (贴底); 反馈行只有
-	// 第 1 页有 (解锁与粘性的结果), 其余页没有反馈行。
+	// 版式: 标题 / 实时状态 / 统计状态 / 页签 / 内容 / (第 1 页的操作反馈行) / (设置页的
+	// 底部信息区, 0 到 N 行) / 键位 (贴底); 反馈行只有第 1 页有 (解锁与粘性的结果),
+	// 信息区只有设置页有, 两者占的行都在 body 里预先扣掉。
 	// 上游状态并进第 1 页正文。上游专属色按上游表的固定顺序分配, 各页同色; 红黄绿的正色
 	// 留给状态, 上游用的是它们的亮色变体。
 	m.upColors = make(map[string]string, len(m.pulse.Cands))
@@ -39,6 +40,13 @@ func (m *tuiModel) draw() string {
 	msg := m.flowMsgLine()
 	if msg != "" {
 		body = max(3, body-1)
+	}
+	// 设置页底部信息区 (常驻告警 + 瞬时结果 + 临时输入) 同样随内容动态占行: 有几行扣
+	// 几行, 没有信息时一行都不占。
+	if m.tab == tabSettings && m.prio != nil {
+		if info := m.prio.infoRows(time.Now()); info > 0 {
+			body = max(3, body-info)
+		}
 	}
 	switch m.tab {
 	case tabActive:
@@ -66,9 +74,10 @@ func (m *tuiModel) draw() string {
 	return "\x1b[H" + c.clip(m.rows)
 }
 
-// bodyRows 是内容区行数: 固定区占 标题 + 实时状态 + 统计状态 + 页签 + 键位 (第 1 页有
-// 操作反馈时再让出一行), 其余全部给内容。布局不用空行做分隔, 屏幕上每一行都是内容、
-// 反馈或键位。
+// bodyRows 是内容区行数上限: 固定区占 标题 + 实时状态 + 统计状态 + 页签 + 键位, 这里
+// 尚未扣第 1 页的操作反馈行与设置页的底部信息区 —— 调用方 draw() 按 flowMsgLine 与
+// infoRows 逐行扣除, 剩下的才是三列表格能用到的行数。布局不用空行做分隔, 屏幕上每一行
+// 都是内容、反馈、信息区或键位。
 func (m *tuiModel) bodyRows() int {
 	if body := m.rows - 3 - m.statusRows; body >= 3 {
 		return body
@@ -118,12 +127,16 @@ func (m *tuiModel) hint() string {
 	}
 	if m.tab == tabSettings {
 		plus := "调值"
+		eqHint := "= 提示" // 权重面板的 = 只提示用 +/-, 不开输入
 		if e := m.prio; e != nil && e.focus == 0 {
 			if p := e.pickAt(e.modelSel); p != nil && p.isGroup {
 				plus = "组内移成员" // 光标在组行上: +/- 是调组成员顺序, 不是调权重
 			}
 		}
-		return "  m/p/g 换面板  j/k 移动  +/- " + plus + "  = 输入  s 保存并生成" +
+		if e := m.prio; e != nil && e.focus == 2 {
+			eqHint = "= 输入" // 全局参数面板: = 在原数值处原位输入
+		}
+		return "  m/p/g 换面板  j/k 移动  +/- " + plus + "  " + eqHint + "  s 保存并生成" +
 			"  h 热加载  q 退出  (" + m.prioHint() + ")"
 	}
 	base := "  1-3 或 Tab 切页   up/down/PgUp/PgDn 滚动   r 重读日志   q 退出"

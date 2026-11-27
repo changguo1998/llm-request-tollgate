@@ -1,4 +1,4 @@
-// tui_flow_test.go: 第 1 页阶段链拼装的回归 (拆分 stageChain 前的特征测试)。
+// tui_flow_test.go: 第 1 页阶段链拼装的守成测试 (拆分 stageChain 前的特征测试)。
 
 package main
 

@@ -235,12 +235,12 @@ func (e *tuiEditor) adjustGate(delta int) {
 	i := e.gateSel
 	if i == gateIdxTheme {
 		setTuiTheme(!tuiLightTheme)
-		e.message = "主题 = " + themeCN() + " (只在内存, 不写配置)"
+		e.notice("主题 = " + themeCN() + " (只在内存, 不写配置)")
 		return
 	}
 	step := gateStep(i)
 	if step == 0 {
-		e.message = "退避序列用 = 按逗号输入"
+		e.notice("退避序列用 = 按逗号输入")
 		return
 	}
 	lo, hi := gateBounds(i)
@@ -258,7 +258,7 @@ func (e *tuiEditor) adjustGate(delta int) {
 		e.gate.LowPerfRelMax = float64(v) / 100
 	}
 	e.gateDirty = true
-	e.message = gateCN[i] + " = " + e.gateText(i)
+	e.notice(gateCN[i] + " = " + e.gateText(i))
 }
 
 // gateBounds 是 +/- 调整时的取值范围 (毫秒 / r* 门槛 / 百分比 / 0-1 开关)。
@@ -298,7 +298,7 @@ func (e *tuiEditor) setGatePrompt(i int, text string) {
 		e.setProbeSwitch(text)
 	case i == gateIdxTheme:
 		// 主题不接受输入: 只有深/浅两态, 用 +/- 翻转就够了。
-		e.message = themeHint
+		e.notice(themeHint)
 	case i == gateIdxRel:
 		e.setRelInput(text)
 	case isSecField(i):
@@ -319,18 +319,18 @@ func (e *tuiEditor) setRetrySeq(text string) {
 		}
 		ms, err := parseSec(p)
 		if err != nil || ms <= 0 {
-			e.message = "退避序列要逗号分隔的正秒数 (可小数)"
+			e.fail("退避序列要逗号分隔的正秒数 (可小数)")
 			return
 		}
 		seq = append(seq, ms)
 	}
 	if len(seq) == 0 {
-		e.message = "退避序列不能为空"
+		e.fail("退避序列不能为空")
 		return
 	}
 	e.gate.RetryBackoffMs = seq
 	e.gateDirty = true
-	e.message = "retry_backoff_sec = " + text
+	e.notice("retry_backoff_sec = " + text)
 }
 
 // setProbeSwitch 解析恢复探测开关。
@@ -341,14 +341,14 @@ func (e *tuiEditor) setProbeSwitch(text string) {
 	case "1", "true", "on", "开":
 		e.probeOn = true
 	default:
-		e.message = "probe_enabled 要用 0/1 / on/off / 开/关"
+		e.fail("probe_enabled 要用 0/1 / on/off / 开/关")
 		return
 	}
 	e.gateDirty = true
 	if e.probeOn {
-		e.message = "probe_enabled = 开"
+		e.notice("probe_enabled = 开")
 	} else {
-		e.message = "probe_enabled = 关"
+		e.notice("probe_enabled = 关")
 	}
 }
 
@@ -356,19 +356,19 @@ func (e *tuiEditor) setProbeSwitch(text string) {
 func (e *tuiEditor) setSecInput(i int, text string) {
 	ms, err := parseSec(text)
 	if err != nil || (ms == 0 && i != gateIdxTtfb && i != gateIdxAbort) {
-		e.message = gateCN[i] + " 要非负秒数 (可小数)"
+		e.fail(gateCN[i] + " 要非负秒数 (可小数)")
 		return
 	}
 	e.setSecField(i, ms)
 	e.gateDirty = true
-	e.message = gateCN[i] + " = " + fsec(ms)
+	e.notice(gateCN[i] + " = " + fsec(ms))
 }
 
 // setRateLimit 解析低吞吐门槛 (正整数, 套在 r* 性能上显示不带单位)。
 func (e *tuiEditor) setRateLimit(i int, text string) {
 	n, err := strconv.Atoi(strings.TrimSpace(text))
 	if err != nil || n < 1 {
-		e.message = gateCN[i] + " 要正整数"
+		e.fail(gateCN[i] + " 要正整数")
 		return
 	}
 	if i == gateIdxPeak {
@@ -377,7 +377,7 @@ func (e *tuiEditor) setRateLimit(i int, text string) {
 		e.gate.LowPerfAvgMax = n
 	}
 	e.gateDirty = true
-	e.message = gateCN[i] + " = " + strconv.Itoa(n)
+	e.notice(gateCN[i] + " = " + strconv.Itoa(n))
 }
 
 // setSecField 把一个时间字段 (毫秒) 写回, i 是 gateLabels 下标 (isSecField 内的那些)。
@@ -412,12 +412,12 @@ func (e *tuiEditor) setSecField(i, ms int) {
 func (e *tuiEditor) setRelInput(text string) {
 	n, err := strconv.Atoi(strings.TrimSpace(text))
 	if err != nil || n < 1 || n > 100 {
-		e.message = gateCN[gateIdxRel] + " 要 1-100 的整数百分比"
+		e.fail(gateCN[gateIdxRel] + " 要 1-100 的整数百分比")
 		return
 	}
 	e.gate.LowPerfRelMax = float64(n) / 100
 	e.gateDirty = true
-	e.message = gateCN[gateIdxRel] + " = " + strconv.Itoa(n) + "%"
+	e.notice(gateCN[gateIdxRel] + " = " + strconv.Itoa(n) + "%")
 }
 
 // marshalConfig 按字典序重排顶层键 (与 store 保存同一格式口径): 2 空格缩进,
@@ -530,7 +530,7 @@ func (m *tuiModel) saveSettings() {
 	}
 	if gateChanged {
 		if err := e.saveGate(); err != nil {
-			e.message = "调度参数保存失败: " + err.Error()
+			e.fail("调度参数保存失败: " + err.Error())
 			return
 		}
 	}

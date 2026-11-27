@@ -1,4 +1,4 @@
-// tui_settingsdraw_test.go: settings 页三列布局与消息行的回归 (拆分绘制的特征测试)。
+// tui_settingsdraw_test.go: settings 页三列布局与底部信息区的守成测试 (拆分绘制的特征测试)。
 
 package main
 
@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 供应商列的高度 = 内容区去掉参数区与固定留白, 超出的供应商不画; 参数行与模型列照常。
@@ -22,6 +23,7 @@ func TestDrawSettingsProviderCap(t *testing.T) {
 	if !e.usable() {
 		t.Fatalf("fixture 应可编辑: %q", e.err)
 	}
+	e.message, e.msgAt = "", time.Time{} // 这条用例直接量网格行数, 先清掉装载时的瞬时说明
 	e.providers = nil
 	for i := 0; i < 10; i++ {
 		e.providers = append(e.providers, "p"+strconv.Itoa(i))
@@ -31,8 +33,8 @@ func TestDrawSettingsProviderCap(t *testing.T) {
 	m.drawSettings(c, body)
 	plain := stripANSI(c.b.String())
 
-	// provH = min(provider 数, 内容区 - 参数区 (标题 + gateLabels 行) - 7)。
-	want := min(10, max(1, body-(1+len(gateLabels))-7))
+	// provH = min(provider 数, 内容区 (信息区已扣除) - 参数区 (标题 + gateLabels 行) - 6)。
+	want := min(10, max(1, body-(1+len(gateLabels))-6))
 	if got := strings.Count(plain, "priority="); got != want {
 		t.Fatalf("供应商行数应为 %d, 得到 %d:\n%s", want, got, plain)
 	}
@@ -63,22 +65,22 @@ func TestDrawSettingsScrollPinsSelection(t *testing.T) {
 	}
 	e.modelSel = 11
 	c := &tuiCanvas{cols: m.cols}
-	m.drawSettings(c, 6) // window = body-2 = 4, 两栏共 8 行
-	if e.vis != 4 {
-		t.Fatalf("每栏应显示 4 行, 得到 %d", e.vis)
+	m.drawSettings(c, 6) // window = body-1 = 5 (标题占 1 行), 两栏共 10 行
+	if e.vis != 5 {
+		t.Fatalf("每栏应显示 5 行, 得到 %d", e.vis)
 	}
 	// 显示行 = 1 个分组标题 + 12 个模型 = 13; 选中第 12 行 (下标 12),
-	// span=8 -> scrollTop = 12-8+1 = 5 (第 5 行 = 模型 m04)。
-	if e.scrollTop != 5 {
-		t.Fatalf("滚动位置应钉住选中行 (5), 得到 %d", e.scrollTop)
+	// span=10 -> scrollTop = 12-10+1 = 3 (第 3 行 = 模型 m02)。
+	if e.scrollTop != 3 {
+		t.Fatalf("滚动位置应钉住选中行 (3), 得到 %d", e.scrollTop)
 	}
 	out := stripANSI(strings.TrimSuffix(c.b.String(), "\r\n"))
-	for _, gone := range []string{"m00", "m01", "m02", "m03"} {
+	for _, gone := range []string{"m00", "m01"} {
 		if strings.Contains(out, "/"+gone) {
 			t.Errorf("已滚出窗口的 %s 不该出现:\n%s", gone, out)
 		}
 	}
-	for i := 4; i < 12; i++ {
+	for i := 2; i < 12; i++ {
 		id := "m0" + strconv.Itoa(i)
 		if i >= 10 {
 			id = "m" + strconv.Itoa(i)
@@ -89,43 +91,133 @@ func TestDrawSettingsScrollPinsSelection(t *testing.T) {
 	}
 }
 
-// 消息行: 输入态替换正文, 未保存标记与错误按顺序追加, 整行铺底并带背景色。
-func TestPrioMessageParts(t *testing.T) {
-	m := newTUIModel("cfg")
-	m.cols = 80
-	e := &tuiEditor{message: "就绪"}
-	got := m.prioMessage(e)
-	if !strings.HasPrefix(got, tuiRev) || !strings.HasSuffix(got, tuiReset) {
-		t.Fatalf("整行应带反显与收尾序列: %q", got)
+// 瞬时结果: 固定 10 秒后消失 (与按键无关), 消失后不再占信息区的行。
+func TestSettingsNoticeExpires(t *testing.T) {
+	e := &tuiEditor{}
+	e.notice("已保存 x")
+	now := time.Now() // 从消息出现的时刻起算
+	if text, isErr, ok := e.noticeText(now); !ok || text != "已保存 x" || isErr {
+		t.Fatalf("瞬时结果应可见且不是失败色: %q %v %v", text, isErr, ok)
 	}
-	if w := tuiWidth(got); w != m.cols-1 {
-		t.Errorf("消息行应补到 %d 列, 得到 %d", m.cols-1, w)
+	if _, _, ok := e.noticeText(now.Add(msgTTL - time.Millisecond)); !ok {
+		t.Errorf("没到点不该消失")
 	}
-	plain := stripANSI(got)
+	if _, _, ok := e.noticeText(now.Add(msgTTL)); ok {
+		t.Errorf("到 %v 应消失", msgTTL)
+	}
+	if n := e.infoRows(now.Add(msgTTL)); n != 0 {
+		t.Errorf("消失后不该占行, 得到 %d", n)
+	}
+	e.fail("保存失败")
+	if text, isErr, ok := e.noticeText(time.Now()); !ok || !isErr || text != "保存失败" {
+		t.Fatalf("失败提示应带红色标记: %q %v %v", text, isErr, ok)
+	}
+}
 
-	e.dirty, e.gateDirty = true, true
-	e.gateErr, e.err = "读不到", "保存失败"
-	got = m.prioMessage(e)
-	plain = stripANSI(got)
-	order := []string{"就绪", "[优先级未保存]", "[调度参数未保存]", "配置读不到: 读不到", "保存失败"}
-	at := 0
-	for _, part := range order {
-		i := strings.Index(plain[at:], part)
-		if i < 0 {
-			t.Fatalf("消息行应依次包含 %q:\n%s", part, plain)
+// 常驻告警: 未保存标记与读不到的错误按固定顺序给出, 不随时间消失。
+func TestSettingsAlertsOrder(t *testing.T) {
+	e := &tuiEditor{dirty: true, gateDirty: true, gateErr: "boom", err: "store 读不到"}
+	want := "[优先级未保存] | [调度参数未保存] | 配置读不到: boom | store 读不到"
+	if got := strings.Join(e.alerts(), " | "); got != want {
+		t.Fatalf("告警顺序不对:\n得到 %q\n期望 %q", got, want)
+	}
+	if n := e.infoRows(time.Now()); n != 4 {
+		t.Errorf("信息区应占 4 行, 得到 %d", n)
+	}
+	e.dirty, e.gateDirty, e.gateErr, e.err = false, false, "", ""
+	if len(e.alerts()) != 0 {
+		t.Errorf("状态解除后不该还有告警: %v", e.alerts())
+	}
+}
+
+// 底部不再有整行反色条: 常驻告警与瞬时结果各占一行, 只到文字宽度, 不铺满,
+// 且没有内容时不占行 (内容区拿到全部行数)。
+func TestSettingsInfoDrawNoBar(t *testing.T) {
+	_, cfg := prioFixture(t)
+	m := newTUIModel(cfg)
+	m.prio = newTuiEditor(cfg)
+	m.tab = tabSettings
+	e := m.prio
+	frame := m.draw()
+	if !strings.Contains(frame, e.message) {
+		t.Fatalf("初始瞬时说明应显示: %q", e.message)
+	}
+	if n := strings.Count(stripANSI(frame), e.message); n != 1 {
+		t.Errorf("初始说明应只出现一次, 得到 %d", n)
+	}
+
+	e.dirty = true
+	e.notice("已保存")
+	frame = m.draw()
+	want := tuiRed + tuiIndent + "[优先级未保存]" + tuiReset
+	if !strings.Contains(frame, want) {
+		t.Fatalf("未保存应是红色常驻告警 %q", want)
+	}
+	for _, line := range strings.Split(frame, "\r\n") {
+		plain := stripANSI(line)
+		if strings.Contains(plain, "[优先级未保存]") || strings.Contains(plain, "已保存") {
+			if tuiWidth(line) >= m.cols {
+				t.Errorf("信息行不该铺满整行: %q", plain)
+			}
+			if strings.HasPrefix(line, tuiRev) {
+				t.Errorf("信息行不该整行反显: %q", plain)
+			}
 		}
-		at += i + len(part)
 	}
 
-	// 输入态: 用 label + buffer 取代 message, 背景换成编辑色, 未保存标记照旧。
-	e.prompt = &tuiPrompt{label: "M", buffer: "3"}
-	got = m.prioMessage(e)
-	if !strings.HasPrefix(got, tuiEditBg) {
-		t.Errorf("输入态应用编辑底色: %q", got)
+	e.dirty, e.message, e.msgAt = false, "", time.Time{}
+	if n := m.prio.infoRows(time.Now()); n != 0 {
+		t.Fatalf("没有信息时不该占行, 得到 %d", n)
 	}
-	plain = stripANSI(got)
-	if !strings.Contains(plain, "M 3") || strings.Contains(plain, "就绪") {
-		t.Errorf("输入态应显示 label+buffer 而不是 message:\n%s", plain)
+}
+
+// 全局参数按 = 原位输入: 缓冲画在该行数值格上 (反显), 不占底部输入行; 回车提交后
+// 标脏并给瞬时结果, Esc 取消不改值。
+func TestSettingsInlineGateEdit(t *testing.T) {
+	_, cfg := prioFixture(t)
+	m := newTUIModel(cfg)
+	m.prio = newTuiEditor(cfg)
+	m.tab = tabSettings
+	e := m.prio
+	e.focus = 2
+	e.gateSel = 0 // interval_sec
+	before := e.gateField(0)
+
+	e.gateKey('=')
+	if e.prompt == nil || !e.prompt.inline || e.inlineSel != 0 {
+		t.Fatalf("= 应开原位输入: prompt=%+v inlineSel=%d", e.prompt, e.inlineSel)
+	}
+	if e.prompt.buffer != fsec(before) {
+		t.Fatalf("缓冲应以当前值为初值, 得到 %q (期望 %q)", e.prompt.buffer, fsec(before))
+	}
+	if e.hasBottomPrompt() {
+		t.Errorf("原位输入不该占底部的临时输入行")
+	}
+	for range e.prompt.buffer {
+		e.promptKey(0x7f)
+	}
+	for _, b := range []byte("1.5") {
+		e.promptKey(b)
+	}
+	if frame := m.draw(); !strings.Contains(frame, tuiRev+"1.5"+tuiReset) {
+		t.Fatalf("输入缓冲应反显在数值格上")
+	}
+	e.promptKey('\r')
+	if e.gate.IntervalMs != 1500 || !e.gateDirty {
+		t.Fatalf("回车应提交并标脏: ms=%d dirty=%v", e.gate.IntervalMs, e.gateDirty)
+	}
+	if e.prompt != nil || e.inlineSel != -1 {
+		t.Errorf("提交后应结束输入: prompt=%+v inlineSel=%d", e.prompt, e.inlineSel)
+	}
+	if !strings.Contains(e.message, gateCN[0]) {
+		t.Errorf("提交后应给瞬时结果: %q", e.message)
+	}
+
+	e.gateSel = 0
+	e.gateKey('=')
+	e.promptKey(0x1b) // Esc 取消
+	if e.prompt != nil || e.gate.IntervalMs != 1500 {
+		t.Fatalf("Esc 应取消且不改值: prompt=%+v ms=%d", e.prompt, e.gate.IntervalMs)
 	}
 }
 

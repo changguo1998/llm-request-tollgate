@@ -1,4 +1,4 @@
-// tui_priority_test.go: settings 页 (调度参数 + 权重编辑) 的回归: 存盘口径、候选顺序与生成器一致、
+// tui_priority_test.go: settings 页 (调度参数 + 权重编辑) 的守成测试: 存盘口径、候选顺序与生成器一致、
 // 键位与未保存守门、渲染不越界。
 package main
 
@@ -168,7 +168,7 @@ func TestPrioCandidateOrder(t *testing.T) {
 		t.Errorf("候选顺序不对:\n得到 %v\n期望 %v", got, want)
 	}
 	if e.candsFor("solo") == nil {
-		t.Errorf("单候选别名也该在预览里")
+		t.Errorf("单候选别名也该有候选链")
 	}
 	if rows := e.filtered(); len(rows) != 4 {
 		t.Errorf("列表应是 4 行 (ustc 2 + group 2, 代理自身的模型不算), 得到 %d", len(rows))
@@ -262,7 +262,7 @@ func TestSettingsHotReloadRefreshesEditor(t *testing.T) {
 	}
 }
 
-// 预览的顺序必须和生成器落进配置的一致 —— 这是当初手写排序最怕漂移的地方,
+// 候选顺序必须和生成器落进配置的一致 —— 这是当初手写排序最怕漂移的地方,
 // 所以直接拿真生成器跑一遍对答案 (没 python3 就跳过)。生成器输出已无顶层 aliases,
 // 逻辑名在 models[].alias 上, 测试用 cfg.rebuildAliases() 重建出候选表再对照。
 func TestPrioOrderMatchesGenerator(t *testing.T) {
@@ -356,7 +356,7 @@ func TestPrioSaveRoundTrip(t *testing.T) {
 	}
 }
 
-// 键位: 调值夹到 0、输入框、provider 面板、未保存守门 (第一次 q 不退出)。
+// 键位: 调值夹到 0、/ 过滤输入、provider 面板、未保存守门 (第一次 q 不退出)。
 func TestPrioKeys(t *testing.T) {
 	_, cfg := prioFixture(t)
 	m := newTUIModel(cfg)
@@ -393,27 +393,25 @@ func TestPrioKeys(t *testing.T) {
 	if got := prioOf(target); got != -1 {
 		t.Fatalf("到 -1 后再按 - 应停在 -1, 得到 %d", got)
 	}
-	// 预览仍显示停用模型, 排最后 (优先级最低)。
+	// 候选顺序里仍含停用模型, 排最后 (优先级最低)。
 	if got := candIDs(m.prio.candsFor("deepseek-v4.1-flash")); strings.Join(got, " ") != "group/deepseek-v4.1-flash ustc/deepseek-flash-2 ustc/deepseek-flash" {
-		t.Fatalf("停用模型应在预览里排最后: %v", got)
+		t.Fatalf("停用模型应在候选顺序里排最后: %v", got)
 	}
 	key('+')
 	if got := prioOf(m.prio.selected().model); got != 0 {
 		t.Fatalf("加一后应为 0, 得到 %d", got)
 	}
 
-	// "=" 输入 12; 退格再补一位, 回车提交。
+	// 模型面板的 = 不再直接输入权重: 只提示用 +/- 调整, 权重不变、不开输入态。
 	key('=')
-	key('1')
-	key('2')
-	key('3')
-	key(0x7f)
-	key('\r')
-	if got := prioOf(m.prio.selected().model); got != 12 {
-		t.Fatalf("输入框提交后应为 12, 得到 %d", got)
-	}
 	if m.prio.prompt != nil {
-		t.Fatalf("提交后输入态应结束")
+		t.Fatalf("模型面板的 = 不该开输入态")
+	}
+	if !strings.Contains(m.prio.message, "+/-") {
+		t.Errorf("模型面板的 = 应提示用 +/- 调整: %q", m.prio.message)
+	}
+	if got := prioOf(m.prio.selected().model); got != 0 {
+		t.Fatalf("模型面板的 = 不该改权重, 得到 %d", got)
 	}
 
 	// "/" 过滤: 只留 group 的行。
@@ -449,7 +447,7 @@ func TestPrioKeys(t *testing.T) {
 }
 
 // 负优先级 (下限 -1) = 停用: adjust / setValue 都钳到 -1, 存盘写进配置的 priority;
-// 该行保持显示 (列表在, 预览排在最后), 重读后仍是停用; provider 优先级不受影响。
+// 该行保持显示 (列表在, 候选顺序里排最后), 重读后仍是停用; provider 优先级不受影响。
 func TestPrioNegativeDisableClampAndVisible(t *testing.T) {
 	store, cfg := prioFixture(t)
 	e := newTuiEditor(cfg)
@@ -463,7 +461,7 @@ func TestPrioNegativeDisableClampAndVisible(t *testing.T) {
 		t.Fatalf("优先级下限应为 -1, 得到 %d", got)
 	}
 	if got := candIDs(e.candsFor("deepseek-v4.1-flash")); strings.Join(got, " ") != "group/deepseek-v4.1-flash ustc/deepseek-flash-2 ustc/deepseek-flash" {
-		t.Fatalf("停用模型应在预览里排最后: %v", got)
+		t.Fatalf("停用模型应在候选顺序里排最后: %v", got)
 	}
 	if rows := e.filtered(); len(rows) != 4 {
 		t.Fatalf("停用后该行仍应显示 (列表 4 行), 得到 %d", len(rows))
@@ -493,7 +491,8 @@ func TestPrioNegativeDisableClampAndVisible(t *testing.T) {
 			t.Fatalf("重读后停用模型应为 -1, 得到 %d", prioOf(r.model))
 		}
 	}
-	// = 直接输入超大负数也钳到 -1, 再输入正数正常调回。
+	// setValue 直接写超大负数也钳到 -1, 再写正数正常调回 (两个面板的 = 已不支持输入数值,
+	// setValue 现在只由测试直接调用)。
 	probe := e2.selected()
 	if probe == nil {
 		t.Fatal("该有选中行")
@@ -510,7 +509,7 @@ func TestPrioNegativeDisableClampAndVisible(t *testing.T) {
 }
 
 // Provider 负优先级 (下限 -1) = 停用整家: 面板仍显示 (可调回), 但它的模型不进候选
-// 预览与模型列表; 调回非负后全部恢复。与生成器同一口径 (见 TestSettingsRegenerateKeepsDisabledProvider)。
+// 顺序与模型列表; 调回非负后全部恢复。与生成器同一口径 (见 TestSettingsRegenerateKeepsDisabledProvider)。
 func TestProviderNegativeDisableAndRestore(t *testing.T) {
 	_, cfg := prioFixture(t)
 	e := newTuiEditor(cfg)
@@ -531,7 +530,7 @@ func TestProviderNegativeDisableAndRestore(t *testing.T) {
 	if got := prioOf(e.provEntry("group")); got != -1 {
 		t.Fatalf("provider 优先级应能到 -1, 得到 %d", got)
 	}
-	// 直接输入超大负数也钳到 -1。
+	// setValue 直接写超大负数也钳到 -1 (面板的 = 不再输入数值, 只测试直接调用)。
 	e.setValue(-999)
 	if got := prioOf(e.provEntry("group")); got != -1 {
 		t.Fatalf("直接输入超大负数应钳到 -1, 得到 %d", got)
@@ -549,7 +548,7 @@ func TestProviderNegativeDisableAndRestore(t *testing.T) {
 	if e.providers[0] != "ustc" {
 		t.Errorf("停用后 group 应排到后面, 得到 %v", e.providers)
 	}
-	// 模型列表与候选预览都不再含 group 的模型。
+	// 模型列表与候选顺序都不再含 group 的模型。
 	for _, row := range e.filtered() {
 		if row.provider == "group" {
 			t.Errorf("停用 provider 的模型不该出现在模型列表: %s/%s", row.provider, modelID(row.model))
@@ -666,7 +665,7 @@ func TestPrioTabScopedKeys(t *testing.T) {
 		t.Fatalf("settings 页的 h 是热加载, 不该切页 (tab=%d)", m.tab)
 	}
 	if !strings.Contains(m.prio.message, "hup 失败") {
-		t.Errorf("hup 失败应写在消息行: %q", m.prio.message)
+		t.Errorf("hup 失败应写进瞬时结果: %q", m.prio.message)
 	}
 	// 状态页: 左右方向键仍是切页 (h/l 让给了行光标), r 仍是重读日志。
 	m.handleKey('1', &pending)
@@ -862,7 +861,7 @@ func TestSettingsModelColumnFillsHeight(t *testing.T) {
 	frame := m.draw()
 	body := m.bodyRows()
 	if got := m.prio.vis; got < body-3 {
-		t.Fatalf("模型列应顶到消息行上方: vis=%d, body=%d (期望 ≈%d)", got, body, body-2)
+		t.Fatalf("模型列应顶到信息区上方: vis=%d, body=%d (期望 ≈%d)", got, body, body-2)
 	}
 	if !strings.Contains(frame, tuiTitle+"g"+tuiReset) {
 		t.Fatalf("模型列表应按逻辑名分组 (缺分组标题 g)")

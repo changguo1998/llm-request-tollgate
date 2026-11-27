@@ -12,7 +12,7 @@ export GOCACHE
 BIN := llm-request-tollgate
 SRC := src
 
-# 版本号: 真源在 src/version.go 的 var version (当前 0.8.1), 常规构建直接编译进去;
+# 版本号: 真源在 src/version.go 的 var version (当前 0.16.0), 常规构建直接编译进去;
 # 需要覆盖 (如发布构建) 时 make VERSION=x build, 经 -ldflags 注入。
 VERSION ?=
 
@@ -23,7 +23,7 @@ help:
 	@echo "  build       编译代理二进制 (产出到根目录 $(BIN))"
 	@echo "  vet         静态检查 (src/ 下 go vet ./...)"
 	@echo "  test        单元与端到端测试 (src/ 下 go test ./...)"
-	@echo "  selftest    全量自测 (假上游, 16 组用例, 见 test/run_selftest.sh)"
+	@echo "  selftest    全量自测 (假上游, 17 组用例, 见 test/run_selftest.sh)"
 	@echo "  healthcheck 自检 (二进制/配置/端口; key_env 密钥请先 export)"
 	@echo "  install     安装 systemd 用户服务 (需先有 deploy/tollgate.service)"
 	@echo "  fmt         gofmt 检查 (gofmt -l src)"

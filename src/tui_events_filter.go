@@ -314,7 +314,7 @@ func (m *tuiModel) setEvRange(v string) {
 	m.scroll[tabEvents] = 0
 }
 
-// evPromptKey 把一个字节喂给第 2 页的输入框。
+// evPromptKey 把一个字节喂给第 2 页的行内输入态。
 func (m *tuiModel) evPromptKey(b byte) {
 	if feedPrompt(m.evPrompt, b) {
 		m.evPrompt = nil

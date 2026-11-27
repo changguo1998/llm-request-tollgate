@@ -283,7 +283,7 @@ data: {"error":{"message":"upstream stream ended unexpectedly","type":"upstream_
 { "version": "1fc741d" }
 ```
 
-- `version`: 语义化版本号 (当前 `0.11.0`), 定义在 `src/version.go` 的 `var version`,
+- `version`: 语义化版本号 (当前 `0.16.0`), 定义在 `src/version.go` 的 `var version`,
   随代码变更递增 (规则见根目录 AGENTS.md); 常规构建直接用源码里的版本,
   发布构建可用 `make VERSION=x build` 覆盖注入, 都不经 make 时回退为二进制嵌入的
   git 提交号, 都拿不到写 `dev`.

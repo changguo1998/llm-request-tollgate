@@ -150,7 +150,7 @@ func TestTUIWidthAndTrunc(t *testing.T) {
 	if got := tuiTrunc(tuiRed+"宽宽宽宽"+tuiReset, 4); !strings.HasSuffix(got, tuiReset) {
 		t.Errorf("截断带颜色的单元格时要补重置序列, 得到 %q", got)
 	}
-	// 行总宽不超过画布: 这是"中文不再挤歪表"的回归点。
+	// 行总宽不超过画布: 这是"中文不再挤歪表"的守成点。
 	// 修饰符用允许集内的 4 (下划线), 不用 1 (加粗)。
 	c := &tuiCanvas{cols: 20}
 	c.line("\x1b[4m" + strings.Repeat("宽", 30) + "\x1b[0m")

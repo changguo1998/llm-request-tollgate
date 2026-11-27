@@ -1,9 +1,9 @@
 // tui_settings.go: settings 页的编辑器模型与存盘。
 //
-// 左栏是 provider 面板 + 模型列表 (别名 -> 候选), 右栏是所选别名的候选顺序实时预览:
-// 候选顺序 = 模型优先级降序 -> provider 优先级降序 -> 上游顺序 -> 模型 id, 与配置生成器
-// (scripts/gen_tollgate_config.py 的 build_aliases) 同一口径, 所以 s 保存时自动重生成
-// 配置, 预览里看到的就是落进配置的顺序。
+// 版式 = 三列并排 (第 1 列 全局参数 + 供应商, 第 2 / 3 列 模型列表两栏) + 底部信息区
+// (常驻告警 / 瞬时结果 / 临时输入)。候选顺序 = 模型优先级降序 -> provider 优先级降序 ->
+// 上游顺序 -> 模型 id, 与配置生成器 (scripts/gen_tollgate_config.py 的 build_aliases)
+// 同一口径, 所以 s 保存时自动重生成配置, 模型列表里看到的组内行序就是落进配置的顺序。
 //
 // 权重 (priority / alias / billing) 在 config.local.json 的 upstreams /
 // upstreams[].models 上; store (llm-models.json) 只提供模型列表与模型参数。编辑器装载
@@ -47,7 +47,7 @@ type tuiPrioRow struct {
 	entry    map[string]any
 }
 
-// tuiPrioCand 是候选顺序预览里的一项。
+// tuiPrioCand 是候选顺序计算里的一项 (预览栏已移除, 现在只供守成测试与生成器口径比对)。
 type tuiPrioCand struct {
 	provider  string
 	modelID   string
@@ -60,14 +60,16 @@ type tuiAlias struct {
 	cands []tuiPrioCand
 }
 
-// tuiPrompt 是 "=" / "/" 的行内输入态。
+// tuiPrompt 是 "=" / "/" 的行内输入态。inline 为真时缓冲画在配置项原处
+// (全局参数的数值格), 否则作为一行临时输入画在设置页底部信息区。
 type tuiPrompt struct {
 	label  string
 	buffer string
+	inline bool
 	commit func(string)
 }
 
-// feedPrompt 把一个字节喂给行内输入框; 返回 true = 输入结束 (回车已提交 / Esc 取消)。
+// feedPrompt 把一个字节喂给行内输入态; 返回 true = 输入结束 (回车已提交 / Esc 取消)。
 // 调用方负责清掉自己持有的 prompt (提交回调里可能还要读 buffer)。settings 页与第 2 页
 // 的筛选共用这一套输入规则。
 func feedPrompt(p *tuiPrompt, b byte) bool {
@@ -87,7 +89,8 @@ func feedPrompt(p *tuiPrompt, b byte) bool {
 	return false
 }
 
-// tuiEditor 是 settings 页的全部状态: 权重 (priority, 写配置文件) + 调度参数 (gate, 写配置文件)。
+// tuiEditor 是 settings 页的全部状态: 权重 (priority, 写配置文件) + 调度参数 (gate,
+// 写配置文件) + 只在本进程内存里的瞬时结果、常驻告警与原位输入态。
 type tuiEditor struct {
 	path   string // store: llm-models.json (模型列表 + 模型参数来源)
 	config string // 代理配置: 权重的存处, 也是重生成的目标
@@ -112,8 +115,11 @@ type tuiEditor struct {
 	groupCands    []tuiCand
 	groupCandsMod time.Time
 	filter        string
-	message       string
+	message       string    // 瞬时结果 (操作说明 / 失败提示), 到 msgAt+msgTTL 自动消失
+	msgAt         time.Time // 该条结果出现的时刻 (零值 = 不过期, 兼容直接赋值的老调用方)
+	msgErr        bool      // 瞬时结果是失败 (红字) 而不是说明
 	prompt        *tuiPrompt
+	inlineSel     int // 正在原位输入的全局参数下标 (= 打开时置位, 结束归 -1)
 	err           string
 
 	gate      GateCfg // 配置文件里的调度参数 (显示用 normGate 补齐后的值)
@@ -123,6 +129,76 @@ type tuiEditor struct {
 
 	// 锁恢复探测开关 (配置扁平顶层键, 本项目也用 gate 列表编辑)。
 	probeOn bool
+}
+
+// msgTTL 是瞬时结果的停留时长 (从出现时刻起算): 到点后设置页不再画它, 主循环每秒
+// 一拍重绘, 所以实际多留不到 1 秒。
+const msgTTL = 10 * time.Second
+
+// notice 记一条瞬时结果 (普通前景色的操作说明), 固定 msgTTL 后消失。
+func (e *tuiEditor) notice(text string) {
+	e.message, e.msgAt, e.msgErr = text, time.Now(), false
+}
+
+// fail 记一条瞬时失败提示 (红字), 同样 msgTTL 后消失; 需要一直挂着的异常交给 alerts,
+// 不写在这里。
+func (e *tuiEditor) fail(text string) {
+	e.message, e.msgAt, e.msgErr = text, time.Now(), true
+}
+
+// noticeText 取还没到期的瞬时结果 (text, isErr, ok); 到期或没内容时 ok=false。
+// msgAt 为零值视为不过期: 直接给 message 赋值的老路径与测试仍能显示。
+func (e *tuiEditor) noticeText(now time.Time) (string, bool, bool) {
+	if e.message == "" {
+		return "", false, false
+	}
+	if !e.msgAt.IsZero() && now.Sub(e.msgAt) >= msgTTL {
+		return "", false, false
+	}
+	return e.message, e.msgErr, true
+}
+
+// alerts 是常驻告警 (红字, 不消失, 直到状态解除): 按固定顺序给出, 行序自上而下 =
+// 未保存标记在前、读不到的错误在后。这些都是状态推导出来的, 不需要在改动时写入。
+func (e *tuiEditor) alerts() []string {
+	var out []string
+	if e.dirty {
+		out = append(out, "[优先级未保存]")
+	}
+	if e.gateDirty {
+		out = append(out, "[调度参数未保存]")
+	}
+	if e.gateErr != "" {
+		out = append(out, "配置读不到: "+e.gateErr)
+	}
+	if e.err != "" {
+		out = append(out, e.err)
+	}
+	return out
+}
+
+// hasBottomPrompt 报告是否有要画在信息区底部的临时输入: 全局参数的 = 走原位输入,
+// 只有模型列表的 / 过滤这类不在配置项上的输入才占这一行。
+func (e *tuiEditor) hasBottomPrompt() bool {
+	return e.prompt != nil && !e.prompt.inline
+}
+
+// editingGate 报告第 i 个全局参数是否正在原位输入 (= 打开的输入, 缓冲画在数值格上)。
+func (e *tuiEditor) editingGate(i int) bool {
+	return e.prompt != nil && e.prompt.inline && e.inlineSel == i
+}
+
+// infoRows 是设置页底部信息区要占的行数: 常驻告警逐条一行 + 瞬时结果一行 + 临时输入
+// 一行 (后两者有才占), 绘制前由调用方从内容区里扣掉, 没内容时一行都不占。
+func (e *tuiEditor) infoRows(now time.Time) int {
+	n := len(e.alerts())
+	if _, _, ok := e.noticeText(now); ok {
+		n++
+	}
+	if e.hasBottomPrompt() {
+		n++
+	}
+	return n
 }
 
 // storePathFor 定位模型列表: 先看配置实文件所在目录 (config.local.json 软链到
@@ -136,14 +212,14 @@ func newTuiEditor(cfgPath string) *tuiEditor {
 	e.loadGate()
 	if err := e.load(); err != nil {
 		e.err = "store 读不到: " + err.Error()
-		e.message = e.err
+		e.fail(e.err)
 		return e
 	}
 	if e.cfg == nil {
-		e.message = e.err
+		e.fail(e.err)
 		return e
 	}
-	e.message = e.path + " | " + strconv.Itoa(len(e.providers)) + " 个 provider"
+	e.notice(e.path + " | " + strconv.Itoa(len(e.providers)) + " 个 provider")
 	return e
 }
 

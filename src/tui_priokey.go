@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -19,17 +18,17 @@ func (e *tuiEditor) saveWeights() {
 		return
 	}
 	if err := e.save(); err != nil {
-		e.message = "保存失败: " + err.Error()
+		e.fail("保存失败: " + err.Error())
 		return
 	}
 	e.dirty = false
-	e.message = "已保存 " + e.config
+	e.notice("已保存 " + e.config)
 }
 
-// regenerate 先把权重写回配置, 再跑生成器 (生成器读 store 的模型列表 + 配置里的权重, 不先存就白跑); 失败返回 error, 原因也写进 message。
+// regenerate 先把权重写回配置, 再跑生成器 (生成器读 store 的模型列表 + 配置里的权重, 不先存就白跑); 失败返回 error, 原因也写进瞬时结果 (e.fail, 红字)。
 func (e *tuiEditor) regenerate() error {
 	if !e.usable() {
-		e.message = "store 或配置读不到, 无法生成配置"
+		e.fail("store 或配置读不到, 无法生成配置")
 		return fmt.Errorf("editor unavailable")
 	}
 	e.saveWeights()
@@ -46,10 +45,10 @@ func (e *tuiEditor) regenerate() error {
 	cmd.Dir = e.root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		e.message = "生成失败: " + lastLine(string(out), err.Error())
+		e.fail("生成失败: " + lastLine(string(out), err.Error()))
 		return err
 	}
-	e.message = "已重新生成配置 " + e.config
+	e.notice("已重新生成配置 " + e.config)
 	return nil
 }
 
@@ -74,7 +73,7 @@ func (m *tuiModel) prioHup() {
 	}
 	if m.reloadFn != nil {
 		if err := m.reloadFn(); err != nil {
-			e.message = "热加载失败: " + err.Error()
+			e.fail("热加载失败: " + err.Error())
 			return
 		}
 		m.prioReloadPending.Store(false) // reloadFn 里已置位, 这里直接同步刷新
@@ -82,21 +81,21 @@ func (m *tuiModel) prioHup() {
 		if st := e.reloadFromDisk(); st != "" {
 			msg += ", " + st
 		}
-		e.message = msg
+		e.notice(msg)
 		return
 	}
 	cmd := exec.Command(filepath.Join(e.root, "deploy", "tollgate.sh"), "hup")
 	cmd.Dir = e.root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		e.message = "hup 失败: " + lastLine(string(out), err.Error())
+		e.fail("hup 失败: " + lastLine(string(out), err.Error()))
 		return
 	}
 	msg := "已 hup, 代理生效"
 	if st := e.reloadFromDisk(); st != "" {
 		msg += ", " + st
 	}
-	e.message = msg
+	e.notice(msg)
 }
 
 // key 处理 settings 页的一个按键; 返回 true = 请求退出 (未保存时先问一次)。
@@ -111,7 +110,7 @@ func (e *tuiEditor) key(b byte) (quit bool, handled bool) {
 	case 'q', 0x03, 0x04:
 		// 有未保存改动先问一次; 再按一次 q 就是确认放弃。
 		if (e.dirty || e.gateDirty) && !e.asked {
-			e.message = "有未保存改动: 再按 q 放弃退出, 或按 s 保存"
+			e.notice("有未保存改动: 再按 q 放弃退出, 或按 s 保存")
 			e.asked = true
 			return false, true
 		}
@@ -132,7 +131,7 @@ func (e *tuiEditor) key(b byte) (quit bool, handled bool) {
 	return false, e.panelKey(b)
 }
 
-// gateKey 是调度参数面板的导航与编辑键 (= 打开行内输入)。
+// gateKey 是调度参数面板的导航与编辑键 (= 在原数值处原位输入)。
 func (e *tuiEditor) gateKey(b byte) bool {
 	switch b {
 	case 'j':
@@ -149,11 +148,14 @@ func (e *tuiEditor) gateKey(b byte) bool {
 		e.adjust(-1)
 	case '=':
 		i := e.gateSel
-		if i == gateIdxTheme { // 主题只有两态: 不开输入框, 直接提示用 +/-
-			e.message = themeHint
+		if i == gateIdxTheme { // 主题只有两态: 不开输入态, 直接提示用 +/-
+			e.notice(themeHint)
 			return true
 		}
-		e.prompt = &tuiPrompt{label: "新的 " + gateCN[i] + ":", commit: func(v string) {
+		num, _ := e.gateNumUnit(i) // 以当前值作初值, 回车不改就是原值
+		e.inlineSel = i
+		e.prompt = &tuiPrompt{inline: true, buffer: num, commit: func(v string) {
+			e.inlineSel = -1
 			e.setGatePrompt(i, v)
 		}}
 	default:
@@ -162,7 +164,8 @@ func (e *tuiEditor) gateKey(b byte) bool {
 	return true
 }
 
-// panelKey 是模型 / provider 面板的导航与编辑键 (/ 过滤, = 改优先级)。
+// panelKey 是模型 / provider 面板的导航与编辑键 (/ 过滤; 权重只用 +/- 调整,
+// 不支持直接输入数值)。
 func (e *tuiEditor) panelKey(b byte) bool {
 	switch b {
 	case 'j':
@@ -178,11 +181,7 @@ func (e *tuiEditor) panelKey(b byte) bool {
 	case '-':
 		e.adjust(-1)
 	case '=':
-		e.prompt = &tuiPrompt{label: "新的优先级数值:", commit: func(v string) {
-			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
-				e.setValue(n)
-			}
-		}}
+		e.notice("优先级用 +/- 调整, 本面板不支持直接输入")
 	case '/':
 		e.prompt = &tuiPrompt{label: "过滤 (空 = 清除):", commit: func(v string) {
 			e.filter = v
@@ -196,9 +195,11 @@ func (e *tuiEditor) panelKey(b byte) bool {
 }
 
 // promptKey 行内输入: 可打印字符进缓冲, 退格删, 回车提交, Esc / Ctrl-C 取消。
+// 结束时 (提交或取消) 一并清掉原位输入的标记。
 func (e *tuiEditor) promptKey(b byte) bool {
 	if feedPrompt(e.prompt, b) {
 		e.prompt = nil
+		e.inlineSel = -1
 	}
 	return false
 }

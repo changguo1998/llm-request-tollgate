@@ -255,7 +255,7 @@ func (e *tuiEditor) moveGroupMember(gname, member string, delta int) {
 	e.groupCands = nil // 组内顺序变了: 缓存作废, 下次 cands() 按内存重建
 	e.dirty = true
 	e.asked = false
-	e.message = "组 " + gname + ": " + member + " 移到第 " + strconv.Itoa(to+1) + " 位"
+	e.notice("组 " + gname + ": " + member + " 移到第 " + strconv.Itoa(to+1) + " 位")
 	if i := e.groupRow(gname, member); i >= 0 {
 		e.modelSel = i
 	}
@@ -302,7 +302,7 @@ func (e *tuiEditor) adjust(delta int) {
 		name := e.providers[clampInt(e.provSel, 0, len(e.providers)-1)]
 		entry := e.provEntry(name)
 		setPrio(entry, prioOf(entry)+delta)
-		e.message = name + ": provider 优先级 = " + strconv.Itoa(prioOf(entry))
+		e.notice(name + ": provider 优先级 = " + strconv.Itoa(prioOf(entry)))
 		e.sortProviders()
 	} else {
 		if p := e.pickAt(e.modelSel); p != nil && p.isGroup {
@@ -315,7 +315,7 @@ func (e *tuiEditor) adjust(delta int) {
 		}
 		e.prevKey = row.provider + "/" + modelID(row.model)
 		setPrio(row.model, prioOf(row.model)+delta)
-		e.message = row.provider + "/" + modelID(row.model) + ": 模型优先级 = " + strconv.Itoa(prioOf(row.model))
+		e.notice(row.provider + "/" + modelID(row.model) + ": 模型优先级 = " + strconv.Itoa(prioOf(row.model)))
 	}
 	e.markDirty()
 }
@@ -330,7 +330,7 @@ func (e *tuiEditor) setValue(v int) {
 		}
 		entry := e.provEntry(e.providers[clampInt(e.provSel, 0, len(e.providers)-1)])
 		setPrio(entry, v)
-		e.message = "provider 优先级 = " + strconv.Itoa(prioOf(entry))
+		e.notice("provider 优先级 = " + strconv.Itoa(prioOf(entry)))
 		e.sortProviders()
 	} else {
 		row := e.selected()
@@ -339,7 +339,7 @@ func (e *tuiEditor) setValue(v int) {
 		}
 		e.prevKey = row.provider + "/" + modelID(row.model)
 		setPrio(row.model, v)
-		e.message = row.provider + "/" + modelID(row.model) + ": 模型优先级 = " + strconv.Itoa(prioOf(row.model))
+		e.notice(row.provider + "/" + modelID(row.model) + ": 模型优先级 = " + strconv.Itoa(prioOf(row.model)))
 	}
 	e.markDirty()
 }

@@ -127,7 +127,7 @@ func resetDur(text string, now time.Time) (time.Duration, bool) {
 	return 0, false
 }
 
-// clampResetDur 把倒计时按上下限收口; 收完还在范围内就返回它, 否则无效 (0)。
+// clampResetDur 把倒计时按上下限收尾; 收完还在范围内就返回它, 否则无效 (0)。
 func clampResetDur(d time.Duration) time.Duration {
 	if d < minLockDur || d > maxLockDur {
 		return 0
