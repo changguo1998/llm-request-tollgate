@@ -319,27 +319,3 @@ func (e *tuiEditor) adjust(delta int) {
 	}
 	e.markDirty()
 }
-
-func (e *tuiEditor) setValue(v int) {
-	if !e.usable() {
-		return
-	}
-	if e.focus == 1 {
-		if len(e.providers) == 0 {
-			return
-		}
-		entry := e.provEntry(e.providers[clampInt(e.provSel, 0, len(e.providers)-1)])
-		setPrio(entry, v)
-		e.notice("provider 优先级 = " + strconv.Itoa(prioOf(entry)))
-		e.sortProviders()
-	} else {
-		row := e.selected()
-		if row == nil {
-			return
-		}
-		e.prevKey = row.provider + "/" + modelID(row.model)
-		setPrio(row.model, v)
-		e.notice(row.provider + "/" + modelID(row.model) + ": 模型优先级 = " + strconv.Itoa(prioOf(row.model)))
-	}
-	e.markDirty()
-}

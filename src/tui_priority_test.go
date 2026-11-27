@@ -446,7 +446,7 @@ func TestPrioKeys(t *testing.T) {
 	}
 }
 
-// 负优先级 (下限 -1) = 停用: adjust / setValue 都钳到 -1, 存盘写进配置的 priority;
+// 负优先级 (下限 -1) = 停用: adjust 钳到 -1 (钳位在 setPrio), 存盘写进配置的 priority;
 // 该行保持显示 (列表在, 候选顺序里排最后), 重读后仍是停用; provider 优先级不受影响。
 func TestPrioNegativeDisableClampAndVisible(t *testing.T) {
 	store, cfg := prioFixture(t)
@@ -491,20 +491,33 @@ func TestPrioNegativeDisableClampAndVisible(t *testing.T) {
 			t.Fatalf("重读后停用模型应为 -1, 得到 %d", prioOf(r.model))
 		}
 	}
-	// setValue 直接写超大负数也钳到 -1, 再写正数正常调回 (两个面板的 = 已不支持输入数值,
-	// setValue 现在只由测试直接调用)。
+	// 从停用往上调回: 加号走 setPrio 同一条路, 再减仍停在 -1。
 	probe := e2.selected()
 	if probe == nil {
 		t.Fatal("该有选中行")
 	}
 	probeModel := probe.model
-	e2.setValue(-999)
+	e2.adjust(-1)
 	if got := prioOf(probeModel); got != -1 {
-		t.Fatalf("直接输入超大负数应钳到 -1, 得到 %d", got)
+		t.Fatalf("已在 -1 再减应仍停在 -1, 得到 %d", got)
 	}
-	e2.setValue(3)
+	e2.adjust(4) // -1 -> 3
 	if got := prioOf(probeModel); got != 3 {
 		t.Fatalf("3 应能正常写入 (从停用调回), 得到 %d", got)
+	}
+}
+
+// setPrio 的钳位: -1 是停用下限, 更小的值一律钳到 -1; 非负值原样写入。
+// 两个面板都已不支持直接输入数值, 钳位是 adjust 唯一会走到的路径。
+func TestSetPrioClampsAtMinusOne(t *testing.T) {
+	m := map[string]any{}
+	setPrio(m, -999)
+	if got := prioOf(m); got != -1 {
+		t.Fatalf("低于 -1 应钳到 -1, 得到 %d", got)
+	}
+	setPrio(m, 7)
+	if got := prioOf(m); got != 7 {
+		t.Fatalf("非负值应原样写入, 得到 %d", got)
 	}
 }
 
@@ -526,14 +539,14 @@ func TestProviderNegativeDisableAndRestore(t *testing.T) {
 			e.provSel = i
 		}
 	}
-	e.setValue(-1)
+	e.adjust(-10) // 3 -> 钳到 -1
 	if got := prioOf(e.provEntry("group")); got != -1 {
 		t.Fatalf("provider 优先级应能到 -1, 得到 %d", got)
 	}
-	// setValue 直接写超大负数也钳到 -1 (面板的 = 不再输入数值, 只测试直接调用)。
-	e.setValue(-999)
+	// 已经在 -1 时再减仍停在 -1 (钳位在 setPrio)。
+	e.adjust(-1)
 	if got := prioOf(e.provEntry("group")); got != -1 {
-		t.Fatalf("直接输入超大负数应钳到 -1, 得到 %d", got)
+		t.Fatalf("已在 -1 再减应仍停在 -1, 得到 %d", got)
 	}
 	// 面板里仍在 (可调回), 按优先级降序排到后面。
 	stillThere := false
@@ -561,7 +574,7 @@ func TestProviderNegativeDisableAndRestore(t *testing.T) {
 		t.Errorf("group 被停用后 solo 别名不该再有候选")
 	}
 	// 调回 3: 模型与候选全部恢复。
-	e.setValue(3)
+	e.adjust(4) // -1 -> 3
 	if got := prioOf(e.provEntry("group")); got != 3 {
 		t.Fatalf("调回后应为 3, 得到 %d", got)
 	}
@@ -1372,7 +1385,9 @@ func TestProviderSortByPriority(t *testing.T) {
 			e.provSel = i
 		}
 	}
-	e.setValue(9)
+	for i := 0; i < 9; i++ {
+		e.adjust(1) // ustc 0 -> 9 (权重只用 + 调)
+	}
 	if got := strings.Join(e.providers, ","); got != "ustc,group" {
 		t.Fatalf("改完优先级应重排, 得到 %q", got)
 	}

@@ -12,7 +12,7 @@ export GOCACHE
 BIN := llm-request-tollgate
 SRC := src
 
-# 版本号: 真源在 src/version.go 的 var version (当前 0.16.0), 常规构建直接编译进去;
+# 版本号: 真源在 src/version.go 的 var version (当前 0.16.1), 常规构建直接编译进去;
 # 需要覆盖 (如发布构建) 时 make VERSION=x build, 经 -ldflags 注入。
 VERSION ?=
 
