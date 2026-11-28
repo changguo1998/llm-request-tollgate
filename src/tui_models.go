@@ -237,16 +237,14 @@ func (m *tuiModel) modelRouteLines(rows []*modelRow) []modelLine {
 	lines := make([]modelLine, 0, len(rows)+4)
 	prev := ""
 	now := time.Now()
-	// 「最近」格的高亮与置 0: groupBest 是每个逻辑名组内最近一次服务的时刻 (Last 最大),
-	// 那行的「最近」格上绿; inflight 是当前有进行中请求在走的 (逻辑名/上游/模型) 键,
-	// 命中行值固定写 0s (最近一次还没结束), 同样上绿 (拼装见下方 age)。
+	// 「最近」格的高亮: groupBest 是每个逻辑名组内最近一次完成的请求的时刻 (Last 最大),
+	// 那行的「最近」格上绿; 进行中的请求不影响本表 (值按上一次已结束的请求算)。
 	groupBest := map[string]time.Time{}
 	for _, r := range rows {
 		if !r.Last.IsZero() && r.Last.After(groupBest[r.logical]) {
 			groupBest[r.logical] = r.Last
 		}
 	}
-	inflight := m.inflightModels()
 	for i, r := range rows {
 		// 队列的锁都画在队列表里: 退避 = 黄 (等待), 锁按原因分色 —— 熔断锁 = 红 (错误),
 		// 低性能锁 = 黄 (慢到降级, 与退避同为等待/降级一类, 但分属不同列)。
@@ -277,10 +275,7 @@ func (m *tuiModel) modelRouteLines(rows []*modelRow) []modelLine {
 		if r.Last.IsZero() {
 			age, token, ttfb, perf = neverUsedTime, "", "", ""
 		} else if r.Last.Equal(groupBest[r.logical]) {
-			hot = true // 组内最近一次服务的上游: 「最近」格上绿
-		}
-		if inflight[r.logical+"\x00"+r.up+"\x00"+r.model] {
-			age, hot = durStr(0), true // 进行中: 最近一次还没结束, 固定为 0, 同样上绿
+			hot = true // 组内最近一次完成的请求用的上游: 「最近」格上绿
 		}
 		if hot {
 			age = tuiGreen + age + tuiReset
@@ -296,20 +291,6 @@ func (m *tuiModel) modelRouteLines(rows []*modelRow) []modelLine {
 		lines = append(lines, modelLine{logical: r.logical, up: r.up, model: r.model, marker: marker, cells: cells})
 	}
 	return lines
-}
-
-// inflightModels 返回当前有进行中请求正在走的 (逻辑名/上游/模型) 键: 取每笔进行中请求
-// 的当前候选 (flow.Up/Model, 排队/退避阶段也算; 已换走的旧候选不算)。模型表用它把命中
-// 行的「最近」固定为 0 (见 modelRouteLines)。
-func (m *tuiModel) inflightModels() map[string]bool {
-	out := make(map[string]bool, len(m.pulse.Active))
-	for _, f := range m.pulse.Active {
-		if f.Up == "" || f.Model == "" {
-			continue // 还没落到候选 (parse 阶段): 没有对应的 上游/模型
-		}
-		out[f.Logical+"\x00"+f.Up+"\x00"+f.Model] = true
-	}
-	return out
 }
 
 // modelGroupHeader 是模型表的分组标题: 逻辑名 (专属色) + 有粘性偏好时的剩余倒计时

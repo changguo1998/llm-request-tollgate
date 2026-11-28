@@ -219,7 +219,7 @@ func TestDrawModelsRouteCells(t *testing.T) {
 	}
 }
 
-// 「最近」格: 组内最近一次服务的上游上绿; 有进行中请求的行值固定 0s, 同样上绿。
+// 「最近」格: 组内最近一次完成的请求用的上游上绿; 进行中的请求不影响本表 (不改值不上绿)。
 func TestModelsLastCellHighlight(t *testing.T) {
 	now := time.Now()
 	m := newTUIModel("cfg")
@@ -238,33 +238,37 @@ func TestModelsLastCellHighlight(t *testing.T) {
 	c := &tuiCanvas{cols: m.cols}
 	m.drawModelsBody(c)
 
-	// 组内最近一次是 ark/m2 (Last 最晚): 它的「最近」格上绿; ustc/m1 不是, 不上绿。
+	// 组内最近一次完成的是 ark/m2 (Last 最晚): 它的「最近」格上绿; ustc/m1 不是, 不上绿。
 	recent := tuiGreen + mages(now.Add(-2*time.Minute)) + tuiReset
 	stale := tuiGreen + mages(now.Add(-10*time.Minute)) + tuiReset
 	if !strings.Contains(c.b.String(), recent) {
-		t.Errorf("最近一次服务的上游的「最近」格应上绿 %q:\n%s", recent, stripANSI(c.b.String()))
+		t.Errorf("最近一次完成的请求用的上游的「最近」格应上绿 %q:\n%s", recent, stripANSI(c.b.String()))
 	}
 	if strings.Contains(c.b.String(), stale) {
 		t.Errorf("非最近一次的行不该上绿: %q", stale)
 	}
+	// ustc/m1 的「最近」按上一次已结束请求算真实时长, 不画假数据。
+	if !strings.Contains(c.b.String(), mages(now.Add(-10*time.Minute))) {
+		t.Errorf("「最近」应显示上一次已结束请求的时长:\n%s", stripANSI(c.b.String()))
+	}
 
-	// ustc/m1 上有一笔进行中请求 (不是组内最近): 「最近」固定 0s 且上绿。
-	m.pulse.Active = []flow{{Logical: "a", Up: "ustc", Model: "m1"}}
-	c = &tuiCanvas{cols: m.cols}
-	m.drawModelsBody(c)
-	zero := tuiGreen + "0s" + tuiReset
-	if !strings.Contains(c.b.String(), zero) {
-		t.Errorf("进行中请求所在行「最近」应固定 0s 且上绿 %q:\n%s", zero, stripANSI(c.b.String()))
-	}
-	if !strings.Contains(c.b.String(), recent) {
-		t.Errorf("组内最近一次的行仍应上绿 %q", recent)
-	}
-	// 进行中请求还没落到候选 (parse 阶段, Up 空): 不命中任何行, 「最近」照旧。
-	m.pulse.Active = []flow{{Logical: "a", Stage: stageParse}}
-	c = &tuiCanvas{cols: m.cols}
-	m.drawModelsBody(c)
-	if strings.Contains(c.b.String(), zero) {
-		t.Errorf("候选未知的进行中请求不该把「最近」置 0")
+	// 进行中请求 (已落到候选 / 还在 parse 阶段) 都不影响路由表: 值与颜色都不变。
+	for _, f := range []flow{
+		{Logical: "a", Up: "ustc", Model: "m1"},
+		{Logical: "a", Stage: stageParse},
+	} {
+		m.pulse.Active = []flow{f}
+		c = &tuiCanvas{cols: m.cols}
+		m.drawModelsBody(c)
+		if !strings.Contains(c.b.String(), recent) {
+			t.Errorf("组内最近一次完成的行应上绿 %q:\n%s", recent, stripANSI(c.b.String()))
+		}
+		if strings.Contains(c.b.String(), stale) {
+			t.Errorf("进行中请求不该让非最近的行上绿: %q", stale)
+		}
+		if strings.Contains(c.b.String(), tuiGreen+"0s"+tuiReset) {
+			t.Errorf("进行中请求不该把「最近」置 0")
+		}
 	}
 }
 

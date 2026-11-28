@@ -9,11 +9,11 @@ import (
 // version 是构建版本号 (语义化版本, 规则见根目录 AGENTS.md): 提交时同步递增。
 // 发布构建可用 -ldflags "-X main.version=…" 覆盖;
 // 没注入时 (默认编译 / go test) 直接用这里, 兜底才读二进制嵌入的 git 提交。
-var version = "0.16.1"
+var version = "0.16.2"
 
 // buildVersion 组装对外展示的版本串:
 //   - 编译期注入了非 dev 版本: 直接用注入值;
-//   - 否则用编译进去的版本常量 (var version, 常规构建即 "0.16.1");
+//   - 否则用编译进去的版本常量 (var version, 常规构建即 "0.16.2");
 //   - 以上都没有 (version 留空被清掉等极端情况): 回退嵌入的 git 提交,
 //     构建时工作树有未提交改动 (vcs.modified=true) 时追加 "-dirty";
 //   - 都拿不到 (非 git 构建): 返回 dev。
